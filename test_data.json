@@ -1,7 +1,7 @@
 {
   "_readme": "Medisum multi-doctor integration test config. Replace every REPLACE_WITH_* value before running test.py.",
 
-  "django_base_url": "https://medsum.amritaai.org",
+  "django_base_url": "https://test-medsum.amritaai.org",
   "flask_base_url":  "https://test-medsum.amritaai.org/transcribe",
 
   "hospital_id": 28,
