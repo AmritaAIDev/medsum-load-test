@@ -314,7 +314,7 @@ HTML = r"""<!DOCTYPE html>
         </div>
         <div class="field">
           <label>Django Base URL</label>
-          <input id="cfg-django" type="text" value="https://medsum.amritaai.org">
+          <input id="cfg-django" type="text" value="https://test-medsum.amritaai.org">
         </div>
         <div class="field">
           <label>Flask Transcribe URL</label>
