@@ -1,0 +1,148 @@
+{
+  "_readme": "Medisum multi-doctor integration test config. Replace every REPLACE_WITH_* value before running test.py.",
+
+  "django_base_url": "https://medsum.amritaai.org",
+  "flask_base_url":  "https://test-medsum.amritaai.org/transcribe",
+
+  "hospital_id": 28,
+
+  "defaults": {
+    "_comment": "Applied to every audio_file entry that does not override these fields.",
+    "language":    "en",
+    "llm":         "OpenAI",
+    "template_id": "1",
+    "duration_seconds": 2.0,
+    "template": {
+      "subjective": {
+        "chief_complaint": "",
+        "history_of_present_illness": "",
+        "past_medical_history": "",
+        "medications": "",
+        "allergies": "",
+        "social_history": "",
+        "family_history": ""
+      },
+      "objective": {
+        "vitals": {
+          "blood_pressure": "",
+          "heart_rate": "",
+          "respiratory_rate": "",
+          "temperature": ""
+        },
+        "physical_exam": { "heart": [] }
+      },
+      "assessment": [],
+      "plan": {
+        "medications": [
+          {
+            "drug_name": "",
+            "dose": "",
+            "schedule": "",
+            "duration": "",
+            "instructions": "",
+            "snomed_ct_id": ""
+          }
+        ],
+        "activity": "",
+        "investigations": "",
+        "education": "",
+        "follow_up": ""
+      },
+      "summary": ""
+    }
+  },
+
+  "doctors": [
+    {
+      "phone_number":      "7894561230",
+      "password":          "amma1008",
+      "doctor_name":       "Dr Abhishek Kumar",
+      "doctor_department": "Dermatology",
+      "hospital_name":     "Test Hospital -2",
+
+      "patients": [
+        {
+          "patient_id":   60,
+          "patient_name": "nikita",
+          "age":          "25",
+          "gender":       "Female",
+
+          "audio_files": [
+            {
+              "label":            "nikita-recording-1",
+              "file_path":        "C:\\Users\\abhis\\AndroidStudioProjects\\medisum_be\\medisum\\testing\\audios\\nikita_hi.wav",
+              "_file_path_note":  "null = silent WAV generated in memory. Set to an absolute path like C:/audio/nikita1.wav to use a real file.",
+              "language":         "hi",
+              "duration_seconds": 20.0,
+              "template_id":      "1",
+              "llm":              "OpenAI"
+            },
+            {
+              "label":            "nikita-recording-2",
+              "file_path":        "C:\\Users\\abhis\\AndroidStudioProjects\\medisum_be\\medisum\\testing\\audios\\nikita_en.wav",
+              "_file_path_note":  "english audio with duration of 14 seconds",
+              "language":         "en",
+              "duration_seconds": 14.0,
+              "template_id":      "1",
+              "llm":              "OpenAI"
+            }
+          ]
+        }
+        
+      ]
+    },
+
+    {
+      "phone_number":      "REPLACE_WITH_DOCTOR2_PHONE",
+      "password":          "REPLACE_WITH_DOCTOR2_PASSWORD",
+      "doctor_name":       "Dr. Nandini Gautam",
+      "doctor_department": "Cardiology",
+      "hospital_name":     "Amrita Hospital Faridabad",
+
+      "patients": [
+        {
+          "patient_id":   56,
+          "patient_name": "dhoni",
+          "age":          "26",
+          "gender":       "Male",
+
+          "audio_files": [
+            {
+              "label":            "dhoni-recording-1",
+              "file_path":        null,
+              "language":         "en",
+              "duration_seconds": 2.0,
+              "template_id":      "1",
+              "llm":              "OpenAI"
+            }
+          ]
+        },
+        {
+          "patient_id":   57,
+          "patient_name": "sachin",
+          "age":          "28",
+          "gender":       "Male",
+
+          "audio_files": [
+            {
+              "label":            "sachin-recording-1",
+              "file_path":        null,
+              "language":         "en",
+              "duration_seconds": 2.0,
+              "template_id":      "1",
+              "llm":              "OpenAI"
+            },
+            {
+              "label":            "sachin-recording-2",
+              "file_path":        null,
+              "language":         "en",
+              "duration_seconds": 2.0,
+              "template_id":      "1",
+              "llm":              "OpenAI"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
