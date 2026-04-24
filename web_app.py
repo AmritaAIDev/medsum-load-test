@@ -18,6 +18,11 @@ from flask import Flask, Response, request, stream_with_context
 
 app = Flask(__name__)
 
+# ── Change these two lines to point to a different environment ────────────────
+DJANGO_BASE_URL = "https://medsum.amritaai.org"
+FLASK_BASE_URL  = "https://test-medsum.amritaai.org/transcribe"
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Templates
 # ─────────────────────────────────────────────────────────────────────────────
@@ -295,6 +300,21 @@ HTML = r"""<!DOCTYPE html>
           <select id="cfg-llm">
             <option value="OpenAI">OpenAI</option>
             <option value="Gemma">Gemma</option>
+            <option value="Param">Param</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>STT Model</label>
+          <select id="cfg-stt-model">
+            <option value="Bhasini">Bhasini</option>
+            <option value="Bharatgen">Bharatgen</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Translate Model</label>
+          <select id="cfg-translate-model">
+            <option value="Bhasini">Bhasini</option>
+            <option value="Bharatgen">Bharatgen</option>
           </select>
         </div>
         <div class="field">
@@ -314,11 +334,11 @@ HTML = r"""<!DOCTYPE html>
         </div>
         <div class="field">
           <label>Django Base URL</label>
-          <input id="cfg-django" type="text" value="https://test-medsum.amritaai.org">
+          <input id="cfg-django" type="text" value="__DJANGO_BASE_URL__">
         </div>
         <div class="field">
           <label>Flask Transcribe URL</label>
-          <input id="cfg-flask" type="text" value="https://test-medsum.amritaai.org/transcribe">
+          <input id="cfg-flask" type="text" value="__FLASK_BASE_URL__">
         </div>
       </div>
     </div>
@@ -677,6 +697,8 @@ document.getElementById('run-btn').addEventListener('click', async () => {
   audioFiles.forEach((f, i) => fd.append(`audio_${i}`, f, f.name));
   fd.append('language',      document.getElementById('cfg-language').value);
   fd.append('llm',           document.getElementById('cfg-llm').value);
+  fd.append('stt_model',     document.getElementById('cfg-stt-model').value);
+  fd.append('translate_model', document.getElementById('cfg-translate-model').value);
   fd.append('template_type', document.getElementById('cfg-template-type').value);
   fd.append('template_id',   document.getElementById('cfg-template-id').value);
   fd.append('duration',      document.getElementById('cfg-duration').value);
@@ -860,11 +882,13 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
     if not flask_url.endswith("/transcribe"):
         flask_url += "/transcribe"
 
-    language    = cfg["language"]
-    llm         = cfg["llm"]
-    template_id = cfg["template_id"]
-    template    = SOAP_TEMPLATE if cfg["template_type"] == "soap" else DISCHARGE_TEMPLATE
-    duration    = float(cfg["duration"])
+    language        = cfg["language"]
+    llm             = cfg["llm"]
+    stt_model       = cfg["stt_model"]
+    translate_model = cfg["translate_model"]
+    template_id     = cfg["template_id"]
+    template        = SOAP_TEMPLATE if cfg["template_type"] == "soap" else DISCHARGE_TEMPLATE
+    duration        = float(cfg["duration"])
 
     # Own session per patient thread — not shared with other threads
     sess = requests.Session()
@@ -923,6 +947,8 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
                 "template_id":       template_id,
                 "language":          language,
                 "llm":               llm,
+                "stt_model":         stt_model,
+                "translate_model":   translate_model,
             }, timeout=180)
             if r5.status_code != 200:
                 raise RuntimeError(f"transcribe {r5.status_code}: {r5.text[:200]}")
@@ -1036,7 +1062,9 @@ def _run_doctor(doctor_idx, doctor_cfg, audios, cfg, q):
 
 @app.route("/")
 def index():
-    return HTML
+    return (HTML
+            .replace("__DJANGO_BASE_URL__", DJANGO_BASE_URL)
+            .replace("__FLASK_BASE_URL__",  FLASK_BASE_URL))
 
 
 @app.route("/run", methods=["POST"])
@@ -1054,10 +1082,12 @@ def run():
         duration = 2.0
 
     cfg = {
-        "django_url":    request.form.get("django_url",    "https://medsum.amritaai.org"),
-        "flask_url":     request.form.get("flask_url",     "https://test-medsum.amritaai.org/transcribe"),
+        "django_url":    request.form.get("django_url",    DJANGO_BASE_URL),
+        "flask_url":     request.form.get("flask_url",     FLASK_BASE_URL),
         "language":      request.form.get("language",      "en"),
         "llm":           request.form.get("llm",           "OpenAI"),
+        "stt_model":     request.form.get("stt_model",     "Bhasini"),
+        "translate_model": request.form.get("translate_model", "Bhasini"),
         "template_type": request.form.get("template_type", "soap"),
         "template_id":   request.form.get("template_id",   "1"),
         "duration":      duration,
