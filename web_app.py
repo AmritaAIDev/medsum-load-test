@@ -9,14 +9,21 @@ import io
 import json
 import queue
 import threading
+import time
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 import requests
-from flask import Flask, Response, request, stream_with_context
+from flask import Flask, Response, request, stream_with_context, send_file
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
 
 app = Flask(__name__)
+
+# Global storage for test results (for export)
+test_results = []
 
 # ── Change these two lines to point to a different environment ────────────────
 DJANGO_BASE_URL = "https://medsum.amritaai.org"
@@ -362,6 +369,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="spinner-sm" id="run-spinner" style="display:none;"></div>
     </button>
     <button class="btn btn-secondary" id="new-test-btn" style="display:none;">↺ New Test</button>
+    <button class="btn btn-primary" id="export-btn" style="display:none;">⬇ Export to Excel</button>
     <div class="progress-wrap" id="run-progress-wrap" style="display:none;flex:1;min-width:80px;">
       <div class="progress-bar" id="run-bar" style="width:0%"></div>
     </div>
@@ -421,6 +429,7 @@ let doctorCount = 0;
 let audioFiles  = [];   // Array of File objects
 let matrix      = [];   // [{rowId, doctorIdx, phone, patientId, audioName, audioIdx}]
 let runStats    = { total: 0, passed: 0, failed: 0 };
+let testResults = [];   // [{doctor_id, patient_id, audio_id, ...timings}]
 
 // ── Doctor cards ─────────────────────────────────────────────────────────────
 function addDoctor() {
@@ -650,9 +659,11 @@ document.getElementById('preview-btn').addEventListener('click', () => {
   document.getElementById('run-btn').disabled = false;
   document.getElementById('back-btn').style.display = 'inline-flex';
   document.getElementById('new-test-btn').style.display = 'none';
+  document.getElementById('export-btn').style.display = 'none';
   document.getElementById('run-progress-wrap').style.display = 'none';
   document.getElementById('run-counter').style.display = 'none';
   document.getElementById('header-progress').style.display = 'none';
+  testResults = [];
 
   showScreen('s-run');
 });
@@ -662,6 +673,37 @@ document.getElementById('back-btn').addEventListener('click', () => showScreen('
 document.getElementById('new-test-btn').addEventListener('click', () => {
   logsDot.classList.remove('active');
   showScreen('s-input');
+});
+
+// ── Export button ──────────────────────────────────────────────────────────────
+document.getElementById('export-btn').addEventListener('click', async () => {
+  if (testResults.length === 0) {
+    alert('No test results to export.');
+    return;
+  }
+  try {
+    const response = await fetch('/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ results: testResults })
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `medsum-results-${new Date().toISOString().split('T')[0]}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    appendLog('✓ Excel file exported successfully');
+  } catch (err) {
+    appendLog(`✗ Export failed: ${err.message}`);
+    alert(`Export failed: ${err.message}`);
+  }
 });
 
 // ── Screen switch ─────────────────────────────────────────────────────────────
@@ -739,6 +781,7 @@ document.getElementById('run-btn').addEventListener('click', async () => {
   runSpinner.style.display = 'none';
   document.getElementById('run-btn-text').textContent = 'Run Again';
   document.getElementById('new-test-btn').style.display = 'inline-flex';
+  document.getElementById('export-btn').style.display = 'inline-flex';
   logsDot.classList.remove('active');
 });
 
@@ -771,6 +814,11 @@ function updateRow(evt) {
     if (detCell) {
       const timeStr = evt.total_time ? `${evt.total_time}s` : '';
       detCell.innerHTML = `${timeStr ? `<span style="color:var(--muted);font-size:11px;">${timeStr}</span> ` : ''}<button class="view-btn" onclick="toggleExpand('${evt.row_id}')">View ▾</button>`;
+    }
+
+    // Store result for export
+    if (evt.timing_data) {
+      testResults.push(evt.timing_data);
     }
 
     // Insert expandable sub-row after this row
@@ -869,7 +917,7 @@ def _extract_summary(body: dict) -> str:
 
 def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
                  doctor_name, department, hospital,
-                 audios, cfg, q):
+                 audios, cfg, q, doctor_times=None):
     """
     Runs all audios for one patient sequentially (step 4→5→6 must be in order).
     Each call gets its own requests.Session — safe to run in parallel with other patients.
@@ -888,7 +936,7 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
     translate_model = cfg["translate_model"]
     template_id     = cfg["template_id"]
     template        = SOAP_TEMPLATE if cfg["template_type"] == "soap" else DISCHARGE_TEMPLATE
-    duration        = float(cfg["duration"])
+    audio_duration  = float(cfg["duration"])
 
     # Own session per patient thread — not shared with other threads
     sess = requests.Session()
@@ -896,6 +944,8 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
 
     # Fetch patient details
     patient_name = age = gender = ""
+    start_time = time.time()
+    patient_data_time = 0
     try:
         rpt = sess.get(f"{django}/api/patient-data/{patient_id}/", timeout=15)
         if rpt.status_code == 200:
@@ -903,11 +953,14 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
             patient_name = pd.get("patient_name", "")
             age          = str(pd.get("age", ""))
             gender       = pd.get("gender", "")
-            log(f"  [Dr {doctor_idx+1}|Pt {patient_id}] {patient_name} | age={age} | gender={gender}")
+            patient_data_time = time.time() - start_time
+            log(f"  [Dr {doctor_idx+1}|Pt {patient_id}] Patient data OK: {patient_name} | age={age} | gender={gender}  time={patient_data_time:.2f}s")
         else:
-            log(f"  [Dr {doctor_idx+1}|Pt {patient_id}] WARN: patient-data returned {rpt.status_code}")
+            patient_data_time = time.time() - start_time
+            log(f"  [Dr {doctor_idx+1}|Pt {patient_id}] WARN: patient-data returned {rpt.status_code}  time={patient_data_time:.2f}s")
     except Exception as e:
-        log(f"  [Dr {doctor_idx+1}|Pt {patient_id}] WARN: {e}")
+        patient_data_time = time.time() - start_time
+        log(f"  [Dr {doctor_idx+1}|Pt {patient_id}] WARN: {e}  time={patient_data_time:.2f}s")
 
     # Audios are sequential per patient (upload → transcribe → store must be in order)
     for audio_idx, (audio_name, audio_bytes) in enumerate(audios):
@@ -919,9 +972,10 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
             # Step 4 — upload
             client_sid = str(uuid.uuid4())
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4] Uploading...")
+            start_time = time.time()
             r4 = sess.post(f"{django}/api/audio-data/",
                 data={"user_id": str(doctor_id), "patient_id": str(patient_id),
-                      "language": language, "file_duration": str(duration), "session_id": client_sid},
+                      "language": language, "file_duration": str(audio_duration), "session_id": client_sid},
                 files={"audio": (audio_name, audio_bytes, "audio/wav")}, timeout=30)
             if r4.status_code != 201:
                 raise RuntimeError(f"audio-data {r4.status_code}: {r4.text[:200]}")
@@ -930,10 +984,12 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
                 raise RuntimeError(f"audio_id missing: {b4}")
             audio_id   = b4["audio_id"]
             session_id = b4.get("session_id") or client_sid
-            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4 OK] audio_id={audio_id}")
+            step4_time = time.time() - start_time
+            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4 OK] audio_id={audio_id}  time={step4_time:.2f}s")
 
             # Step 5 — transcribe
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 5] Transcribing ({language}/{llm})...")
+            start_time = time.time()
             r5 = requests.post(flask_url, json={
                 "audio_base64":      base64.b64encode(audio_bytes).decode(),
                 "doctor_name":       doctor_name,
@@ -956,10 +1012,12 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
             total_time    = b5.get("total-time")
             transcription = b5.get("transcription", "")
             summary_text  = _extract_summary(b5)
-            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 5 OK] total-time={total_time}s")
+            step5_time = time.time() - start_time
+            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 5 OK] total-time={total_time}s  step-time={step5_time:.2f}s")
 
             # Step 6 — store summary
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 6] Storing summary...")
+            start_time = time.time()
             r6 = sess.post(f"{django}/api/summary-data/", json={
                 "user_id": doctor_id, "patient_id": int(patient_id),
                 "audio_id": audio_id, "session_id": session_id,
@@ -971,12 +1029,31 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
             if r6.status_code != 201:
                 raise RuntimeError(f"summary-data {r6.status_code}: {r6.text[:200]}")
             summary_id = r6.json().get("summary_id")
-            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 6 OK] summary_id={summary_id}")
+            step6_time = time.time() - start_time
+            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 6 OK] summary_id={summary_id}  time={step6_time:.2f}s")
+
+            # Collect timing data for export
+            timing_data = {
+                "doctor_id": doctor_id,
+                "patient_id": patient_id,
+                "audio_id": audio_id,
+                "summary_id": summary_id,
+                "audio_duration": audio_duration,
+            }
+            if doctor_times:
+                timing_data.update(doctor_times)
+            timing_data.update({
+                "patient_data_time": round(patient_data_time, 2),
+                "step4_time": round(step4_time, 2),
+                "step5_time": round(step5_time, 2),
+                "step6_time": round(step6_time, 2),
+            })
 
             row(row_id, status="pass", audio_id=audio_id, summary_id=summary_id,
                 total_time=round(total_time, 1) if total_time else None,
                 transcription=transcription,
-                summary=summary_text)
+                summary=summary_text,
+                timing_data=timing_data)
 
         except Exception as e:
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [FAIL] {e}")
@@ -1000,6 +1077,8 @@ def _run_doctor(doctor_idx, doctor_cfg, audios, cfg, q):
 
     # ── Step 1: Login (sequential — need token before anything else) ──────────
     log(f"  [Dr {doctor_idx+1}] [Step 1] Login  phone={phone}")
+    start_time = time.time()
+    step1_time = 0
     try:
         r = requests.post(f"{django}/api/login/",
                           json={"phone_number": phone, "password": password}, timeout=30)
@@ -1013,7 +1092,8 @@ def _run_doctor(doctor_idx, doctor_cfg, audios, cfg, q):
         body      = r.json()
         doctor_id = body["user"]["id"]
         token     = body["access"]
-        log(f"  [Dr {doctor_idx+1}] [Step 1 OK] doctor_id={doctor_id}  free_minutes={body['user'].get('free_minutes')}")
+        step1_time = time.time() - start_time
+        log(f"  [Dr {doctor_idx+1}] [Step 1 OK] doctor_id={doctor_id}  free_minutes={body['user'].get('free_minutes')}  time={step1_time:.2f}s")
     except Exception as e:
         for pid in patient_ids:
             for ai in range(len(audios)):
@@ -1022,6 +1102,8 @@ def _run_doctor(doctor_idx, doctor_cfg, audios, cfg, q):
 
     # ── Step 1b: Doctor profile (sequential — shared across all patients) ─────
     doctor_name = department = hospital = ""
+    start_time = time.time()
+    step1b_time = 0
     try:
         rp = requests.get(f"{django}/api/user/update/{doctor_id}/",
                           headers={"Authorization": f"Bearer {token}"}, timeout=15)
@@ -1030,11 +1112,20 @@ def _run_doctor(doctor_idx, doctor_cfg, audios, cfg, q):
             doctor_name = f"Dr {prof.get('firstname','')} {prof.get('lastname','')}".strip()
             department  = prof.get("department", "")
             hospital    = prof.get("hospital_name", "")
-            log(f"  [Dr {doctor_idx+1}] [Step 1b OK] {doctor_name} | {department} | {hospital}")
+            step1b_time = time.time() - start_time
+            log(f"  [Dr {doctor_idx+1}] [Step 1b OK] {doctor_name} | {department} | {hospital}  time={step1b_time:.2f}s")
         else:
-            log(f"  [Dr {doctor_idx+1}] [Step 1b WARN] profile {rp.status_code} — using empty strings")
+            step1b_time = time.time() - start_time
+            log(f"  [Dr {doctor_idx+1}] [Step 1b WARN] profile {rp.status_code} — using empty strings  time={step1b_time:.2f}s")
     except Exception as e:
-        log(f"  [Dr {doctor_idx+1}] [Step 1b WARN] {e}")
+        step1b_time = time.time() - start_time
+        log(f"  [Dr {doctor_idx+1}] [Step 1b WARN] {e}  time={step1b_time:.2f}s")
+
+    # Prepare doctor times for passing to patient threads
+    doctor_times = {
+        "step1_time": round(step1_time, 2),
+        "step1b_time": round(step1b_time, 2),
+    }
 
     # ── Patients: all run in parallel, each with its own session ──────────────
     log(f"  [Dr {doctor_idx+1}] Launching {len(patient_ids)} patient thread(s) in parallel...")
@@ -1044,7 +1135,7 @@ def _run_doctor(doctor_idx, doctor_cfg, audios, cfg, q):
                 _run_patient,
                 doctor_idx, pid, doctor_id, token,
                 doctor_name, department, hospital,
-                audios, cfg, q
+                audios, cfg, q, doctor_times
             ): pid
             for pid in patient_ids
         }
@@ -1154,6 +1245,90 @@ def run():
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.route("/export", methods=["POST"])
+def export():
+    try:
+        data = request.get_json()
+        results = data.get("results", [])
+        
+        if not results:
+            return {"error": "No results to export"}, 400
+        
+        # Create a new workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Test Results"
+        
+        # Define headers with all step timings
+        headers = [
+            "Doctor ID",
+            "Patient ID",
+            "Audio ID",
+            "Summary ID",
+            "Audio Duration (s)",
+            "Step 1 Time (s)",
+            "Step 1b Time (s)",
+            "Patient Data Time (s)",
+            "Step 4 Time (s)",
+            "Step 5 Time (s)",
+            "Step 6 Time (s)"
+        ]
+        
+        # Style the header row
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        
+        # Add headers
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.value = header
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        
+        # Add data rows
+        for row_idx, result in enumerate(results, 2):
+            ws.cell(row=row_idx, column=1).value = result.get("doctor_id")
+            ws.cell(row=row_idx, column=2).value = result.get("patient_id")
+            ws.cell(row=row_idx, column=3).value = result.get("audio_id")
+            ws.cell(row=row_idx, column=4).value = result.get("summary_id")
+            ws.cell(row=row_idx, column=5).value = result.get("audio_duration")
+            ws.cell(row=row_idx, column=6).value = result.get("step1_time")
+            ws.cell(row=row_idx, column=7).value = result.get("step1b_time")
+            ws.cell(row=row_idx, column=8).value = result.get("patient_data_time")
+            ws.cell(row=row_idx, column=9).value = result.get("step4_time")
+            ws.cell(row=row_idx, column=10).value = result.get("step5_time")
+            ws.cell(row=row_idx, column=11).value = result.get("step6_time")
+        
+        # Adjust column widths
+        ws.column_dimensions['A'].width = 12
+        ws.column_dimensions['B'].width = 12
+        ws.column_dimensions['C'].width = 12
+        ws.column_dimensions['D'].width = 12
+        ws.column_dimensions['E'].width = 18
+        ws.column_dimensions['F'].width = 16
+        ws.column_dimensions['G'].width = 16
+        ws.column_dimensions['H'].width = 20
+        ws.column_dimensions['I'].width = 16
+        ws.column_dimensions['J'].width = 16
+        ws.column_dimensions['K'].width = 16
+        
+        # Save to bytes
+        excel_buffer = io.BytesIO()
+        wb.save(excel_buffer)
+        excel_buffer.seek(0)
+        
+        return send_file(
+            excel_buffer,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=f"medsum-results-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
+        )
+    
+    except Exception as e:
+        return {"error": str(e)}, 500
 
 
 if __name__ == "__main__":
