@@ -8,6 +8,7 @@ import base64
 import io
 import json
 import queue
+import re
 import threading
 import time
 import uuid
@@ -145,18 +146,6 @@ HTML = r"""<!DOCTYPE html>
   .tag-input { border: none; outline: none; background: transparent; font-size: 12px; color: var(--text); min-width: 80px; flex: 1; padding: 2px 0; }
   .tag-hint { font-size: 11px; color: #aaa; margin-top: 3px; }
 
-  /* Audio upload */
-  .upload-zone { border: 2px dashed var(--border); border-radius: 8px; padding: 28px; text-align: center; cursor: pointer; transition: border-color .2s, background .2s; position: relative; }
-  .upload-zone:hover, .upload-zone.drag { border-color: var(--accent); background: #eff6ff; }
-  .upload-zone input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
-  .upload-zone .icon { font-size: 28px; margin-bottom: 6px; }
-  .upload-zone p { color: var(--muted); font-size: 13px; }
-  #audio-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
-  .audio-item { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 7px 12px; display: flex; align-items: center; gap: 8px; font-size: 13px; }
-  .audio-item span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .audio-item button { background: none; border: none; color: #aaa; cursor: pointer; font-size: 14px; }
-  .audio-item button:hover { color: var(--red); }
-
   /* Advanced */
   .adv-toggle { background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 0; margin-bottom: 12px; }
   .adv-toggle:hover { color: var(--text); }
@@ -245,6 +234,20 @@ HTML = r"""<!DOCTYPE html>
   .log-line.warn { color: #b45309; }
   .log-line.fail { color: #dc2626; }
   .log-line.step { color: #2563eb; }
+
+  /* Per-patient audio rows inside doctor cards */
+  .patient-audio-list { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .patient-audio-row { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
+  .pat-audio-header { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+  .pat-pid-badge { background: #dbeafe; color: #1e40af; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+  .pat-upload-label { margin-left: auto; font-size: 11px; color: var(--accent); cursor: pointer; border: 1px dashed var(--border); padding: 2px 9px; border-radius: 4px; transition: border-color .15s; white-space: nowrap; }
+  .pat-upload-label:hover { border-color: var(--accent); }
+  .pat-file-list { display: flex; flex-wrap: wrap; gap: 5px; min-height: 18px; }
+  .pat-file-chip { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 4px; padding: 2px 7px; font-size: 11px; display: flex; align-items: center; gap: 4px; max-width: 240px; }
+  .pat-file-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pat-file-chip button { background: none; border: none; color: #aaa; cursor: pointer; font-size: 12px; line-height: 1; padding: 0; flex-shrink: 0; }
+  .pat-file-chip button:hover { color: var(--red); }
+  .pat-no-audio { font-size: 11px; color: var(--muted); font-style: italic; }
 </style>
 </head>
 <body>
@@ -268,18 +271,6 @@ HTML = r"""<!DOCTYPE html>
     <div class="card-title"><span class="dot"></span> Doctors</div>
     <div id="doctors-list"></div>
     <button type="button" class="add-btn" id="add-doctor-btn">+ Add Doctor</button>
-  </div>
-
-  <!-- Audio -->
-  <div class="card">
-    <div class="card-title"><span class="dot" style="background:var(--green)"></span> Audio Files <span style="font-weight:400;color:var(--muted);text-transform:none;letter-spacing:0;">(shared across all patients)</span></div>
-    <div class="upload-zone" id="upload-zone">
-      <input type="file" id="audio-input" accept="audio/*,.wav,.mp3,.m4a" multiple>
-      <div class="icon">🎙️</div>
-      <p>Drop audio files here or click to browse — select multiple</p>
-      <p style="font-size:11px;margin-top:4px;color:#aaa;">If no files uploaded, a silent WAV is generated per audio slot</p>
-    </div>
-    <div id="audio-list"></div>
   </div>
 
   <!-- Advanced -->
@@ -380,7 +371,6 @@ HTML = r"""<!DOCTYPE html>
   <div class="stats-bar" id="stats-bar">
     <div class="stat"><span class="stat-label">Doctors</span><span class="stat-value blue" id="stat-doctors">0</span></div>
     <div class="stat"><span class="stat-label">Patient Slots</span><span class="stat-value blue" id="stat-patients">0</span></div>
-    <div class="stat"><span class="stat-label">Audios / Patient</span><span class="stat-value blue" id="stat-audios">0</span></div>
     <div class="stat"><span class="stat-label">Total Runs</span><span class="stat-value blue" id="stat-total">0</span></div>
     <div class="stat" id="stat-pass-wrap" style="display:none;"><span class="stat-label">Passed</span><span class="stat-value green" id="stat-pass">0</span></div>
     <div class="stat" id="stat-fail-wrap" style="display:none;"><span class="stat-label">Failed</span><span class="stat-value red" id="stat-fail">0</span></div>
@@ -425,18 +415,20 @@ HTML = r"""<!DOCTYPE html>
 
 <script>
 // ── State ────────────────────────────────────────────────────────────────────
-let doctorCount = 0;
-let audioFiles  = [];   // Array of File objects
-let matrix      = [];   // [{rowId, doctorIdx, phone, patientId, audioName, audioIdx}]
-let runStats    = { total: 0, passed: 0, failed: 0 };
-let testResults = [];   // [{doctor_id, patient_id, audio_id, ...timings}]
+let doctorCount    = 0;
+let cardIdCounter  = 0;  // stable per-card ID (never decrements on remove)
+let matrix         = [];   // [{rowId, doctorIdx, phone, patientId, audioName, audioIdx}]
+let runStats       = { total: 0, passed: 0, failed: 0 };
+let testResults    = [];   // [{doctor_id, patient_id, audio_id, ...timings}]
 
 // ── Doctor cards ─────────────────────────────────────────────────────────────
 function addDoctor() {
-  const idx  = doctorCount++;
-  const card = document.createElement('div');
+  const idx    = doctorCount++;
+  const cardId = cardIdCounter++;
+  const card   = document.createElement('div');
   card.className = 'doctor-card';
-  card.dataset.idx = idx;
+  card.dataset.idx    = idx;
+  card.dataset.cardId = cardId;
   card.innerHTML = `
     <div class="doctor-card-header">
       <span class="doctor-num">${idx + 1}</span>
@@ -459,20 +451,25 @@ function addDoctor() {
         <input class="tag-input" type="text" placeholder="Type ID → Enter">
       </div>
       <div class="tag-hint">Press Enter or comma after each patient ID</div>
-    </div>`;
+    </div>
+    <div class="patient-audio-list"></div>`;
 
   const tagInput = card.querySelector('.tag-input');
   tagInput.addEventListener('keydown', e => {
     if (e.key === 'Enter' || e.key === ',') {
       e.preventDefault();
-      addTag(tagInput);
+      addTag(tagInput, card);
     } else if (e.key === 'Backspace' && !tagInput.value) {
       const box  = tagInput.closest('.tag-box');
       const tags = box.querySelectorAll('.tag');
-      if (tags.length) tags[tags.length - 1].remove();
+      if (tags.length) {
+        const lastTag = tags[tags.length - 1];
+        removePatientAudioRow(card, lastTag.dataset.patientId);
+        lastTag.remove();
+      }
     }
   });
-  tagInput.addEventListener('blur', () => { if (tagInput.value.trim()) addTag(tagInput); });
+  tagInput.addEventListener('blur', () => { if (tagInput.value.trim()) addTag(tagInput, card); });
 
   document.getElementById('doctors-list').appendChild(card);
   renumberDoctors();
@@ -491,16 +488,77 @@ function renumberDoctors() {
   });
 }
 
-function addTag(input) {
+function addTag(input, card) {
   const val = input.value.replace(/,/g, '').trim();
   if (!val || isNaN(Number(val))) { input.value = ''; return; }
   const box = input.closest('.tag-box');
   if ([...box.querySelectorAll('.tag span')].some(s => s.textContent === val)) { input.value = ''; return; }
   const tag = document.createElement('span');
   tag.className = 'tag';
-  tag.innerHTML = `<span>${val}</span><button type="button" onclick="this.parentElement.remove()">×</button>`;
+  tag.dataset.patientId = val;
+  tag.innerHTML = `<span>${val}</span><button type="button" onclick="removeTag(this)">×</button>`;
   box.insertBefore(tag, input);
   input.value = '';
+  addPatientAudioRow(card, val);
+}
+
+function removeTag(btn) {
+  const tag  = btn.parentElement;
+  const pid  = tag.dataset.patientId;
+  const card = tag.closest('.doctor-card');
+  removePatientAudioRow(card, pid);
+  tag.remove();
+}
+
+function removePatientAudioRow(card, pid) {
+  const row = card.querySelector(`.patient-audio-row[data-patient-id="${pid}"]`);
+  if (row) row.remove();
+}
+
+function addPatientAudioRow(card, patientId) {
+  const list = card.querySelector('.patient-audio-list');
+  const row  = document.createElement('div');
+  row.className = 'patient-audio-row';
+  row.dataset.patientId = patientId;
+  row._files = [];
+  row.innerHTML = `
+    <div class="pat-audio-header">
+      <span class="pat-pid-badge">Patient ${patientId}</span>
+      <label class="pat-upload-label">
+        + Upload Audio
+        <input type="file" class="pat-audio-input" accept="audio/*,.wav,.mp3,.m4a" multiple style="display:none">
+      </label>
+    </div>
+    <div class="pat-file-list"><span class="pat-no-audio">No audio — silent WAV will be used</span></div>`;
+
+  row.querySelector('.pat-audio-input').addEventListener('change', function() {
+    for (const f of this.files) {
+      if (!row._files.some(x => x.name === f.name)) row._files.push(f);
+    }
+    this.value = '';
+    renderPatientFiles(row);
+  });
+
+  list.appendChild(row);
+}
+
+function renderPatientFiles(row) {
+  const list = row.querySelector('.pat-file-list');
+  if (!row._files.length) {
+    list.innerHTML = '<span class="pat-no-audio">No audio — silent WAV will be used</span>';
+    return;
+  }
+  list.innerHTML = row._files.map((f, i) => `
+    <div class="pat-file-chip">
+      <span title="${f.name}">🎵 ${f.name}</span>
+      <button type="button" onclick="removePatientFile(this, ${i})">×</button>
+    </div>`).join('');
+}
+
+function removePatientFile(btn, fileIdx) {
+  const row = btn.closest('.patient-audio-row');
+  row._files.splice(fileIdx, 1);
+  renderPatientFiles(row);
 }
 
 function getDoctors() {
@@ -512,37 +570,6 @@ function getDoctors() {
 }
 
 document.getElementById('add-doctor-btn').addEventListener('click', addDoctor);
-
-// ── Audio upload ─────────────────────────────────────────────────────────────
-const uploadZone = document.getElementById('upload-zone');
-const audioInput = document.getElementById('audio-input');
-
-audioInput.addEventListener('change', () => { addAudioFiles(audioInput.files); audioInput.value = ''; });
-uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag'); });
-uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag'));
-uploadZone.addEventListener('drop', e => {
-  e.preventDefault(); uploadZone.classList.remove('drag');
-  addAudioFiles(e.dataTransfer.files);
-});
-
-function addAudioFiles(files) {
-  for (const f of files) {
-    if (!audioFiles.some(x => x.name === f.name)) audioFiles.push(f);
-  }
-  renderAudioList();
-}
-
-function renderAudioList() {
-  const list = document.getElementById('audio-list');
-  list.innerHTML = audioFiles.map((f, i) => `
-    <div class="audio-item">
-      <span>🎵 ${f.name}</span>
-      <span style="color:var(--muted);font-size:11px;">${(f.size/1024).toFixed(1)} KB</span>
-      <button onclick="removeAudio(${i})">×</button>
-    </div>`).join('');
-}
-
-function removeAudio(i) { audioFiles.splice(i, 1); renderAudioList(); }
 
 // ── Advanced toggle ──────────────────────────────────────────────────────────
 document.getElementById('adv-toggle').addEventListener('click', function() {
@@ -591,27 +618,20 @@ function clearStatus() { statusBar.style.display = 'none'; }
 
 // ── Validation & matrix build ────────────────────────────────────────────────
 function buildMatrix() {
-  const doctors = getDoctors();
-  const audios  = audioFiles.length ? audioFiles.map(f => f.name) : ['(silent WAV)'];
   matrix = [];
   let rowNum = 1;
-  doctors.forEach((doc, di) => {
-    const patients = doc.patientIds.length ? doc.patientIds : ['(none)'];
-    patients.forEach(pid => {
-      audios.forEach((aName, ai) => {
-        matrix.push({
-          rowId: `d${di}_p${pid}_a${ai}`,
-          rowNum: rowNum++,
-          doctorIdx: di,
-          phone: doc.phone,
-          patientId: pid,
-          audioName: aName,
-          audioIdx: ai,
-        });
+  document.querySelectorAll('.doctor-card').forEach((card, di) => {
+    const phone = card.querySelector('.doc-phone').value.trim();
+    card.querySelectorAll('.patient-audio-row').forEach(patRow => {
+      const pid   = patRow.dataset.patientId;
+      const files = patRow._files || [];
+      const names = files.length ? files.map(f => f.name) : ['(silent WAV)'];
+      names.forEach((aName, ai) => {
+        matrix.push({ rowId: `d${di}_p${pid}_a${ai}`, rowNum: rowNum++, doctorIdx: di, phone, patientId: pid, audioName: aName, audioIdx: ai });
       });
     });
   });
-  return { doctors, audios, matrix };
+  return matrix;
 }
 
 // ── Preview button ────────────────────────────────────────────────────────────
@@ -627,13 +647,12 @@ document.getElementById('preview-btn').addEventListener('click', () => {
     if (!d.patientIds.length) return setStatus(`Doctor ${i+1}: add at least one patient ID.`, 'error');
   }
 
-  const { matrix: mx, audios } = buildMatrix();
+  const mx = buildMatrix();
   const totalPatients = doctors.reduce((s, d) => s + d.patientIds.length, 0);
 
   // Update stats
   document.getElementById('stat-doctors').textContent  = doctors.length;
   document.getElementById('stat-patients').textContent = totalPatients;
-  document.getElementById('stat-audios').textContent   = audios.length;
   document.getElementById('stat-total').textContent    = mx.length;
 
   // Build table
@@ -736,7 +755,13 @@ document.getElementById('run-btn').addEventListener('click', async () => {
   // Build form data
   const fd = new FormData();
   fd.append('doctors_json', JSON.stringify(getDoctors()));
-  audioFiles.forEach((f, i) => fd.append(`audio_${i}`, f, f.name));
+  // Per-patient audio files: paudio_{doctorIdx}_{patientId}_{audioIdx}
+  document.querySelectorAll('.doctor-card').forEach((card, di) => {
+    card.querySelectorAll('.patient-audio-row').forEach(patRow => {
+      const pid = patRow.dataset.patientId;
+      (patRow._files || []).forEach((f, ai) => fd.append(`paudio_${di}_${pid}_${ai}`, f, f.name));
+    });
+  });
   fd.append('language',      document.getElementById('cfg-language').value);
   fd.append('llm',           document.getElementById('cfg-llm').value);
   fd.append('stt_model',     document.getElementById('cfg-stt-model').value);
@@ -969,28 +994,10 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
         log(f"  [Dr {doctor_idx+1}|Pt {patient_id}] Audio {audio_idx+1}/{len(audios)}: {audio_name}")
 
         try:
-            # Step 4 — upload
-            client_sid = str(uuid.uuid4())
-            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4] Uploading...")
+            # Step 4 — transcribe (audio as base64 → AI pipeline)
+            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4] Transcribing ({language}/{llm})...")
             start_time = time.time()
-            r4 = sess.post(f"{django}/api/audio-data/",
-                data={"user_id": str(doctor_id), "patient_id": str(patient_id),
-                      "language": language, "file_duration": str(audio_duration), "session_id": client_sid},
-                files={"audio": (audio_name, audio_bytes, "audio/wav")}, timeout=30)
-            if r4.status_code != 201:
-                raise RuntimeError(f"audio-data {r4.status_code}: {r4.text[:200]}")
-            b4 = r4.json()
-            if "audio_id" not in b4:
-                raise RuntimeError(f"audio_id missing: {b4}")
-            audio_id   = b4["audio_id"]
-            session_id = b4.get("session_id") or client_sid
-            step4_time = time.time() - start_time
-            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4 OK] audio_id={audio_id}  time={step4_time:.2f}s")
-
-            # Step 5 — transcribe
-            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 5] Transcribing ({language}/{llm})...")
-            start_time = time.time()
-            r5 = requests.post(flask_url, json={
+            r4 = requests.post(flask_url, json={
                 "audio_base64":      base64.b64encode(audio_bytes).decode(),
                 "doctor_name":       doctor_name,
                 "doctor_department": department,
@@ -1006,14 +1013,32 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
                 "stt_model":         stt_model,
                 "translate_model":   translate_model,
             }, timeout=180)
-            if r5.status_code != 200:
-                raise RuntimeError(f"transcribe {r5.status_code}: {r5.text[:200]}")
+            if r4.status_code != 200:
+                raise RuntimeError(f"transcribe {r4.status_code}: {r4.text[:200]}")
+            b4 = r4.json()
+            total_time    = b4.get("total-time")
+            transcription = b4.get("transcription", "")
+            summary_text  = _extract_summary(b4)
+            step4_time = time.time() - start_time
+            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4 OK] total-time={total_time}s  step-time={step4_time:.2f}s")
+
+            # Step 5 — upload audio recording for archival (after transcription completes)
+            client_sid = str(uuid.uuid4())
+            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 5] Uploading audio for archival...")
+            start_time = time.time()
+            r5 = sess.post(f"{django}/api/audio-data/",
+                data={"user_id": str(doctor_id), "patient_id": str(patient_id),
+                      "language": language, "file_duration": str(audio_duration), "session_id": client_sid},
+                files={"audio": (audio_name, audio_bytes, "audio/wav")}, timeout=30)
+            if r5.status_code != 201:
+                raise RuntimeError(f"audio-data {r5.status_code}: {r5.text[:200]}")
             b5 = r5.json()
-            total_time    = b5.get("total-time")
-            transcription = b5.get("transcription", "")
-            summary_text  = _extract_summary(b5)
+            if "audio_id" not in b5:
+                raise RuntimeError(f"audio_id missing: {b5}")
+            audio_id   = b5["audio_id"]
+            session_id = b5.get("session_id") or client_sid
             step5_time = time.time() - start_time
-            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 5 OK] total-time={total_time}s  step-time={step5_time:.2f}s")
+            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 5 OK] audio_id={audio_id}  time={step5_time:.2f}s")
 
             # Step 6 — store summary
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 6] Storing summary...")
@@ -1043,10 +1068,14 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
             if doctor_times:
                 timing_data.update(doctor_times)
             timing_data.update({
-                "patient_data_time": round(patient_data_time, 2),
-                "step4_time": round(step4_time, 2),
-                "step5_time": round(step5_time, 2),
-                "step6_time": round(step6_time, 2),
+                "patient_metadata_time": round(patient_data_time, 2),
+                "transcribe_rtt":        round(step4_time, 2),
+                "audio_upload_time":     round(step5_time, 2),
+                "summary_store_time":    round(step6_time, 2),
+                "transcription_time":    b4.get("transcription-time"),
+                "translation_time":      b4.get("translation-time"),
+                "llm_time":              b4.get("llm-time"),
+                "flask_total_time":      b4.get("total-time"),
             })
 
             row(row_id, status="pass", audio_id=audio_id, summary_id=summary_id,
@@ -1060,7 +1089,7 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
             row(row_id, status="fail", error=str(e))
 
 
-def _run_doctor(doctor_idx, doctor_cfg, audios, cfg, q):
+def _run_doctor(doctor_idx, doctor_cfg, patient_audios, cfg, q):
     """
     Parallelism model:
       • Login + profile fetch  → sequential  (must complete before anything else)
@@ -1074,6 +1103,11 @@ def _run_doctor(doctor_idx, doctor_cfg, audios, cfg, q):
     phone       = doctor_cfg["phone"]
     password    = doctor_cfg["password"]
     patient_ids = doctor_cfg["patientIds"]
+    duration    = float(cfg["duration"])
+
+    def get_audios(pid):
+        result = patient_audios.get((doctor_idx, str(pid)), [])
+        return result if result else [("silent.wav", _make_wav(duration))]
 
     # ── Step 1: Login (sequential — need token before anything else) ──────────
     log(f"  [Dr {doctor_idx+1}] [Step 1] Login  phone={phone}")
@@ -1086,7 +1120,7 @@ def _run_doctor(doctor_idx, doctor_cfg, audios, cfg, q):
             msg = f"Login failed {r.status_code}: {r.text[:150]}"
             log(f"  [Dr {doctor_idx+1}] [Step 1 FAIL] {msg}")
             for pid in patient_ids:
-                for ai in range(len(audios)):
+                for ai in range(len(get_audios(pid))):
                     row(f"d{doctor_idx}_p{pid}_a{ai}", status="fail", error=msg)
             return
         body      = r.json()
@@ -1096,7 +1130,7 @@ def _run_doctor(doctor_idx, doctor_cfg, audios, cfg, q):
         log(f"  [Dr {doctor_idx+1}] [Step 1 OK] doctor_id={doctor_id}  free_minutes={body['user'].get('free_minutes')}  time={step1_time:.2f}s")
     except Exception as e:
         for pid in patient_ids:
-            for ai in range(len(audios)):
+            for ai in range(len(get_audios(pid))):
                 row(f"d{doctor_idx}_p{pid}_a{ai}", status="fail", error=str(e))
         return
 
@@ -1135,7 +1169,7 @@ def _run_doctor(doctor_idx, doctor_cfg, audios, cfg, q):
                 _run_patient,
                 doctor_idx, pid, doctor_id, token,
                 doctor_name, department, hospital,
-                audios, cfg, q, doctor_times
+                get_audios(pid), cfg, q, doctor_times
             ): pid
             for pid in patient_ids
         }
@@ -1184,38 +1218,46 @@ def run():
         "duration":      duration,
     }
 
-    # Collect uploaded audio files; fall back to silent WAV
+    # Collect per-patient audio files: paudio_{di}_{pid}_{ai}
     try:
-        audios = []
-        i = 0
-        while True:
-            f = request.files.get(f"audio_{i}")
-            if f is None:
-                break
-            audios.append((f.filename, f.read()))
-            i += 1
-        if not audios:
-            audios = [("silent.wav", _make_wav(duration))]
+        patient_audios = {}
+        for key in request.files:
+            m = re.match(r'^paudio_(\d+)_(\w+)_(\d+)$', key)
+            if m:
+                di, pid, ai = int(m.group(1)), m.group(2), int(m.group(3))
+                f = request.files[key]
+                patient_audios.setdefault((di, pid), []).append((ai, f.filename, f.read()))
+        for k in patient_audios:
+            patient_audios[k].sort(key=lambda x: x[0])
+            patient_audios[k] = [(name, data) for _, name, data in patient_audios[k]]
     except Exception as e:
         return {"error": f"Audio file read error: {e}"}, 500
 
     if not doctors:
         return {"error": "No doctors provided"}, 400
 
-    total = sum(len(d.get("patientIds", [])) for d in doctors) * len(audios)
-    q     = queue.Queue()
+    def _get_audios(di, pid):
+        result = patient_audios.get((di, str(pid)), [])
+        return result if result else [("silent.wav", _make_wav(duration))]
+
+    total = sum(
+        len(_get_audios(di, pid))
+        for di, doc in enumerate(doctors)
+        for pid in doc.get("patientIds", [])
+    )
+    q          = queue.Queue()
     done_count = [0]
     passed     = [0]
 
     def run_all():
         total_patients = sum(len(d.get("patientIds", [])) for d in doctors)
         q.put({"type": "log", "message":
-               f"  Starting load test: {len(doctors)} doctor(s) × {total_patients} patient slot(s) × {len(audios)} audio(s) = {total} runs"})
+               f"  Starting load test: {len(doctors)} doctor(s) × {total_patients} patient slot(s) = {total} runs"})
         q.put({"type": "log", "message":
                f"  Concurrency model: doctors=parallel  patients=parallel  audios=sequential per patient"})
 
         with ThreadPoolExecutor(max_workers=len(doctors)) as pool:
-            futures = [pool.submit(_run_doctor, di, doc, audios, cfg, q)
+            futures = [pool.submit(_run_doctor, di, doc, patient_audios, cfg, q)
                        for di, doc in enumerate(doctors)]
             for f in as_completed(futures):
                 try:
