@@ -1310,12 +1310,16 @@ def export():
             "Audio ID",
             "Summary ID",
             "Audio Duration (s)",
-            "Step 1 Time (s)",
-            "Step 1b Time (s)",
-            "Patient Data Time (s)",
-            "Step 4 Time (s)",
-            "Step 5 Time (s)",
-            "Step 6 Time (s)"
+            "Login Time (s)",
+            "Doctor Profile Time (s)",
+            "Patient Metadata Time (s)",
+            "Transcribe RTT (s)",
+            "Audio Upload Time (s)",
+            "Summary Store Time (s)",
+            "STT Time (s)",
+            "Translation Time (s)",
+            "LLM Time (s)",
+            "Flask Total Time (s)",
         ]
         
         # Style the header row
@@ -1330,19 +1334,27 @@ def export():
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center")
         
+        def _t(result, key):
+            v = result.get(key)
+            return round(v, 5) if v is not None else None
+
         # Add data rows
         for row_idx, result in enumerate(results, 2):
-            ws.cell(row=row_idx, column=1).value = result.get("doctor_id")
-            ws.cell(row=row_idx, column=2).value = result.get("patient_id")
-            ws.cell(row=row_idx, column=3).value = result.get("audio_id")
-            ws.cell(row=row_idx, column=4).value = result.get("summary_id")
-            ws.cell(row=row_idx, column=5).value = result.get("audio_duration")
-            ws.cell(row=row_idx, column=6).value = result.get("step1_time")
-            ws.cell(row=row_idx, column=7).value = result.get("step1b_time")
-            ws.cell(row=row_idx, column=8).value = result.get("patient_data_time")
-            ws.cell(row=row_idx, column=9).value = result.get("step4_time")
-            ws.cell(row=row_idx, column=10).value = result.get("step5_time")
-            ws.cell(row=row_idx, column=11).value = result.get("step6_time")
+            ws.cell(row=row_idx, column=1).value  = result.get("doctor_id")
+            ws.cell(row=row_idx, column=2).value  = result.get("patient_id")
+            ws.cell(row=row_idx, column=3).value  = result.get("audio_id")
+            ws.cell(row=row_idx, column=4).value  = result.get("summary_id")
+            ws.cell(row=row_idx, column=5).value  = result.get("audio_duration")
+            ws.cell(row=row_idx, column=6).value  = _t(result, "step1_time")
+            ws.cell(row=row_idx, column=7).value  = _t(result, "step1b_time")
+            ws.cell(row=row_idx, column=8).value  = _t(result, "patient_metadata_time")
+            ws.cell(row=row_idx, column=9).value  = _t(result, "transcribe_rtt")
+            ws.cell(row=row_idx, column=10).value = _t(result, "audio_upload_time")
+            ws.cell(row=row_idx, column=11).value = _t(result, "summary_store_time")
+            ws.cell(row=row_idx, column=12).value = _t(result, "transcription_time")
+            ws.cell(row=row_idx, column=13).value = _t(result, "translation_time")
+            ws.cell(row=row_idx, column=14).value = _t(result, "llm_time")
+            ws.cell(row=row_idx, column=15).value = _t(result, "flask_total_time")
         
         # Adjust column widths
         ws.column_dimensions['A'].width = 12
@@ -1351,11 +1363,15 @@ def export():
         ws.column_dimensions['D'].width = 12
         ws.column_dimensions['E'].width = 18
         ws.column_dimensions['F'].width = 16
-        ws.column_dimensions['G'].width = 16
-        ws.column_dimensions['H'].width = 20
-        ws.column_dimensions['I'].width = 16
-        ws.column_dimensions['J'].width = 16
-        ws.column_dimensions['K'].width = 16
+        ws.column_dimensions['G'].width = 22
+        ws.column_dimensions['H'].width = 24
+        ws.column_dimensions['I'].width = 20
+        ws.column_dimensions['J'].width = 20
+        ws.column_dimensions['K'].width = 22
+        ws.column_dimensions['L'].width = 16
+        ws.column_dimensions['M'].width = 18
+        ws.column_dimensions['N'].width = 16
+        ws.column_dimensions['O'].width = 20
         
         # Save to bytes
         excel_buffer = io.BytesIO()
