@@ -248,6 +248,10 @@ HTML = r"""<!DOCTYPE html>
   .pat-file-chip button { background: none; border: none; color: #aaa; cursor: pointer; font-size: 12px; line-height: 1; padding: 0; flex-shrink: 0; }
   .pat-file-chip button:hover { color: var(--red); }
   .pat-no-audio { font-size: 11px; color: var(--muted); font-style: italic; }
+  .pat-lang-row { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+  .pat-lang-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .pat-lang-select { font-size: 11px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 3px 6px; outline: none; cursor: pointer; }
+  .pat-lang-select:focus { border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -280,19 +284,6 @@ HTML = r"""<!DOCTYPE html>
     </button>
     <div class="adv-fields" id="adv-fields">
       <div class="adv-grid">
-        <div class="field">
-          <label>Language</label>
-          <select id="cfg-language">
-            <option value="en">English (en)</option>
-            <option value="hi">Hindi (hi)</option>
-            <option value="ta">Tamil (ta)</option>
-            <option value="te">Telugu (te)</option>
-            <option value="kn">Kannada (kn)</option>
-            <option value="ml">Malayalam (ml)</option>
-            <option value="bn">Bengali (bn)</option>
-            <option value="mr">Marathi (mr)</option>
-          </select>
-        </div>
         <div class="field">
           <label>LLM</label>
           <select id="cfg-llm">
@@ -332,11 +323,17 @@ HTML = r"""<!DOCTYPE html>
         </div>
         <div class="field">
           <label>Django Base URL</label>
-          <input id="cfg-django" type="text" value="__DJANGO_BASE_URL__">
+          <select id="cfg-django">
+            <option value="https://test-medsum.amritaai.org">https://test-medsum.amritaai.org</option>
+            <option value="https://medsum.bharatgen.dev">https://medsum.bharatgen.dev</option>
+          </select>
         </div>
         <div class="field">
           <label>Flask Transcribe URL</label>
-          <input id="cfg-flask" type="text" value="__FLASK_BASE_URL__">
+          <select id="cfg-flask">
+            <option value="https://test-medsum.amritaai.org/transcribe">https://test-medsum.amritaai.org/transcribe</option>
+            <option value="https://medsum.bharatgen.dev/transcribe">https://medsum.bharatgen.dev/transcribe</option>
+          </select>
         </div>
       </div>
     </div>
@@ -528,6 +525,19 @@ function addPatientAudioRow(card, patientId) {
         + Upload Audio
         <input type="file" class="pat-audio-input" accept="audio/*,.wav,.mp3,.m4a" multiple style="display:none">
       </label>
+    </div>
+    <div class="pat-lang-row">
+      <span class="pat-lang-label">Language:</span>
+      <select class="pat-lang-select">
+        <option value="en">English (en)</option>
+        <option value="hi">Hindi (hi)</option>
+        <option value="ta">Tamil (ta)</option>
+        <option value="te">Telugu (te)</option>
+        <option value="kn">Kannada (kn)</option>
+        <option value="ml">Malayalam (ml)</option>
+        <option value="bn">Bengali (bn)</option>
+        <option value="mr">Marathi (mr)</option>
+      </select>
     </div>
     <div class="pat-file-list"><span class="pat-no-audio">No audio — silent WAV will be used</span></div>`;
 
@@ -755,14 +765,15 @@ document.getElementById('run-btn').addEventListener('click', async () => {
   // Build form data
   const fd = new FormData();
   fd.append('doctors_json', JSON.stringify(getDoctors()));
-  // Per-patient audio files: paudio_{doctorIdx}_{patientId}_{audioIdx}
+  // Per-patient audio files and language: paudio_{di}_{pid}_{ai}, plang_{di}_{pid}
   document.querySelectorAll('.doctor-card').forEach((card, di) => {
     card.querySelectorAll('.patient-audio-row').forEach(patRow => {
-      const pid = patRow.dataset.patientId;
+      const pid  = patRow.dataset.patientId;
+      const lang = patRow.querySelector('.pat-lang-select').value;
+      fd.append(`plang_${di}_${pid}`, lang);
       (patRow._files || []).forEach((f, ai) => fd.append(`paudio_${di}_${pid}_${ai}`, f, f.name));
     });
   });
-  fd.append('language',      document.getElementById('cfg-language').value);
   fd.append('llm',           document.getElementById('cfg-llm').value);
   fd.append('stt_model',     document.getElementById('cfg-stt-model').value);
   fd.append('translate_model', document.getElementById('cfg-translate-model').value);
@@ -955,7 +966,7 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
     if not flask_url.endswith("/transcribe"):
         flask_url += "/transcribe"
 
-    language        = cfg["language"]
+    language        = cfg.get("patient_languages", {}).get((doctor_idx, str(patient_id)), cfg.get("language", "en"))
     llm             = cfg["llm"]
     stt_model       = cfg["stt_model"]
     translate_model = cfg["translate_model"]
@@ -1019,8 +1030,16 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
             total_time    = b4.get("total-time")
             transcription = b4.get("transcription", "")
             summary_text  = _extract_summary(b4)
-            step4_time = time.time() - start_time
-            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4 OK] total-time={total_time}s  step-time={step4_time:.2f}s")
+            step4_time    = time.time() - start_time
+            # Use actual audio length returned by Flask; fall back to configured duration
+            audio_length  = b4.get("audio_length") or audio_duration
+            # Compute audio_processing_time = flask_total - (stt + translation + llm)
+            _ft  = b4.get("total-time") or 0
+            _stt = b4.get("transcription-time") or 0
+            _tr  = b4.get("translation-time") or 0
+            _llm = b4.get("llm-time") or 0
+            audio_processing_time = round(_ft - (_stt + _tr + _llm), 5) if _ft else None
+            log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4 OK] total-time={total_time}s  audio_length={audio_length}s  step-time={step4_time:.2f}s")
 
             # Step 5 — upload audio recording for archival (after transcription completes)
             client_sid = str(uuid.uuid4())
@@ -1059,23 +1078,25 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
 
             # Collect timing data for export
             timing_data = {
-                "doctor_id": doctor_id,
-                "patient_id": patient_id,
-                "audio_id": audio_id,
-                "summary_id": summary_id,
-                "audio_duration": audio_duration,
+                "doctor_id":      doctor_id,
+                "patient_id":     patient_id,
+                "audio_id":       audio_id,
+                "summary_id":     summary_id,
+                "audio_duration": audio_length,  # actual length from Flask, not config default
+                "language":       language,
             }
             if doctor_times:
                 timing_data.update(doctor_times)
             timing_data.update({
-                "patient_metadata_time": round(patient_data_time, 2),
-                "transcribe_rtt":        round(step4_time, 2),
-                "audio_upload_time":     round(step5_time, 2),
-                "summary_store_time":    round(step6_time, 2),
-                "transcription_time":    b4.get("transcription-time"),
-                "translation_time":      b4.get("translation-time"),
-                "llm_time":              b4.get("llm-time"),
-                "flask_total_time":      b4.get("total-time"),
+                "patient_metadata_time":  round(patient_data_time, 2),
+                "transcribe_rtt":         round(step4_time, 2),
+                "audio_upload_time":      round(step5_time, 2),
+                "summary_store_time":     round(step6_time, 2),
+                "transcription_time":     b4.get("transcription-time"),
+                "translation_time":       b4.get("translation-time"),
+                "llm_time":               b4.get("llm-time"),
+                "flask_total_time":       b4.get("total-time"),
+                "audio_processing_time":  audio_processing_time,
             })
 
             row(row_id, status="pass", audio_id=audio_id, summary_id=summary_id,
@@ -1209,7 +1230,7 @@ def run():
     cfg = {
         "django_url":    request.form.get("django_url",    DJANGO_BASE_URL),
         "flask_url":     request.form.get("flask_url",     FLASK_BASE_URL),
-        "language":      request.form.get("language",      "en"),
+        "language":      "en",  # fallback only — per-patient language overrides this
         "llm":           request.form.get("llm",           "OpenAI"),
         "stt_model":     request.form.get("stt_model",     "Bhasini"),
         "translate_model": request.form.get("translate_model", "Bhasini"),
@@ -1232,6 +1253,15 @@ def run():
             patient_audios[k] = [(name, data) for _, name, data in patient_audios[k]]
     except Exception as e:
         return {"error": f"Audio file read error: {e}"}, 500
+
+    # Collect per-patient languages: plang_{di}_{pid}
+    patient_languages = {}
+    for key in request.form:
+        m = re.match(r'^plang_(\d+)_(\w+)$', key)
+        if m:
+            di, pid = int(m.group(1)), m.group(2)
+            patient_languages[(di, pid)] = request.form[key]
+    cfg["patient_languages"] = patient_languages
 
     if not doctors:
         return {"error": "No doctors provided"}, 400
@@ -1303,37 +1333,39 @@ def export():
         ws = wb.active
         ws.title = "Test Results"
         
-        # Define headers with all step timings
+        # Define headers — col order must match data rows below
         headers = [
-            "Doctor ID",
-            "Patient ID",
-            "Audio ID",
-            "Summary ID",
-            "Audio Duration (s)",
-            "Login Time (s)",
-            "Doctor Profile Time (s)",
-            "Patient Metadata Time (s)",
-            "Transcribe RTT (s)",
-            "Audio Upload Time (s)",
-            "Summary Store Time (s)",
-            "STT Time (s)",
-            "Translation Time (s)",
-            "LLM Time (s)",
-            "Flask Total Time (s)",
+            "Doctor ID",                          # 1
+            "Patient ID",                         # 2
+            "Audio ID",                           # 3
+            "Summary ID",                         # 4
+            "Audio Duration (s)",                 # 5
+            "Language",                           # 6
+            "Login Time (s)",                     # 7
+            "Doctor Profile Time (s)",            # 8
+            "Patient Metadata Time (s)",          # 9
+            "Audio Processing Time (s)",          # 10
+            "Audio Upload Time (s)",              # 11
+            "Summary Store Time (s)",             # 12
+            "STT Time (s)",                       # 13
+            "Translation Time (s)",               # 14
+            "LLM Time (s)",                       # 15
+            "Flask Total Time (s)",               # 16
+            "User Perceived Summary Latency (s)", # 17
+            
         ]
-        
+
         # Style the header row
         header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
         header_font = Font(bold=True, color="FFFFFF")
-        
-        # Add headers
+
         for col_idx, header in enumerate(headers, 1):
             cell = ws.cell(row=1, column=col_idx)
             cell.value = header
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center")
-        
+
         def _t(result, key):
             v = result.get(key)
             return round(v, 5) if v is not None else None
@@ -1345,33 +1377,39 @@ def export():
             ws.cell(row=row_idx, column=3).value  = result.get("audio_id")
             ws.cell(row=row_idx, column=4).value  = result.get("summary_id")
             ws.cell(row=row_idx, column=5).value  = result.get("audio_duration")
-            ws.cell(row=row_idx, column=6).value  = _t(result, "step1_time")
-            ws.cell(row=row_idx, column=7).value  = _t(result, "step1b_time")
-            ws.cell(row=row_idx, column=8).value  = _t(result, "patient_metadata_time")
-            ws.cell(row=row_idx, column=9).value  = _t(result, "transcribe_rtt")
-            ws.cell(row=row_idx, column=10).value = _t(result, "audio_upload_time")
-            ws.cell(row=row_idx, column=11).value = _t(result, "summary_store_time")
-            ws.cell(row=row_idx, column=12).value = _t(result, "transcription_time")
-            ws.cell(row=row_idx, column=13).value = _t(result, "translation_time")
-            ws.cell(row=row_idx, column=14).value = _t(result, "llm_time")
-            ws.cell(row=row_idx, column=15).value = _t(result, "flask_total_time")
-        
+            ws.cell(row=row_idx, column=6).value  = result.get("language")
+            ws.cell(row=row_idx, column=7).value  = _t(result, "step1_time")
+            ws.cell(row=row_idx, column=8).value  = _t(result, "step1b_time")
+            ws.cell(row=row_idx, column=9).value  = _t(result, "patient_metadata_time")
+            ws.cell(row=row_idx, column=10).value = _t(result, "audio_processing_time")
+            ws.cell(row=row_idx, column=11).value = _t(result, "audio_upload_time")
+            ws.cell(row=row_idx, column=12).value = _t(result, "summary_store_time")
+            ws.cell(row=row_idx, column=13).value = _t(result, "transcription_time")
+            ws.cell(row=row_idx, column=14).value = _t(result, "translation_time")
+            ws.cell(row=row_idx, column=15).value = _t(result, "llm_time")
+            ws.cell(row=row_idx, column=16).value = _t(result, "flask_total_time")
+            ws.cell(row=row_idx, column=17).value = _t(result, "transcribe_rtt")
+            # ws.cell(row=row_idx, column=18).value = _t(result, "user_percieved_summary_latency")
+
         # Adjust column widths
         ws.column_dimensions['A'].width = 12
         ws.column_dimensions['B'].width = 12
         ws.column_dimensions['C'].width = 12
         ws.column_dimensions['D'].width = 12
         ws.column_dimensions['E'].width = 18
-        ws.column_dimensions['F'].width = 16
-        ws.column_dimensions['G'].width = 22
-        ws.column_dimensions['H'].width = 24
-        ws.column_dimensions['I'].width = 20
-        ws.column_dimensions['J'].width = 20
-        ws.column_dimensions['K'].width = 22
-        ws.column_dimensions['L'].width = 16
-        ws.column_dimensions['M'].width = 18
-        ws.column_dimensions['N'].width = 16
-        ws.column_dimensions['O'].width = 20
+        ws.column_dimensions['F'].width = 14
+        ws.column_dimensions['G'].width = 16
+        ws.column_dimensions['H'].width = 22
+        ws.column_dimensions['I'].width = 24
+        ws.column_dimensions['J'].width = 18
+        ws.column_dimensions['K'].width = 20
+        ws.column_dimensions['L'].width = 22
+        ws.column_dimensions['M'].width = 14
+        ws.column_dimensions['N'].width = 18
+        ws.column_dimensions['O'].width = 14
+        ws.column_dimensions['P'].width = 20
+        ws.column_dimensions['Q'].width = 24
+        # ws.column_dimensions['R'].width = 30
         
         # Save to bytes
         excel_buffer = io.BytesIO()
