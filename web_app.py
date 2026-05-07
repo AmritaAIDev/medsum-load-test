@@ -430,6 +430,37 @@ let matrix         = [];   // [{rowId, doctorIdx, phone, patientId, audioName, a
 let runStats       = { total: 0, passed: 0, failed: 0 };
 let testResults    = [];   // [{doctor_id, patient_id, audio_id, ...timings}]
 
+// ── IndexedDB audio cache ─────────────────────────────────────────────────────
+function openAudioDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('MedsumAudioCache', 1);
+    req.onupgradeneeded = e => e.target.result.createObjectStore('files', { keyPath: 'name' });
+    req.onsuccess = e => resolve(e.target.result);
+    req.onerror   = e => reject(e.target.error);
+  });
+}
+async function dbSaveFile(file) {
+  const db = await openAudioDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('files', 'readwrite');
+    // Store the Blob directly — no arrayBuffer() needed, no RAM spike for large files
+    tx.objectStore('files').put({ name: file.name, type: file.type || 'audio/wav', blob: file });
+    tx.oncomplete = resolve;
+    tx.onerror    = e => reject(e.target.error);
+  });
+}
+async function dbGetFile(name) {
+  const db = await openAudioDB();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction('files', 'readonly').objectStore('files').get(name);
+    req.onsuccess = e => {
+      const r = e.target.result;
+      resolve(r ? new File([r.blob], r.name, { type: r.type }) : null);
+    };
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
 // ── Doctor cards ─────────────────────────────────────────────────────────────
 function addDoctor() {
   const idx    = doctorCount++;
@@ -555,7 +586,10 @@ function addPatientAudioRow(card, patientId) {
 
   row.querySelector('.pat-audio-input').addEventListener('change', function() {
     for (const f of this.files) {
-      if (!row._files.some(x => x.name === f.name)) row._files.push(f);
+      if (!row._files.some(x => x.name === f.name)) {
+        row._files.push(f);
+        dbSaveFile(f).catch(err => appendLog(`WARN: audio cache save failed for ${f.name}: ${err}`));
+      }
     }
     this.value = '';
     renderPatientFiles(row);
@@ -836,20 +870,38 @@ async function importConfig(file) {
       // Restore language
       patRow.querySelector('.pat-lang-select').value = pat.language || 'en';
 
-      // Show audio filenames as re-upload reminders (bytes cannot be restored — browser security)
+      // Restore audio files from IndexedDB cache; show reminder only for files not found
       if (pat.audio_filenames && pat.audio_filenames.length) {
-        patRow.querySelector('.pat-file-list').innerHTML = pat.audio_filenames.map(fn => `
-          <div class="pat-file-chip pat-file-reminder" title="Re-upload required: ${fn}">
-            <span>📎 ${fn}</span>
-            <span class="reminder-tag">re-upload</span>
-          </div>`).join('');
+        const missing = [];
+        for (const fn of pat.audio_filenames) {
+          let cached = null;
+          try { cached = await dbGetFile(fn); } catch { /* cache unavailable */ }
+          if (cached) {
+            patRow._files.push(cached);
+          } else {
+            missing.push(fn);
+          }
+        }
+        // Render restored files normally; append reminder chips for any missing ones
+        renderPatientFiles(patRow);
+        if (missing.length) {
+          const fileList = patRow.querySelector('.pat-file-list');
+          fileList.innerHTML += missing.map(fn => `
+            <div class="pat-file-chip pat-file-reminder" title="Re-upload required: ${fn}">
+              <span>📎 ${fn}</span>
+              <span class="reminder-tag">re-upload</span>
+            </div>`).join('');
+        }
       }
     }
   }
 
-  const savedOn = config.saved_at ? config.saved_at.slice(0, 10) : '?';
+  const savedOn  = config.saved_at ? config.saved_at.slice(0, 10) : '?';
   const docCount = (config.doctors || []).length;
-  setStatus(`Config loaded — ${docCount} doctor(s), saved on ${savedOn}. Re-upload audio files where shown.`, 'success');
+  const allPatients = (config.doctors || []).flatMap(d => d.patients || []);
+  const totalFiles  = allPatients.reduce((s, p) => s + (p.audio_filenames || []).length, 0);
+  const suffix = totalFiles ? ` Audio files restored from cache where available.` : '';
+  setStatus(`Config loaded — ${docCount} doctor(s), saved on ${savedOn}.${suffix} Re-upload any files shown with a yellow badge.`, 'success');
   appendLog(`✓ Config imported: ${docCount} doctor(s) from ${savedOn}`);
 }
 
