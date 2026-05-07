@@ -252,6 +252,11 @@ HTML = r"""<!DOCTYPE html>
   .pat-lang-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
   .pat-lang-select { font-size: 11px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 3px 6px; outline: none; cursor: pointer; }
   .pat-lang-select:focus { border-color: var(--accent); }
+
+  /* Config export / import */
+  .config-action-row { display: flex; gap: 10px; margin-bottom: 14px; justify-content: flex-end; flex-wrap: wrap; }
+  .pat-file-reminder { background: #fef9c3; border-color: #fde68a; }
+  .reminder-tag { font-size: 9px; color: #92400e; font-weight: 700; border: 1px solid #fde68a; border-radius: 3px; padding: 1px 4px; flex-shrink: 0; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -269,6 +274,13 @@ HTML = r"""<!DOCTYPE html>
 
 <!-- ═══════════════════════════ SCREEN 1: INPUT ═══════════════════════════ -->
 <div class="screen active" id="s-input">
+
+  <!-- Config actions -->
+  <div class="config-action-row">
+    <input type="file" id="import-config-input" accept=".json" style="display:none">
+    <button class="btn btn-secondary" id="import-config-btn" type="button">⬆ Import Config</button>
+    <button class="btn btn-secondary" id="export-config-btn" type="button">⬇ Export Config</button>
+  </div>
 
   <!-- Doctors -->
   <div class="card">
@@ -733,6 +745,120 @@ document.getElementById('export-btn').addEventListener('click', async () => {
     appendLog(`✗ Export failed: ${err.message}`);
     alert(`Export failed: ${err.message}`);
   }
+});
+
+// ── Config Export / Import ────────────────────────────────────────────────────
+function exportConfig() {
+  const doctors = [...document.querySelectorAll('.doctor-card')].map(card => {
+    const patients = [...card.querySelectorAll('.patient-audio-row')].map(patRow => ({
+      patient_id:      patRow.dataset.patientId,
+      language:        patRow.querySelector('.pat-lang-select').value,
+      audio_filenames: (patRow._files || []).map(f => f.name),
+    }));
+    return {
+      phone:    card.querySelector('.doc-phone').value.trim(),
+      password: card.querySelector('.doc-password').value.trim(),
+      patients,
+    };
+  });
+
+  const config = {
+    version:  1,
+    saved_at: new Date().toISOString(),
+    global: {
+      llm:             document.getElementById('cfg-llm').value,
+      stt_model:       document.getElementById('cfg-stt-model').value,
+      translate_model: document.getElementById('cfg-translate-model').value,
+      template_type:   document.getElementById('cfg-template-type').value,
+      template_id:     document.getElementById('cfg-template-id').value,
+      duration:        parseFloat(document.getElementById('cfg-duration').value) || 2.0,
+      django_url:      document.getElementById('cfg-django').value,
+      flask_url:       document.getElementById('cfg-flask').value,
+    },
+    doctors,
+  };
+
+  const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `medsum_config_${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  URL.revokeObjectURL(url);
+  document.body.removeChild(a);
+  appendLog('✓ Config exported');
+}
+
+async function importConfig(file) {
+  let config;
+  try {
+    config = JSON.parse(await file.text());
+  } catch {
+    setStatus('Invalid config file — not valid JSON.', 'error'); return;
+  }
+  if (!config.version || !config.doctors) {
+    setStatus('Unrecognised config format — missing version or doctors.', 'error'); return;
+  }
+
+  // Clear existing doctors
+  document.getElementById('doctors-list').innerHTML = '';
+  doctorCount = 0; cardIdCounter = 0;
+
+  // Apply global settings
+  const g = config.global || {};
+  const setVal = (id, v) => { if (v !== undefined && document.getElementById(id)) document.getElementById(id).value = v; };
+  setVal('cfg-llm',             g.llm);
+  setVal('cfg-stt-model',       g.stt_model);
+  setVal('cfg-translate-model', g.translate_model);
+  setVal('cfg-template-type',   g.template_type);
+  setVal('cfg-template-id',     g.template_id);
+  setVal('cfg-duration',        g.duration);
+  setVal('cfg-django',          g.django_url);
+  setVal('cfg-flask',           g.flask_url);
+
+  // Rebuild doctors + patients
+  for (const doc of (config.doctors || [])) {
+    addDoctor();
+    const cards = document.querySelectorAll('.doctor-card');
+    const card  = cards[cards.length - 1];
+    card.querySelector('.doc-phone').value    = doc.phone    || '';
+    card.querySelector('.doc-password').value = doc.password || '';
+
+    for (const pat of (doc.patients || [])) {
+      const tagInput = card.querySelector('.tag-input');
+      tagInput.value = String(pat.patient_id);
+      addTag(tagInput, card);
+
+      const patRow = card.querySelector(`.patient-audio-row[data-patient-id="${pat.patient_id}"]`);
+      if (!patRow) continue;
+
+      // Restore language
+      patRow.querySelector('.pat-lang-select').value = pat.language || 'en';
+
+      // Show audio filenames as re-upload reminders (bytes cannot be restored — browser security)
+      if (pat.audio_filenames && pat.audio_filenames.length) {
+        patRow.querySelector('.pat-file-list').innerHTML = pat.audio_filenames.map(fn => `
+          <div class="pat-file-chip pat-file-reminder" title="Re-upload required: ${fn}">
+            <span>📎 ${fn}</span>
+            <span class="reminder-tag">re-upload</span>
+          </div>`).join('');
+      }
+    }
+  }
+
+  const savedOn = config.saved_at ? config.saved_at.slice(0, 10) : '?';
+  const docCount = (config.doctors || []).length;
+  setStatus(`Config loaded — ${docCount} doctor(s), saved on ${savedOn}. Re-upload audio files where shown.`, 'success');
+  appendLog(`✓ Config imported: ${docCount} doctor(s) from ${savedOn}`);
+}
+
+document.getElementById('export-config-btn').addEventListener('click', exportConfig);
+document.getElementById('import-config-btn').addEventListener('click', () => {
+  document.getElementById('import-config-input').click();
+});
+document.getElementById('import-config-input').addEventListener('change', function() {
+  if (this.files[0]) { importConfig(this.files[0]); this.value = ''; }
 });
 
 // ── Screen switch ─────────────────────────────────────────────────────────────
