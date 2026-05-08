@@ -428,7 +428,8 @@ let doctorCount    = 0;
 let cardIdCounter  = 0;  // stable per-card ID (never decrements on remove)
 let matrix         = [];   // [{rowId, doctorIdx, phone, patientId, audioName, audioIdx}]
 let runStats       = { total: 0, passed: 0, failed: 0 };
-let testResults    = [];   // [{doctor_id, patient_id, audio_id, ...timings}]
+let testRuns       = [];   // [[round1rows], [round2rows], ...]  one sub-array per run
+let currentRound   = null; // the sub-array currently being filled
 
 // ── IndexedDB audio cache ─────────────────────────────────────────────────────
 function openAudioDB() {
@@ -738,7 +739,8 @@ document.getElementById('preview-btn').addEventListener('click', () => {
   document.getElementById('run-progress-wrap').style.display = 'none';
   document.getElementById('run-counter').style.display = 'none';
   document.getElementById('header-progress').style.display = 'none';
-  testResults = [];
+  testRuns     = [];
+  currentRound = null;
 
   showScreen('s-run');
 });
@@ -752,7 +754,7 @@ document.getElementById('new-test-btn').addEventListener('click', () => {
 
 // ── Export button ──────────────────────────────────────────────────────────────
 document.getElementById('export-btn').addEventListener('click', async () => {
-  if (testResults.length === 0) {
+  if (testRuns.length === 0 || testRuns.every(r => r.length === 0)) {
     alert('No test results to export.');
     return;
   }
@@ -760,7 +762,7 @@ document.getElementById('export-btn').addEventListener('click', async () => {
     const response = await fetch('/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ results: testResults })
+      body: JSON.stringify({ runs: testRuns })
     });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -940,6 +942,10 @@ document.getElementById('run-btn').addEventListener('click', async () => {
   runStats.passed = 0; runStats.failed = 0;
   updateProgress();
 
+  // Start a new round — results accumulate across re-runs
+  currentRound = [];
+  testRuns.push(currentRound);
+
   // Build form data
   const fd = new FormData();
   fd.append('doctors_json', JSON.stringify(getDoctors()));
@@ -1030,9 +1036,9 @@ function updateRow(evt) {
       detCell.innerHTML = `${timeStr ? `<span style="color:var(--muted);font-size:11px;">${timeStr}</span> ` : ''}<button class="view-btn" onclick="toggleExpand('${evt.row_id}')">View ▾</button>`;
     }
 
-    // Store result for export
-    if (evt.timing_data) {
-      testResults.push(evt.timing_data);
+    // Store result for export (into the current round)
+    if (evt.timing_data && currentRound) {
+      currentRound.push(evt.timing_data);
     }
 
     // Insert expandable sub-row after this row
@@ -1557,19 +1563,16 @@ def run():
 def export():
     try:
         data = request.get_json()
-        results = data.get("results", [])
-        
-        if not results:
-            return {"error": "No results to export"}, 400
+        runs = data.get("runs", [])
 
-        # Sort by patient_id ascending (numeric where possible, else lexicographic)
-        results.sort(key=lambda r: (int(r["patient_id"]) if str(r.get("patient_id", "")).isdigit() else r.get("patient_id", "")))
+        if not runs or all(len(r) == 0 for r in runs):
+            return {"error": "No results to export"}, 400
 
         # Create a new workbook
         wb = Workbook()
         ws = wb.active
         ws.title = "Test Results"
-        
+
         # Define headers — col order must match data rows below
         headers = [
             "Doctor ID",                          # 1
@@ -1587,29 +1590,31 @@ def export():
             "LLM Time (s)",                       # 13
             "Backend Total Time (s)",             # 14
             "User Perceived Summary Latency (s)", # 15
-            "Clock Time",                         # 16 
+            "Clock Time",                         # 16
             "Audio Upload Time (s)",              # 17
             "Summary Store Time (s)",             # 18
-            
         ]
+        num_cols = len(headers)
 
-        # Style the header row
+        # Styles
         header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
         header_font = Font(bold=True, color="FFFFFF")
+        sep_fill    = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+        sep_font    = Font(bold=True, color="1F3864")
 
-        for col_idx, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col_idx)
-            cell.value = header
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal="center", vertical="center")
+        def write_header(row_idx):
+            for col_idx, h in enumerate(headers, 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.value = h
+                cell.fill  = header_fill
+                cell.font  = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
 
         def _t(result, key):
             v = result.get(key)
             return round(v, 5) if v is not None else None
 
-        # Add data rows
-        for row_idx, result in enumerate(results, 2):
+        def write_data_row(row_idx, result):
             ws.cell(row=row_idx, column=1).value  = result.get("doctor_id")
             ws.cell(row=row_idx, column=2).value  = result.get("patient_id")
             ws.cell(row=row_idx, column=3).value  = result.get("audio_id")
@@ -1630,6 +1635,36 @@ def export():
             ws.cell(row=row_idx, column=16).value = f"{cs} - {ce}" if cs and ce else None
             ws.cell(row=row_idx, column=17).value = _t(result, "audio_upload_time")
             ws.cell(row=row_idx, column=18).value = _t(result, "summary_store_time")
+
+        def pid_sort_key(r):
+            v = str(r.get("patient_id", ""))
+            return int(v) if v.isdigit() else v
+
+        cur_row = 1
+        for round_idx, round_results in enumerate(runs):
+            if not round_results:
+                continue
+
+            # Separator + round label between rounds (not before the first one)
+            if round_idx > 0:
+                cur_row += 1   # blank gap row
+                sep_cell = ws.cell(row=cur_row, column=1)
+                sep_cell.value = f"Run {round_idx + 1}"
+                sep_cell.fill  = sep_fill
+                sep_cell.font  = sep_font
+                sep_cell.alignment = Alignment(horizontal="left", vertical="center")
+                for c in range(2, num_cols + 1):
+                    ws.cell(row=cur_row, column=c).fill = sep_fill
+                cur_row += 1
+
+            # Header row for this round
+            write_header(cur_row)
+            cur_row += 1
+
+            # Data rows sorted by patient_id ascending within this round
+            for result in sorted(round_results, key=pid_sort_key):
+                write_data_row(cur_row, result)
+                cur_row += 1
 
         # Adjust column widths
         ws.column_dimensions['A'].width = 12
