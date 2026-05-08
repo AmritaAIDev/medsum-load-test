@@ -1183,6 +1183,7 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
         log(f"  [Dr {doctor_idx+1}|Pt {patient_id}] Audio {audio_idx+1}/{len(audios)}: {audio_name}")
 
         try:
+            clock_start = datetime.now()
             # Step 4 — transcribe (audio as base64 → AI pipeline)
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4] Transcribing ({language}/{llm})...")
             start_time = time.time()
@@ -1220,7 +1221,7 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4 OK] total-time={total_time}s  audio_length={audio_length}s  step-time={step4_time:.2f}s")
 
             # Step 5 — upload audio recording for archival (after transcription completes)
-            client_sid = str(uuid.uuid4())
+            client_sid = f"LOADTEST_{uuid.uuid4()}"
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 5] Uploading audio for archival...")
             start_time = time.time()
             r5 = sess.post(f"{django}/api/audio-data/",
@@ -1252,6 +1253,7 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
                 raise RuntimeError(f"summary-data {r6.status_code}: {r6.text[:200]}")
             summary_id = r6.json().get("summary_id")
             step6_time = time.time() - start_time
+            clock_end  = datetime.now()
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 6 OK] summary_id={summary_id}  time={step6_time:.2f}s")
 
             # Collect timing data for export
@@ -1275,7 +1277,43 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
                 "llm_time":               b4.get("llm-time"),
                 "flask_total_time":       b4.get("total-time"),
                 "audio_processing_time":  audio_processing_time,
+                "clock_start":            clock_start.strftime("%H:%M:%S.%f")[:-3],
+                "clock_end":              clock_end.strftime("%H:%M:%S.%f")[:-3],
             })
+
+            # Step 7 — persist timing row to load_test_result (fire-and-forget, non-blocking)
+            try:
+                r7 = sess.post(f"{django}/api/load-test/result/", json={
+                    "test_run_id":        cfg.get("test_run_id"),
+                    "doctor_id":          doctor_id,
+                    "patient_id":         int(patient_id),
+                    "audio_id":           audio_id,
+                    "summary_id":         summary_id,
+                    "language":           language,
+                    "llm":                llm,
+                    "stt_model":          stt_model,
+                    "translate_model":    translate_model,
+                    "audio_duration_s":   audio_length,
+                    "login_time":         doctor_times.get("step1_time")  if doctor_times else None,
+                    "doctor_profile_time": doctor_times.get("step1b_time") if doctor_times else None,
+                    "patient_metadata_time":        round(patient_data_time, 5),
+                    "audio_upload_time":            round(step5_time, 5),
+                    "summary_store_time":           round(step6_time, 5),
+                    "user_percieved_summary_latency": round(step4_time, 5),
+                    "transcription_time":           b4.get("transcription-time"),
+                    "translation_time":             b4.get("translation-time"),
+                    "llm_time":                     b4.get("llm-time"),
+                    "flask_total_time":             b4.get("total-time"),
+                    "audio_processing_time":        audio_processing_time,
+                    "status":             "pass",
+                    "error_message":      None,
+                }, timeout=10)
+                if r7.status_code == 201:
+                    log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 7 OK] LoadTestResult saved (run={cfg.get('test_run_id', '')[:8]}…)")
+                else:
+                    log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 7 WARN] LoadTestResult {r7.status_code}: {r7.text[:120]}")
+            except Exception as e7:
+                log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 7 WARN] LoadTestResult save failed: {e7}")
 
             row(row_id, status="pass", audio_id=audio_id, summary_id=summary_id,
                 total_time=round(total_time, 1) if total_time else None,
@@ -1286,6 +1324,23 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
         except Exception as e:
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [FAIL] {e}")
             row(row_id, status="fail", error=str(e))
+            try:
+                sess.post(f"{django}/api/load-test/result/", json={
+                    "test_run_id":    cfg.get("test_run_id"),
+                    "doctor_id":      doctor_id,
+                    "patient_id":     int(patient_id),
+                    "audio_id":       None,
+                    "summary_id":     None,
+                    "language":       language,
+                    "llm":            llm,
+                    "stt_model":      stt_model,
+                    "translate_model": translate_model,
+                    "audio_duration_s": audio_duration,
+                    "status":         "fail",
+                    "error_message":  str(e),
+                }, timeout=10)
+            except Exception:
+                pass
 
 
 def _run_doctor(doctor_idx, doctor_cfg, patient_audios, cfg, q):
@@ -1440,6 +1495,7 @@ def run():
             di, pid = int(m.group(1)), m.group(2)
             patient_languages[(di, pid)] = request.form[key]
     cfg["patient_languages"] = patient_languages
+    cfg["test_run_id"]       = str(uuid.uuid4())  # shared across all rows in this run
 
     if not doctors:
         return {"error": "No doctors provided"}, 400
@@ -1505,7 +1561,10 @@ def export():
         
         if not results:
             return {"error": "No results to export"}, 400
-        
+
+        # Sort by patient_id ascending (numeric where possible, else lexicographic)
+        results.sort(key=lambda r: (int(r["patient_id"]) if str(r.get("patient_id", "")).isdigit() else r.get("patient_id", "")))
+
         # Create a new workbook
         wb = Workbook()
         ws = wb.active
@@ -1522,14 +1581,15 @@ def export():
             "Login Time (s)",                     # 7
             "Doctor Profile Time (s)",            # 8
             "Patient Metadata Time (s)",          # 9
-            "Audio Processing Time (s)",          # 10
-            "Audio Upload Time (s)",              # 11
-            "Summary Store Time (s)",             # 12
-            "STT Time (s)",                       # 13
-            "Translation Time (s)",               # 14
-            "LLM Time (s)",                       # 15
-            "Flask Total Time (s)",               # 16
-            "User Perceived Summary Latency (s)", # 17
+            "Audio Processing Time (s)",          #10
+            "STT Time (s)",                       # 11
+            "Translation Time (s)",               # 12
+            "LLM Time (s)",                       # 13
+            "Backend Total Time (s)",             # 14
+            "User Perceived Summary Latency (s)", # 15
+            "Clock Time",                         # 16 
+            "Audio Upload Time (s)",              # 17
+            "Summary Store Time (s)",             # 18
             
         ]
 
@@ -1560,14 +1620,16 @@ def export():
             ws.cell(row=row_idx, column=8).value  = _t(result, "step1b_time")
             ws.cell(row=row_idx, column=9).value  = _t(result, "patient_metadata_time")
             ws.cell(row=row_idx, column=10).value = _t(result, "audio_processing_time")
-            ws.cell(row=row_idx, column=11).value = _t(result, "audio_upload_time")
-            ws.cell(row=row_idx, column=12).value = _t(result, "summary_store_time")
-            ws.cell(row=row_idx, column=13).value = _t(result, "transcription_time")
-            ws.cell(row=row_idx, column=14).value = _t(result, "translation_time")
-            ws.cell(row=row_idx, column=15).value = _t(result, "llm_time")
-            ws.cell(row=row_idx, column=16).value = _t(result, "flask_total_time")
-            ws.cell(row=row_idx, column=17).value = _t(result, "transcribe_rtt")
-            # ws.cell(row=row_idx, column=18).value = _t(result, "user_percieved_summary_latency")
+            ws.cell(row=row_idx, column=11).value = _t(result, "transcription_time")
+            ws.cell(row=row_idx, column=12).value = _t(result, "translation_time")
+            ws.cell(row=row_idx, column=13).value = _t(result, "llm_time")
+            ws.cell(row=row_idx, column=14).value = _t(result, "flask_total_time")
+            ws.cell(row=row_idx, column=15).value = _t(result, "transcribe_rtt")
+            cs = result.get("clock_start", "")
+            ce = result.get("clock_end", "")
+            ws.cell(row=row_idx, column=16).value = f"{cs} - {ce}" if cs and ce else None
+            ws.cell(row=row_idx, column=17).value = _t(result, "audio_upload_time")
+            ws.cell(row=row_idx, column=18).value = _t(result, "summary_store_time")
 
         # Adjust column widths
         ws.column_dimensions['A'].width = 12
@@ -1587,7 +1649,7 @@ def export():
         ws.column_dimensions['O'].width = 14
         ws.column_dimensions['P'].width = 20
         ws.column_dimensions['Q'].width = 24
-        # ws.column_dimensions['R'].width = 30
+        ws.column_dimensions['R'].width = 22
         
         # Save to bytes
         excel_buffer = io.BytesIO()
