@@ -7,8 +7,10 @@ Open: http://127.0.0.1:5050
 import base64
 import io
 import json
+import os
 import queue
 import re
+import tempfile
 import threading
 import time
 import uuid
@@ -1066,6 +1068,10 @@ function updateRow(evt) {
     statusCell.textContent = '✗ Fail';
     runStats.failed++;
     if (detCell) { detCell.innerHTML = `<span class="err-text">${evt.error || 'Unknown error'}</span>`; }
+    // Include fail rows in export so they appear in Excel with Status = Fail
+    if (evt.timing_data && currentRound) {
+      currentRound.push(evt.timing_data);
+    }
     updateProgress();
   }
 
@@ -1183,12 +1189,13 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
         log(f"  [Dr {doctor_idx+1}|Pt {patient_id}] WARN: {e}  time={patient_data_time:.2f}s")
 
     # Audios are sequential per patient (upload → transcribe → store must be in order)
-    for audio_idx, (audio_name, audio_bytes) in enumerate(audios):
+    for audio_idx, (audio_name, audio_path) in enumerate(audios):
         row_id = f"d{doctor_idx}_p{patient_id}_a{audio_idx}"
         row(row_id, status="running")
         log(f"  [Dr {doctor_idx+1}|Pt {patient_id}] Audio {audio_idx+1}/{len(audios)}: {audio_name}")
 
         try:
+            audio_bytes = open(audio_path, 'rb').read()  # read JIT — free after Step 5
             clock_start = datetime.now()
             # Step 4 — transcribe (audio as base64 → AI pipeline)
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 4] Transcribing ({language}/{llm})...")
@@ -1242,6 +1249,7 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
             audio_id   = b5["audio_id"]
             session_id = b5.get("session_id") or client_sid
             step5_time = time.time() - start_time
+            del audio_bytes  # no longer needed — free before Step 6
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [Step 5 OK] audio_id={audio_id}  time={step5_time:.2f}s")
 
             # Step 6 — store summary
@@ -1329,7 +1337,17 @@ def _run_patient(doctor_idx, patient_id, doctor_id, auth_token,
 
         except Exception as e:
             log(f"    [Dr {doctor_idx+1}|Pt {patient_id}] [FAIL] {e}")
-            row(row_id, status="fail", error=str(e))
+            partial_timing = {
+                "doctor_id":            doctor_id,
+                "patient_id":           patient_id,
+                "audio_duration":       audio_duration,
+                "language":             language,
+                "status":               "fail",
+            }
+            if doctor_times:
+                partial_timing.update(doctor_times)
+            partial_timing["patient_metadata_time"] = round(patient_data_time, 2) if patient_data_time else None
+            row(row_id, status="fail", error=str(e), timing_data=partial_timing)
             try:
                 sess.post(f"{django}/api/load-test/result/", json={
                     "test_run_id":    cfg.get("test_run_id"),
@@ -1365,9 +1383,16 @@ def _run_doctor(doctor_idx, doctor_cfg, patient_audios, cfg, q):
     patient_ids = doctor_cfg["patientIds"]
     duration    = float(cfg["duration"])
 
+    _local_tmp = []
     def get_audios(pid):
         result = patient_audios.get((doctor_idx, str(pid)), [])
-        return result if result else [("silent.wav", _make_wav(duration))]
+        if result:
+            return result
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        tmp.write(_make_wav(duration))
+        tmp.close()
+        _local_tmp.append(tmp.name)
+        return [("silent.wav", tmp.name)]
 
     # ── Step 1: Login (sequential — need token before anything else) ──────────
     log(f"  [Dr {doctor_idx+1}] [Step 1] Login  phone={phone}")
@@ -1440,6 +1465,10 @@ def _run_doctor(doctor_idx, doctor_cfg, patient_audios, cfg, q):
                 pid = futures[future]
                 log(f"  [Dr {doctor_idx+1}|Pt {pid}] Unhandled exception: {e}")
 
+    for p in _local_tmp:
+        try: os.unlink(p)
+        except OSError: pass
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Routes
@@ -1478,7 +1507,9 @@ def run():
         "duration":      duration,
     }
 
-    # Collect per-patient audio files: paudio_{di}_{pid}_{ai}
+    # Collect per-patient audio files: spill to /tmp immediately so bytes
+    # don't sit in RAM for the entire run — each thread reads on demand.
+    _tmp_paths = []
     try:
         patient_audios = {}
         for key in request.files:
@@ -1486,11 +1517,18 @@ def run():
             if m:
                 di, pid, ai = int(m.group(1)), m.group(2), int(m.group(3))
                 f = request.files[key]
-                patient_audios.setdefault((di, pid), []).append((ai, f.filename, f.read()))
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+                tmp.write(f.read())
+                tmp.close()
+                _tmp_paths.append(tmp.name)
+                patient_audios.setdefault((di, pid), []).append((ai, f.filename, tmp.name))
         for k in patient_audios:
             patient_audios[k].sort(key=lambda x: x[0])
-            patient_audios[k] = [(name, data) for _, name, data in patient_audios[k]]
+            patient_audios[k] = [(name, path) for _, name, path in patient_audios[k]]
     except Exception as e:
+        for p in _tmp_paths:
+            try: os.unlink(p)
+            except OSError: pass
         return {"error": f"Audio file read error: {e}"}, 500
 
     # Collect per-patient languages: plang_{di}_{pid}
@@ -1508,7 +1546,7 @@ def run():
 
     def _get_audios(di, pid):
         result = patient_audios.get((di, str(pid)), [])
-        return result if result else [("silent.wav", _make_wav(duration))]
+        return result if result else [None]  # 1 silent-WAV fallback for count only
 
     total = sum(
         len(_get_audios(di, pid))
@@ -1534,6 +1572,11 @@ def run():
                     f.result()
                 except Exception as e:
                     q.put({"type": "log", "message": f"  [ERROR] Doctor thread: {e}"})
+
+        # All threads done — delete temp audio files spilled to disk
+        for p in _tmp_paths:
+            try: os.unlink(p)
+            except OSError: pass
 
         q.put({"type": "done", "passed": passed[0], "total": total})
         q.put(None)
@@ -1574,6 +1617,7 @@ def export():
         ws.title = "Test Results"
 
         # Define headers — col order must match data rows below
+        # Metric names aligned with PERFORMANCE_TEST_PLAN_2026_05.md §4.3
         headers = [
             "Doctor ID",                          # 1
             "Patient ID",                         # 2
@@ -1581,18 +1625,19 @@ def export():
             "Summary ID",                         # 4
             "Audio Duration (s)",                 # 5
             "Language",                           # 6
-            "Login Time (s)",                     # 7
-            "Doctor Profile Time (s)",            # 8
-            "Patient Metadata Time (s)",          # 9
-            "Audio Processing Time (s)",          #10
-            "STT Time (s)",                       # 11
-            "Translation Time (s)",               # 12
-            "LLM Time (s)",                       # 13
-            "Backend Total Time (s)",             # 14
-            "User Perceived Summary Latency (s)", # 15
-            "Clock Time",                         # 16
-            "Audio Upload Time (s)",              # 17
-            "Summary Store Time (s)",             # 18
+            "Login Response Time (s)",            # 7  — client clock, outside BT/RT
+            "Profile Response Time (s)",          # 8  — client clock, outside BT/RT
+            "Patient Data Response Time (s)",     # 9  — client clock, outside BT/RT
+            "Audio Preprocessing Latency (s)",    # 10 — Flask internal, inside BT & RT
+            "STT Latency (s)",                    # 11 — Flask internal, inside BT & RT
+            "Translation Latency (s)",            # 12 — Flask internal, inside BT & RT
+            "LLM Latency (s)",                    # 13 — Flask internal, inside BT & RT
+            "Backend Processing Latency (s)",     # 14 — Flask internal = sum(10–13)
+            "Response Time (s)",                  # 15 — client clock = BT + network overhead
+            "Clock Time",                         # 16 — clock_start → clock_end (batch window)
+            "Archival Upload Response Time (s)",  # 17 — client clock, outside BT/RT
+            "Summary Store Response Time (s)",    # 18 — client clock, outside BT/RT
+            "Status",                             # 19 — Pass / Fail
         ]
         num_cols = len(headers)
 
@@ -1615,26 +1660,42 @@ def export():
             return round(v, 5) if v is not None else None
 
         def write_data_row(row_idx, result):
+            is_fail = result.get("status") == "fail"
+
+            def _or_dash(v):
+                """Return value if present, '--' for fail rows, None for pass rows."""
+                if v is not None:
+                    return v
+                return "--" if is_fail else None
+
             ws.cell(row=row_idx, column=1).value  = result.get("doctor_id")
             ws.cell(row=row_idx, column=2).value  = result.get("patient_id")
-            ws.cell(row=row_idx, column=3).value  = result.get("audio_id")
-            ws.cell(row=row_idx, column=4).value  = result.get("summary_id")
+            ws.cell(row=row_idx, column=3).value  = _or_dash(result.get("audio_id"))
+            ws.cell(row=row_idx, column=4).value  = _or_dash(result.get("summary_id"))
             ws.cell(row=row_idx, column=5).value  = result.get("audio_duration")
             ws.cell(row=row_idx, column=6).value  = result.get("language")
-            ws.cell(row=row_idx, column=7).value  = _t(result, "step1_time")
-            ws.cell(row=row_idx, column=8).value  = _t(result, "step1b_time")
-            ws.cell(row=row_idx, column=9).value  = _t(result, "patient_metadata_time")
-            ws.cell(row=row_idx, column=10).value = _t(result, "audio_processing_time")
-            ws.cell(row=row_idx, column=11).value = _t(result, "transcription_time")
-            ws.cell(row=row_idx, column=12).value = _t(result, "translation_time")
-            ws.cell(row=row_idx, column=13).value = _t(result, "llm_time")
-            ws.cell(row=row_idx, column=14).value = _t(result, "flask_total_time")
-            ws.cell(row=row_idx, column=15).value = _t(result, "transcribe_rtt")
+            ws.cell(row=row_idx, column=7).value  = _or_dash(_t(result, "step1_time"))
+            ws.cell(row=row_idx, column=8).value  = _or_dash(_t(result, "step1b_time"))
+            ws.cell(row=row_idx, column=9).value  = _or_dash(_t(result, "patient_metadata_time"))
+            ws.cell(row=row_idx, column=10).value = _or_dash(_t(result, "audio_processing_time"))
+            ws.cell(row=row_idx, column=11).value = _or_dash(_t(result, "transcription_time"))
+            ws.cell(row=row_idx, column=12).value = _or_dash(_t(result, "translation_time"))
+            ws.cell(row=row_idx, column=13).value = _or_dash(_t(result, "llm_time"))
+            ws.cell(row=row_idx, column=14).value = _or_dash(_t(result, "flask_total_time"))
+            ws.cell(row=row_idx, column=15).value = _or_dash(_t(result, "transcribe_rtt"))
             cs = result.get("clock_start", "")
             ce = result.get("clock_end", "")
-            ws.cell(row=row_idx, column=16).value = f"{cs} - {ce}" if cs and ce else None
-            ws.cell(row=row_idx, column=17).value = _t(result, "audio_upload_time")
-            ws.cell(row=row_idx, column=18).value = _t(result, "summary_store_time")
+            ws.cell(row=row_idx, column=16).value = f"{cs} - {ce}" if cs and ce else ("--" if is_fail else None)
+            ws.cell(row=row_idx, column=17).value = _or_dash(_t(result, "audio_upload_time"))
+            ws.cell(row=row_idx, column=18).value = _or_dash(_t(result, "summary_store_time"))
+            # Status column — red for Fail, green for Pass
+            status_cell = ws.cell(row=row_idx, column=19)
+            if is_fail:
+                status_cell.value = "Fail"
+                status_cell.font  = Font(bold=True, color="FF0000")
+            else:
+                status_cell.value = "Pass"
+                status_cell.font  = Font(bold=True, color="006100")
 
         def pid_sort_key(r):
             v = str(r.get("patient_id", ""))
@@ -1685,7 +1746,8 @@ def export():
         ws.column_dimensions['P'].width = 20
         ws.column_dimensions['Q'].width = 24
         ws.column_dimensions['R'].width = 22
-        
+        ws.column_dimensions['S'].width = 10
+
         # Save to bytes
         excel_buffer = io.BytesIO()
         wb.save(excel_buffer)
