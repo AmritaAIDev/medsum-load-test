@@ -944,6 +944,20 @@ document.getElementById('run-btn').addEventListener('click', async () => {
   runStats.passed = 0; runStats.failed = 0;
   updateProgress();
 
+  // Reset stat displays to placeholder
+  document.getElementById('stat-pass').textContent = '--';
+  document.getElementById('stat-fail').textContent = '--';
+
+  // Remove expand rows and reset all row statuses back to Pending
+  document.querySelectorAll('.expand-row').forEach(r => r.remove());
+  document.querySelectorAll('#run-tbody tr').forEach(row => {
+    const statusCell = row.querySelector('.badge-status');
+    if (statusCell) { statusCell.className = 'badge-status badge-pending'; statusCell.textContent = 'Pending'; }
+    const aid = row.querySelector('[id^="aid-"]'); if (aid) aid.textContent = '—';
+    const sid = row.querySelector('[id^="sid-"]'); if (sid) sid.textContent = '—';
+    const det = row.querySelector('[id^="det-"]'); if (det) det.innerHTML = '—';
+  });
+
   // Start a new round — results accumulate across re-runs
   currentRound = [];
   testRuns.push(currentRound);
@@ -1075,8 +1089,8 @@ function updateRow(evt) {
     updateProgress();
   }
 
-  document.getElementById('stat-pass').textContent = runStats.passed;
-  document.getElementById('stat-fail').textContent = runStats.failed;
+  document.getElementById('stat-pass').textContent = runStats.passed > 0 ? runStats.passed : '--';
+  document.getElementById('stat-fail').textContent = runStats.failed > 0 ? runStats.failed : '--';
 }
 
 function updateProgress() {
