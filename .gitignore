@@ -1,0 +1,9 @@
+config/medsum_config.yaml
+credentials/*.json
+results/
+
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/

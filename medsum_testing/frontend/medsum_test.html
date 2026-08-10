@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MEDSUM Accuracy Testing</title>
+  <link rel="stylesheet" href="/css/medsum_test.css">
+</head>
+<body>
+
+<header>
+  <h1>MEDSUM Accuracy Testing</h1>
+  <span class="badge">Accuracy Testing</span>
+  <div class="header-right">
+    <a href="http://127.0.0.1:5050" class="link-muted" target="_blank">Load Test Console ↗</a>
+  </div>
+</header>
+
+<main class="container">
+
+  <div class="tab-bar">
+    <button class="tab active" id="tab-run" type="button">Run New Test</button>
+    <button class="tab" id="tab-past" type="button">View Past Results</button>
+  </div>
+
+  <!-- Run New Test -->
+  <section id="panel-run">
+
+    <div class="card">
+      <div class="card-title"><span class="dot"></span> Configure Test</div>
+      <div class="form-grid">
+        <div class="field">
+          <label for="language-select">Language</label>
+          <select id="language-select">
+            <option value="">Loading…</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="audio-select">Audio File</label>
+          <select id="audio-select">
+            <option value="">Select language first</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="ai-model-select">AI Model</label>
+          <select id="ai-model-select">
+            <option value="gpt-4">GPT-4</option>
+            <option value="deepseek">DeepSeek</option>
+          </select>
+        </div>
+      </div>
+      <div class="action-row">
+        <button class="btn btn-primary" id="run-btn" type="button">▶ Run Test</button>
+        <span class="hint" id="transcript-hint"></span>
+      </div>
+    </div>
+
+    <div class="card" id="progress-card" style="display:none;">
+      <div class="card-title"><span class="dot"></span> Test Progress</div>
+      <ul class="progress-list" id="progress-list"></ul>
+    </div>
+
+    <div class="card" id="results-card" style="display:none;">
+      <div class="card-title">
+        <span class="dot"></span> Results
+        <div class="card-actions">
+          <button class="btn btn-secondary btn-sm" id="pdf-btn" type="button" disabled>PDF</button>
+          <button class="btn btn-secondary btn-sm" id="excel-btn" type="button" disabled>Excel</button>
+        </div>
+      </div>
+
+      <div class="score-bar" id="score-bar"></div>
+
+      <div class="card-subtitle">Transcription Diff</div>
+      <div class="diff-grid">
+        <div class="diff-col ground-truth">
+          <div class="diff-label">Ground Truth</div>
+          <div class="diff-text" id="ground-truth-text">—</div>
+        </div>
+        <div class="diff-col generated">
+          <div class="diff-label">Generated</div>
+          <div class="diff-text" id="generated-text">—</div>
+        </div>
+      </div>
+
+      <div class="card-subtitle medical-title">Medical Differences <span class="warn-icon">⚠</span></div>
+      <ul class="diff-list medical-list" id="medical-diffs"></ul>
+
+      <details class="expand-section" open>
+        <summary>Summary Diff</summary>
+        <div class="expand-body" id="summary-diff"></div>
+      </details>
+
+      <details class="expand-section">
+        <summary>Medication Diff</summary>
+        <div class="expand-body" id="medication-diff"></div>
+      </details>
+
+      <details class="expand-section" id="regression-section" style="display:none;">
+        <summary>Regression vs Previous Run</summary>
+        <div class="expand-body" id="regression-diff"></div>
+      </details>
+
+      <div class="errors-box" id="errors-box" style="display:none;"></div>
+    </div>
+
+  </section>
+
+  <!-- Past Results -->
+  <section id="panel-past" style="display:none;">
+    <div class="card">
+      <div class="card-title"><span class="dot"></span> Past Results</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Test ID</th>
+              <th>Language</th>
+              <th>Audio File</th>
+              <th>Timestamp</th>
+              <th>Result</th>
+              <th>Score</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="past-results-body">
+            <tr><td colspan="7" class="empty-row">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script src="/js/medsum_test.js"></script>
+</body>
+</html>
