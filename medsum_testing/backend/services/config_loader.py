@@ -9,7 +9,11 @@ from typing import Any
 import yaml
 
 _CONFIG: dict[str, Any] | None = None
-_RUNTIME: dict[str, Any] = {"auth_token": None, "doctor_id": None}
+_RUNTIME: dict[str, Any] = {
+    "access_token": None,
+    "refresh_token": None,
+    "doctor_id": None,
+}
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONFIG_PATH = _REPO_ROOT / "config" / "medsum_config.yaml"
 _EXAMPLE_PATH = _REPO_ROOT / "config" / "medsum_config.example.yaml"
@@ -34,7 +38,8 @@ def get_runtime() -> dict[str, Any]:
 
 
 def clear_runtime() -> None:
-    _RUNTIME["auth_token"] = None
+    _RUNTIME["access_token"] = None
+    _RUNTIME["refresh_token"] = None
     _RUNTIME["doctor_id"] = None
 
 

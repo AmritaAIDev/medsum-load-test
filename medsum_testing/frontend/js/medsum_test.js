@@ -62,7 +62,7 @@ async function loadDriveFiles() {
 
 function populateAudioFiles() {
   const lang = languageSelect.value;
-  const files = driveFiles.filter(f => f.language === lang);
+  const files = driveFiles.filter(f => f.language === lang && f.status === 'ready');
   audioSelect.innerHTML = files.length
     ? files.map(f => `<option value="${esc(f.audio)}">${esc(f.audio)}${f.has_transcript ? '' : ' (no transcript)'}</option>`).join('')
     : '<option value="">No audio files</option>';
@@ -133,8 +133,8 @@ async function runTest() {
 
 const DEFAULT_STEPS = [
   'Fetching audio from Drive',
-  'Submitting to MedSum API',
-  'Waiting for transcription',
+  'Uploading audio to Django',
+  'Transcribing via Flask',
   'Running AI comparison',
 ];
 
@@ -335,9 +335,6 @@ function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
-loadDriveFiles();
-loadScheduleState();
-
 // ── Schedule panel ───────────────────────────────────────────────────────────
 
 const scheduleCron = document.getElementById('schedule-cron');
@@ -361,6 +358,17 @@ if (scheduleCron) {
   runAllBtn.addEventListener('click', runAllNow);
 }
 
+function initPage() {
+  loadDriveFiles();
+  loadScheduleState();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initPage);
+} else {
+  initPage();
+}
+
 function showToast(msg) {
   toast.textContent = msg;
   toast.style.display = '';
@@ -375,13 +383,16 @@ function getSelectedCron() {
 }
 
 async function loadScheduleState() {
-  if (!scheduleInfo) return;
+  const infoEl = document.getElementById('schedule-info');
+  if (!infoEl) return;
   try {
     const res = await fetch(`${API}/schedule`);
-    const data = await res.json();
-    renderSchedulePanel(data);
+    if (!res.ok) throw new Error(`Schedule fetch failed: ${res.status}`);
+    const scheduleData = await res.json();
+    renderSchedulePanel(scheduleData);
   } catch (err) {
-    scheduleInfo.textContent = `Failed to load schedule: ${err.message}`;
+    console.warn('Could not load schedule state:', err);
+    infoEl.textContent = `Failed to load schedule: ${err.message}`;
   }
 }
 
