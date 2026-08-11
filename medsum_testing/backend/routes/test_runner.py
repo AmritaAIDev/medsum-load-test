@@ -25,7 +25,17 @@ def _update_step(result: TestResult, step: str, status: str) -> None:
     result.progress_steps.append({"step": step, "status": status})
 
 
-def _run_test_flow(test_id: str, language: str, audio_filename: str, ai_model: str) -> None:
+def execute_test_run(
+    language: str,
+    audio_filename: str,
+    ai_model: str,
+    test_id: str | None = None,
+) -> TestResult:
+    """
+    Core test execution — used by HTTP route and scheduler.
+    Returns the full TestResult (status complete or failed).
+    """
+    test_id = test_id or str(uuid.uuid4())
     result = TestResult(
         test_id=test_id,
         status="running",
@@ -43,12 +53,14 @@ def _run_test_flow(test_id: str, language: str, audio_filename: str, ai_model: s
 
     try:
         config = get_config()
-        cases = drive_service.list_test_cases()
+        cases = drive_service.list_test_cases(config)
         case = next(
             (
                 c
                 for c in cases
-                if c["language"] == language and c["audio_filename"] == audio_filename
+                if c.get("status") == "ready"
+                and c["language"] == language
+                and c["audio_filename"] == audio_filename
             ),
             None,
         )
@@ -61,8 +73,11 @@ def _run_test_flow(test_id: str, language: str, audio_filename: str, ai_model: s
         audio_bytes = drive_service.download_audio(case["audio_file_id"])
         ground_truth = ""
         if case.get("transcript_file_id"):
-            ground_truth = drive_service.download_transcript(case["transcript_file_id"])
-        elif result.ground_truth_flag == "no_ground_truth":
+            ground_truth = drive_service.download_transcript(
+                case["transcript_file_id"],
+                mime_type=case.get("transcript_mime_type"),
+            )
+        elif not case.get("has_transcript"):
             result.accuracy_skipped = True
             result.accuracy_skip_reason = "No ground truth .txt file found for this audio"
 
@@ -83,44 +98,42 @@ def _run_test_flow(test_id: str, language: str, audio_filename: str, ai_model: s
         result.session_id = session_id
         result.session_datetime = datetime.now(timezone.utc).isoformat()
 
-        submit = medsum_api.submit_audio(
+        upload = medsum_api.submit_audio(
             audio_bytes=audio_bytes,
             audio_filename=audio_filename,
             session_id=session_id,
             config=config,
-            token=token,
             language=language,
-            duration_seconds=result.audio_duration_seconds,
             doctor_id=doctor_id,
             patient_id=patient_id,
         )
-
-        result.job_id = submit.get("job_id", "")
-        result.session_id = submit.get("session_id", session_id)
-        cached_transcription = submit.get("transcription", "")
-        cached_summary = submit.get("summary")
-        result.text_translation = submit.get("translation", "")
-        flask_body = submit.get("flask_body", {})
+        job_id = upload["job_id"]
+        result.job_id = job_id
 
         _update_step(result, "Submitting to MedSum API", "done")
         _update_step(result, "Waiting for transcription", "active")
         save_result(result)
 
-        generated, retry_count = medsum_api.fetch_transcription(
-            result.session_id,
-            token,
-            config,
-            cached=cached_transcription,
+        transcription, translation, retries_used = medsum_api.fetch_transcription(
+            job_id, config
         )
-        result.retry_count = retry_count
-        result.generated_transcription = generated or cached_transcription
+        result.retry_count = retries_used
+        result.generated_transcription = transcription
+        result.text_translation = translation or ""
 
-        summary_data = medsum_api.fetch_summary(
-            result.session_id, token, config, cached=cached_summary
+        medsum_api.store_transcription(
+            session_id=session_id,
+            transcription=transcription,
+            translation=translation,
+            language=language,
+            token=token,
+            config=config,
         )
-        result.generated_summary = summary_data.get("summary", cached_summary)
 
-        meds = medsum_api.fetch_medications(result.session_id, token, config, flask_body)
+        summary_data = medsum_api.fetch_summary(session_id, token, config)
+        result.generated_summary = summary_data.get("summary")
+
+        meds = medsum_api.fetch_medications(session_id, token, config)
         result.medications_before = meds.get("before")
         result.medications_after_normalization = meds.get("after_normalization")
         result.medications_generated = meds.get("generated")
@@ -147,7 +160,7 @@ def _run_test_flow(test_id: str, language: str, audio_filename: str, ai_model: s
                 result.accuracy_skipped = True
                 result.accuracy_skip_reason = "No ground truth available"
 
-        if previous and result.previous_summary is not None:
+        if previous and previous.generated_summary is not None:
             result.summary_comparison = ai_comparator.compare_summaries(
                 previous.generated_summary, result.generated_summary, ai_model
             )
@@ -166,7 +179,10 @@ def _run_test_flow(test_id: str, language: str, audio_filename: str, ai_model: s
 
         if result.accuracy_skipped:
             result.final_result = "complete_no_accuracy"
-        elif result.transcription_comparison and result.transcription_comparison.severity == "high":
+        elif result.transcription_comparison and result.transcription_comparison.severity in (
+            "high",
+            "critical",
+        ):
             result.final_result = "fail"
         elif result.transcription_comparison and (result.accuracy_score or 0) >= 80:
             result.final_result = "pass"
@@ -183,16 +199,24 @@ def _run_test_flow(test_id: str, language: str, audio_filename: str, ai_model: s
         for step in result.progress_steps:
             if step["status"] == "active":
                 step["status"] = "failed"
+        save_result(result)
+        return result
 
     save_result(result)
+    return result
+
+
+def _run_and_store(test_id: str, language: str, audio_filename: str, ai_model: str) -> None:
+    execute_test_run(language, audio_filename, ai_model, test_id=test_id)
 
 
 @bp.route("/drive-files", methods=["GET"])
 def drive_files():
     try:
-        return jsonify(drive_service.list_drive_files_response())
+        config = get_config()
+        return jsonify(drive_service.list_drive_files_response(config))
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": str(exc), "traceback": traceback.format_exc()}), 500
 
 
 @bp.route("/run", methods=["POST"])
@@ -210,7 +234,7 @@ def run_test():
 
     test_id = str(uuid.uuid4())
     thread = threading.Thread(
-        target=_run_test_flow,
+        target=_run_and_store,
         args=(test_id, language, audio_filename, ai_model),
         daemon=True,
     )

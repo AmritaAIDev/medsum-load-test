@@ -336,3 +336,127 @@ function esc(s) {
 }
 
 loadDriveFiles();
+loadScheduleState();
+
+// ── Schedule panel ───────────────────────────────────────────────────────────
+
+const scheduleCron = document.getElementById('schedule-cron');
+const scheduleCronCustom = document.getElementById('schedule-cron-custom');
+const customCronField = document.getElementById('custom-cron-field');
+const scheduleModel = document.getElementById('schedule-model');
+const scheduleEnabled = document.getElementById('schedule-enabled');
+const saveScheduleBtn = document.getElementById('save-schedule-btn');
+const runAllBtn = document.getElementById('run-all-btn');
+const scheduleInfo = document.getElementById('schedule-info');
+const scheduleStatusBadge = document.getElementById('schedule-status-badge');
+const lastRunPanel = document.getElementById('last-run-panel');
+const lastRunList = document.getElementById('last-run-list');
+const toast = document.getElementById('toast');
+
+if (scheduleCron) {
+  scheduleCron.addEventListener('change', () => {
+    customCronField.style.display = scheduleCron.value === 'custom' ? '' : 'none';
+  });
+  saveScheduleBtn.addEventListener('click', saveSchedule);
+  runAllBtn.addEventListener('click', runAllNow);
+}
+
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.style.display = '';
+  setTimeout(() => { toast.style.display = 'none'; }, 3000);
+}
+
+function getSelectedCron() {
+  if (scheduleCron.value === 'custom') {
+    return scheduleCronCustom.value.trim() || '0 2 * * *';
+  }
+  return scheduleCron.value;
+}
+
+async function loadScheduleState() {
+  if (!scheduleInfo) return;
+  try {
+    const res = await fetch(`${API}/schedule`);
+    const data = await res.json();
+    renderSchedulePanel(data);
+  } catch (err) {
+    scheduleInfo.textContent = `Failed to load schedule: ${err.message}`;
+  }
+}
+
+function renderSchedulePanel(data) {
+  scheduleEnabled.checked = !!data.enabled;
+  scheduleModel.value = data.ai_model || 'deepseek';
+
+  const cron = data.cron || '0 2 * * *';
+  const known = [...scheduleCron.options].some(o => o.value === cron);
+  if (known) {
+    scheduleCron.value = cron;
+    customCronField.style.display = 'none';
+  } else {
+    scheduleCron.value = 'custom';
+    scheduleCronCustom.value = cron;
+    customCronField.style.display = '';
+  }
+
+  scheduleStatusBadge.textContent = data.enabled ? 'ACTIVE' : 'INACTIVE';
+  scheduleStatusBadge.className = `schedule-status ${data.enabled ? 'active' : 'inactive'}`;
+
+  const nextRun = data.next_run ? formatTimestamp(data.next_run) : '—';
+  const lastRun = data.last_run ? formatTimestamp(data.last_run) : '—';
+  scheduleInfo.innerHTML = `
+    Status: <strong>${data.enabled ? 'Active' : 'Disabled'}</strong>
+    &nbsp;|&nbsp; Schedule: <strong>${esc(data.cron_human || cron)}</strong>
+    &nbsp;|&nbsp; Next run: <strong>${esc(nextRun)}</strong>
+    &nbsp;|&nbsp; Last run: <strong>${esc(lastRun)}</strong>
+  `;
+
+  if (data.last_run_status && data.last_run_status.length) {
+    lastRunPanel.style.display = '';
+    lastRunList.innerHTML = data.last_run_status.map(item => {
+      const cls = item.status === 'failed' ? 'failed' : item.status === 'skipped' ? 'skipped' : '';
+      const icon = item.status === 'complete' ? '✓' : item.status === 'skipped' ? '○' : '✗';
+      return `<li class="${cls}">${icon} ${esc(item.audio)} — ${esc(item.status)}${
+        item.error ? `<span class="run-error">${esc(item.error)}</span>` : ''
+      }${item.reason ? `<span class="run-error">${esc(item.reason)}</span>` : ''}</li>`;
+    }).join('');
+  } else {
+    lastRunPanel.style.display = 'none';
+  }
+}
+
+async function saveSchedule() {
+  const payload = {
+    enabled: scheduleEnabled.checked,
+    cron: getSelectedCron(),
+    ai_model: scheduleModel.value,
+  };
+  const res = await fetch(`${API}/schedule`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    showToast(`Save failed: ${err.error || res.status}`);
+    return;
+  }
+  showToast('Schedule saved');
+  loadScheduleState();
+}
+
+async function runAllNow() {
+  const res = await fetch(`${API}/schedule/run-now`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ai_model: scheduleModel.value }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    showToast(`Run failed: ${data.error || res.status}`);
+    return;
+  }
+  showToast(`Running ${data.test_count} tests — check Results panel`);
+  setTimeout(loadScheduleState, 5000);
+}

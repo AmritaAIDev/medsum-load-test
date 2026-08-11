@@ -6,17 +6,18 @@ import os
 import sys
 from pathlib import Path
 
-# Ensure repo root is on sys.path when running app.py directly
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from flask import Flask, send_from_directory
+from flask import Flask, jsonify, send_from_directory
 
 from medsum_testing.backend.routes.report import bp as report_bp
 from medsum_testing.backend.routes.results import bp as results_bp
+from medsum_testing.backend.routes.scheduler import bp as scheduler_bp
 from medsum_testing.backend.routes.test_runner import bp as test_runner_bp
-from medsum_testing.backend.services.config_loader import get_repo_root
+from medsum_testing.backend.services.config_loader import get_config, get_repo_root
+from medsum_testing.backend.services.scheduler_service import start_scheduler
 
 FRONTEND_DIR = get_repo_root() / "medsum_testing" / "frontend"
 
@@ -27,6 +28,12 @@ def create_app() -> Flask:
     app.register_blueprint(test_runner_bp, url_prefix="/api/medsum-test")
     app.register_blueprint(results_bp, url_prefix="/api/medsum-test")
     app.register_blueprint(report_bp, url_prefix="/api/medsum-test")
+    app.register_blueprint(scheduler_bp, url_prefix="/api/medsum-test")
+
+    @app.route("/api/medsum-test/health")
+    def health():
+        port = int(os.environ.get("MEDSUM_TEST_PORT", 5051))
+        return jsonify({"status": "ok", "port": port})
 
     @app.route("/")
     def index():
@@ -39,6 +46,13 @@ def create_app() -> Flask:
     @app.route("/js/<path:filename>")
     def js(filename: str):
         return send_from_directory(FRONTEND_DIR / "js", filename)
+
+    with app.app_context():
+        try:
+            cfg = get_config()
+            start_scheduler(cfg)
+        except Exception as exc:
+            app.logger.warning("Startup warning (non-fatal): %s", exc)
 
     return app
 

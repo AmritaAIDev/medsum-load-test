@@ -11,41 +11,66 @@ from openai import OpenAI
 from medsum_testing.backend.models.test_result import ComparisonResult, MedComparisonResult
 from medsum_testing.backend.services.config_loader import get_config
 
-SYSTEM_PROMPT = (
-    "You are a medical AI evaluator. Compare the following texts and return ONLY valid JSON "
-    "with no markdown, no preamble.\n"
-    'Schema: { "similarity_score": 0-100, "medical_differences": [...], '
-    '"general_differences": [...], "severity": "low|medium|high", "summary": "..." }'
-)
+SYSTEM_PROMPT = """You are a medical AI evaluator. Compare the provided texts and return
+ONLY valid JSON. No markdown, no explanation, no preamble. Raw JSON only.
+
+Schema:
+{
+  "similarity_score": <0-100>,
+  "medical_differences": [
+    {
+      "type": "dosage|medication_name|diagnosis|procedure|frequency|investigation|symptom",
+      "ground_truth": "<exact text>",
+      "generated": "<exact text>",
+      "severity": "critical|high|medium|low"
+    }
+  ],
+  "general_differences": ["<plain text difference>"],
+  "overall_severity": "critical|high|medium|low|none",
+  "regression_vs_previous": "<better|worse|same|not_applicable>",
+  "summary": "<2 sentence human-readable verdict>"
+}"""
 
 
-def _get_client(model: str) -> tuple[OpenAI, str]:
-    config = get_config()
+def get_ai_client(model: str, config: dict) -> tuple[OpenAI, str]:
     ai = config.get("ai_comparison", {})
     if model == "deepseek":
-        return (
-            OpenAI(api_key=ai.get("deepseek_api_key", ""), base_url=ai.get("deepseek_base_url")),
-            "deepseek-chat",
+        client = OpenAI(
+            api_key=ai.get("deepseek_api_key", ""),
+            base_url=ai.get("deepseek_base_url", "https://api.deepseek.com/v1"),
         )
-    return OpenAI(api_key=ai.get("openai_api_key", "")), "gpt-4o"
+        return client, "deepseek-chat"
+    return OpenAI(api_key=ai.get("openai_api_key", "")), "gpt-4"
 
 
-def _parse_json_response(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
+def parse_ai_json(raw: str) -> dict[str, Any]:
+    clean = re.sub(r"```json|```", "", raw).strip()
     try:
-        return json.loads(cleaned)
+        return json.loads(clean)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        match = re.search(r"\{.*\}", clean, re.DOTALL)
         if match:
             return json.loads(match.group())
         raise
 
 
+def _format_medical_diffs(items: list[Any]) -> list[str]:
+    formatted: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            formatted.append(
+                f"[{item.get('type', '?')}] "
+                f"{item.get('ground_truth', '')} → {item.get('generated', '')} "
+                f"({item.get('severity', '')})"
+            )
+        else:
+            formatted.append(str(item))
+    return formatted
+
+
 def _call_llm(prompt: str, model: str) -> dict[str, Any]:
-    client, model_name = _get_client(model)
+    config = get_config()
+    client, model_name = get_ai_client(model, config)
     response = client.chat.completions.create(
         model=model_name,
         messages=[
@@ -55,15 +80,23 @@ def _call_llm(prompt: str, model: str) -> dict[str, Any]:
         temperature=0.1,
     )
     content = response.choices[0].message.content or "{}"
-    return _parse_json_response(content)
+    return parse_ai_json(content)
 
 
 def _to_comparison(data: dict[str, Any]) -> ComparisonResult:
+    medical = _format_medical_diffs(data.get("medical_differences") or [])
+    severity = (
+        data.get("overall_severity")
+        or data.get("severity")
+        or "low"
+    )
+    if severity == "none":
+        severity = "low"
     return ComparisonResult(
         similarity_score=data.get("similarity_score"),
-        medical_differences=data.get("medical_differences") or [],
+        medical_differences=medical,
         general_differences=data.get("general_differences") or [],
-        severity=data.get("severity") or "low",
+        severity=severity,
         summary=data.get("summary") or "",
     )
 
@@ -123,7 +156,8 @@ def compare_summaries(
 
     prompt = (
         "Compare previous summary vs current summary for regression.\n"
-        "Check: missing clinical info, incorrect info, structural differences, regression.\n\n"
+        "Check: missing clinical info, incorrect info, structural differences, regression.\n"
+        "Set regression_vs_previous accordingly.\n\n"
         f"PREVIOUS SUMMARY:\n{prev}\n\nCURRENT SUMMARY:\n{curr}"
     )
     try:
@@ -158,23 +192,25 @@ def compare_medications(
     prompt = (
         "Compare medication lists. Identify added/removed/changed medicines, dosage changes, "
         "frequency changes, name differences.\n"
-        'Return JSON schema: { "similarity_score": 0-100, "medical_differences": [...], '
-        '"general_differences": [...], "severity": "low|medium|high", "summary": "...", '
-        '"added": [...], "removed": [...], "changed": [...] }\n\n'
+        "Include added, removed, changed arrays in your JSON response.\n\n"
         f"MEDICATIONS BEFORE:\n{_fmt(before)}\n\n"
         f"MEDICATIONS AFTER NORMALIZATION:\n{_fmt(after_normalized)}\n\n"
         f"GENERATED MEDICATIONS:\n{_fmt(generated)}"
     )
     try:
         data = _call_llm(prompt, model)
+        medical = _format_medical_diffs(data.get("medical_differences") or [])
+        severity = data.get("overall_severity") or data.get("severity") or "low"
+        if severity == "none":
+            severity = "low"
         return MedComparisonResult(
             added=data.get("added") or [],
             removed=data.get("removed") or [],
             changed=data.get("changed") or [],
             similarity_score=data.get("similarity_score"),
-            medical_differences=data.get("medical_differences") or [],
+            medical_differences=medical,
             general_differences=data.get("general_differences") or [],
-            severity=data.get("severity") or "low",
+            severity=severity,
             summary=data.get("summary") or "",
         )
     except Exception as exc:

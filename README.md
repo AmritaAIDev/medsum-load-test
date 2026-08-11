@@ -185,5 +185,65 @@ This project is licensed under the MIT License. See LICENSE file for details.
 
 ## Contact
 
-For issues or questions, contact the development team at [your-email@example.com].</content>
+For issues or questions, contact the development team at [your-email@example.com].
+
+---
+
+## MEDSUM Accuracy Testing Framework
+
+A separate module for automated accuracy and regression testing against the MedSum backend. Runs on **port 5051** (load test stays on 5050).
+
+```bash
+pip install -r requirements_medsum.txt
+copy config\medsum_config.example.yaml config\medsum_config.yaml
+python run_medsum_test.py
+```
+
+Open http://127.0.0.1:5051
+
+### Google Drive Setup (Service Account)
+
+1. Go to Google Cloud Console → IAM & Admin → Service Accounts
+2. Create a service account and download the JSON key → save as `credentials/service_account.json`
+3. In Google Drive, share the root test folder with the service account email (Viewer access)
+4. Copy the folder ID from the URL: `drive.google.com/drive/folders/THIS_PART`
+5. Set `google_drive.root_folder_id` in `config/medsum_config.yaml`
+
+**Expected folder structure:**
+```
+[Root Folder]
+├── Hindi/
+│   ├── hindi_05min_Cardiology.mp3
+│   └── hindi_05min_Cardiology.txt
+├── English/
+│   ├── english_10min_Neurology.mp3
+│   └── english_10min_Neurology.txt
+└── Punjabi/
+    └── punjabi_08min_Orthopedics.mp3   ← no .txt = runs without accuracy scoring
+```
+
+### Backend API Flow
+
+Each test run:
+1. **Django** — `POST /api/auth/login/` → `Token` auth
+2. **Django** — `GET /api/patients/{id}/` → verify patient exists
+3. **Django** — `POST /api/consultations/` with `"notes": "MEDSUM_AUTO_TEST"`
+4. **Flask** — `POST /transcribe` (multipart audio upload) → `job_id`
+5. **Flask** — poll `GET /transcribe/status/{job_id}` until complete
+6. **Django** — `POST /api/consultations/{id}/transcription/` → triggers summary
+7. **Django** — poll `GET /api/consultations/{id}/summary/`
+8. **Django** — `GET /api/consultations/{id}/medications/`
+
+### Scheduled Runs
+
+Enable in `config/medsum_config.yaml`:
+```yaml
+scheduler:
+  enabled: true
+  cron: "0 2 * * *"
+  ai_model: "deepseek"
+  max_parallel_tests: 2
+```
+
+Or use the **Scheduled Runs** panel in the UI to enable/disable, change cron, or click **Run All Now**.</content>
 <parameter name="filePath">c:\Users\guru.aswini\Desktop\Medsum-loadtesting\medsum-load-test\README.md

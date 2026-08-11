@@ -55,6 +55,52 @@
       </div>
     </div>
 
+    <details class="schedule-panel" id="schedule-panel">
+      <summary class="schedule-summary">
+        <span class="dot"></span> Scheduled Runs
+        <span class="schedule-status" id="schedule-status-badge"></span>
+      </summary>
+      <div class="schedule-body">
+        <div class="schedule-info" id="schedule-info">Loading schedule…</div>
+        <div class="form-grid schedule-grid">
+          <div class="field">
+            <label for="schedule-cron">Schedule</label>
+            <select id="schedule-cron">
+              <option value="0 2 * * *">Every day at 2:00 AM</option>
+              <option value="0 8 * * *">Every day at 8:00 AM</option>
+              <option value="0 8 * * 1-5">Weekdays at 8:00 AM</option>
+              <option value="0 0 * * 0">Every Sunday at midnight</option>
+              <option value="*/30 * * * *">Every 30 minutes (testing)</option>
+              <option value="custom">Custom cron…</option>
+            </select>
+          </div>
+          <div class="field" id="custom-cron-field" style="display:none;">
+            <label for="schedule-cron-custom">Custom Cron</label>
+            <input type="text" id="schedule-cron-custom" placeholder="0 2 * * *">
+          </div>
+          <div class="field">
+            <label for="schedule-model">AI Model</label>
+            <select id="schedule-model">
+              <option value="deepseek">DeepSeek</option>
+              <option value="gpt-4">GPT-4</option>
+            </select>
+          </div>
+        </div>
+        <div class="schedule-actions">
+          <label class="toggle-label">
+            <input type="checkbox" id="schedule-enabled"> Enable scheduler
+          </label>
+          <button class="btn btn-secondary btn-sm" id="run-all-btn" type="button">▶ Run All Now</button>
+          <button class="btn btn-primary btn-sm" id="save-schedule-btn" type="button">Save Schedule</button>
+        </div>
+        <div class="last-run-panel" id="last-run-panel" style="display:none;">
+          <div class="card-subtitle">Last Scheduled Run</div>
+          <ul class="last-run-list" id="last-run-list"></ul>
+        </div>
+        <div class="toast" id="toast" style="display:none;"></div>
+      </div>
+    </details>
+
     <div class="card" id="progress-card" style="display:none;">
       <div class="card-title"><span class="dot"></span> Test Progress</div>
       <ul class="progress-list" id="progress-list"></ul>
