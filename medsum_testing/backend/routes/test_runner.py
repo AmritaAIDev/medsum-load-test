@@ -32,6 +32,8 @@ def execute_test_run(
     audio_filename: str,
     ai_model: str,
     test_id: str | None = None,
+    batch_id: str | None = None,
+    folder_label: str = "",
 ) -> TestResult:
     """
     Core test execution — used by HTTP route and scheduler.
@@ -46,6 +48,8 @@ def execute_test_run(
         language=language,
         audio_filename=audio_filename,
         ai_model=ai_model,
+        batch_id=batch_id or "",
+        folder_label=folder_label,
     )
     result.progress_steps = [
         {"step": "Fetching audio from Drive", "status": "active"},
@@ -101,6 +105,7 @@ def execute_test_run(
             )
 
         log.info("[%s] Test case found: %s", test_id, case.get("folder_label", case["language"]))
+        result.folder_label = case.get("folder_label", "")
         result.ground_truth_flag = case.get("ground_truth_flag", "")
         result.has_ground_truth = case.get("has_transcript", False)
 
@@ -179,7 +184,19 @@ def execute_test_run(
         transcription = transcription_result.get("transcription", "")
         result.generated_transcription = transcription
         result.text_translation = transcription_result.get("translation") or ""
+        result.transcription_result = transcription_result
         log.info("[%s] Transcription OK: %d chars", test_id, len(transcription))
+
+        log.info("[%s] Validating medications...", test_id)
+        medication_validation = ai_comparator.validate_medications(transcription_result)
+        result.medication_validation = medication_validation
+        log.info(
+            "[%s] Medications: raw=%s, final=%s, differences=%s",
+            test_id,
+            medication_validation["raw_count"],
+            medication_validation["final_count"],
+            medication_validation["difference_count"],
+        )
 
         log.info("[%s] STEP 9: Saving summary to Django...", test_id)
         saved_summary = medsum_api.save_summary(
@@ -244,7 +261,7 @@ def execute_test_run(
                 previous.generated_summary, result.generated_summary, ai_model
             )
 
-        result.medication_comparison = ai_comparator.compare_medications(
+        result.medication_comparison = ai_comparator.compare_medication_lists(
             result.medications_before,
             result.medications_after_normalization,
             result.medications_generated,
@@ -286,11 +303,25 @@ def execute_test_run(
     return result
 
 
-def _run_and_store(test_id: str, language: str, audio_filename: str, ai_model: str) -> None:
+def _run_and_store(
+    test_id: str,
+    language: str,
+    audio_filename: str,
+    ai_model: str,
+    batch_id: str = "",
+    folder_label: str = "",
+) -> None:
     log.info("[%s] Background thread started", test_id)
     try:
         log.info("[%s] Calling execute_test_run...", test_id)
-        result = execute_test_run(language, audio_filename, ai_model, test_id=test_id)
+        result = execute_test_run(
+            language,
+            audio_filename,
+            ai_model,
+            test_id=test_id,
+            batch_id=batch_id,
+            folder_label=folder_label,
+        )
         log.info("[%s] Background thread finished — status=%s", test_id, result.status)
     except Exception as exc:
         tb = traceback.format_exc()
@@ -351,3 +382,58 @@ def run_test():
     thread.start()
 
     return jsonify({"test_id": test_id, "status": "running"}), 202
+
+
+@bp.route("/run-all", methods=["POST"])
+def run_all_tests():
+    """Run every ready audio file from Drive."""
+    body = request.get_json(silent=True) or {}
+    ai_model = body.get("ai_model", "deepseek")
+    if ai_model not in ("gpt-4", "deepseek"):
+        return jsonify({"error": "ai_model must be 'gpt-4' or 'deepseek'"}), 400
+
+    batch_id = str(uuid.uuid4())
+    config = get_config()
+    test_cases = [
+        tc for tc in drive_service.list_test_cases(config) if tc.get("status") == "ready"
+    ]
+
+    test_ids = []
+    for tc in test_cases:
+        test_id = str(uuid.uuid4())
+        test_ids.append({
+            "test_id": test_id,
+            "language": tc["language"],
+            "audio_filename": tc["audio_filename"],
+            "folder_label": tc.get("folder_label", ""),
+        })
+        pending = TestResult(
+            test_id=test_id,
+            status="pending",
+            language=tc["language"],
+            audio_filename=tc["audio_filename"],
+            folder_label=tc.get("folder_label", ""),
+            ai_model=ai_model,
+            batch_id=batch_id,
+        )
+        save_result(pending)
+        threading.Thread(
+            target=_run_and_store,
+            args=(
+                test_id,
+                tc["language"],
+                tc["audio_filename"],
+                ai_model,
+                batch_id,
+                tc.get("folder_label", ""),
+            ),
+            daemon=True,
+        ).start()
+
+    log.info("Batch %s started — %d tests", batch_id, len(test_ids))
+    return jsonify({
+        "batch_id": batch_id,
+        "total": len(test_ids),
+        "test_ids": test_ids,
+        "status": "started",
+    }), 202

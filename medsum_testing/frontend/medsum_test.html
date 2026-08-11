@@ -3,182 +3,156 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MEDSUM Accuracy Testing</title>
+  <title>MedSum — API Testing Dashboard</title>
   <link rel="stylesheet" href="/css/medsum_test.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 </head>
 <body>
-
-<header>
-  <h1>MEDSUM Accuracy Testing</h1>
-  <span class="badge">Accuracy Testing</span>
-  <div class="header-right">
-    <a href="http://127.0.0.1:5050" class="link-muted" target="_blank">Load Test Console ↗</a>
-  </div>
-</header>
-
-<main class="container">
-
-  <div class="tab-bar">
-    <button class="tab active" id="tab-run" type="button">Run New Test</button>
-    <button class="tab" id="tab-past" type="button">View Past Results</button>
-  </div>
-
-  <!-- Run New Test -->
-  <section id="panel-run">
-
-    <div class="card">
-      <div class="card-title"><span class="dot"></span> Configure Test</div>
-      <div class="form-grid">
-        <div class="field">
-          <label for="language-select">Language</label>
-          <select id="language-select">
-            <option value="">Loading…</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="audio-select">Audio File</label>
-          <select id="audio-select">
-            <option value="">Select language first</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="ai-model-select">AI Model</label>
-          <select id="ai-model-select">
-            <option value="gpt-4">GPT-4</option>
-            <option value="deepseek">DeepSeek</option>
-          </select>
-        </div>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="logo">
+        <span class="logo-icon">🏥</span>
+        <span class="logo-text">MedSum</span>
       </div>
-      <div class="action-row">
-        <button class="btn btn-primary" id="run-btn" type="button">▶ Run Test</button>
-        <span class="hint" id="transcript-hint"></span>
+      <nav>
+        <a href="#dashboard" class="nav-item active" data-nav="dashboard">
+          <span class="nav-icon">📊</span> Dashboard
+        </a>
+        <a href="#tests" class="nav-item" data-nav="tests">
+          <span class="nav-icon">⚡</span> API Tests
+        </a>
+        <a href="#runs" class="nav-item" data-nav="runs">
+          <span class="nav-icon">📋</span> Test Runs
+        </a>
+        <a href="#reports" class="nav-item" data-nav="reports">
+          <span class="nav-icon">📄</span> Reports
+        </a>
+        <a href="#analytics" class="nav-item" data-nav="analytics">
+          <span class="nav-icon">📈</span> Analytics
+        </a>
+        <a href="#settings" class="nav-item" data-nav="settings">
+          <span class="nav-icon">⚙️</span> Settings
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <button class="logout-btn" type="button">🚪 Logout</button>
       </div>
-    </div>
+    </aside>
 
-    <details class="schedule-panel" id="schedule-panel">
-      <summary class="schedule-summary">
-        <span class="dot"></span> Scheduled Runs
-        <span class="schedule-status" id="schedule-status-badge"></span>
-      </summary>
-      <div class="schedule-body">
-        <div class="schedule-info" id="schedule-info">Loading schedule…</div>
-        <div class="form-grid schedule-grid">
-          <div class="field">
-            <label for="schedule-cron">Schedule</label>
-            <select id="schedule-cron">
-              <option value="0 2 * * *">Every day at 2:00 AM</option>
-              <option value="0 8 * * *">Every day at 8:00 AM</option>
-              <option value="0 8 * * 1-5">Weekdays at 8:00 AM</option>
-              <option value="0 0 * * 0">Every Sunday at midnight</option>
-              <option value="*/30 * * * *">Every 30 minutes (testing)</option>
-              <option value="custom">Custom cron…</option>
-            </select>
+    <main class="main-content">
+      <!-- Dashboard View -->
+      <div id="dashboard-view">
+        <header class="page-header">
+          <div>
+            <h1>API Testing Dashboard</h1>
+            <p class="subtitle">Monitor and evaluate your backend API performance</p>
           </div>
-          <div class="field" id="custom-cron-field" style="display:none;">
-            <label for="schedule-cron-custom">Custom Cron</label>
-            <input type="text" id="schedule-cron-custom" placeholder="0 2 * * *">
-          </div>
-          <div class="field">
-            <label for="schedule-model">AI Model</label>
-            <select id="schedule-model">
+          <div class="header-actions">
+            <select id="ai-model-select" class="select-input">
               <option value="deepseek">DeepSeek</option>
               <option value="gpt-4">GPT-4</option>
             </select>
+            <button id="run-all-btn" class="btn-primary" type="button">▶ Run All Tests</button>
           </div>
-        </div>
-        <div class="schedule-actions">
-          <label class="toggle-label">
-            <input type="checkbox" id="schedule-enabled"> Enable scheduler
-          </label>
-          <button class="btn btn-secondary btn-sm" id="run-all-btn" type="button">▶ Run All Now</button>
-          <button class="btn btn-primary btn-sm" id="save-schedule-btn" type="button">Save Schedule</button>
-        </div>
-        <div class="last-run-panel" id="last-run-panel" style="display:none;">
-          <div class="card-subtitle">Last Scheduled Run</div>
-          <ul class="last-run-list" id="last-run-list"></ul>
-        </div>
-        <div class="toast" id="toast" style="display:none;"></div>
-      </div>
-    </details>
+        </header>
 
-    <div class="card" id="progress-card" style="display:none;">
-      <div class="card-title"><span class="dot"></span> Test Progress</div>
-      <ul class="progress-list" id="progress-list"></ul>
-    </div>
+        <section class="stat-grid" id="stat-grid"></section>
 
-    <div class="card" id="results-card" style="display:none;">
-      <div class="card-title">
-        <span class="dot"></span> Results
-        <div class="card-actions">
-          <button class="btn btn-secondary btn-sm" id="pdf-btn" type="button" disabled>PDF</button>
-          <button class="btn btn-secondary btn-sm" id="excel-btn" type="button" disabled>Excel</button>
-        </div>
-      </div>
+        <section class="charts-row">
+          <div class="card chart-card">
+            <h3>Accuracy Over Time</h3>
+            <canvas id="accuracy-chart"></canvas>
+          </div>
+          <div class="card chart-card">
+            <h3>Accuracy Distribution</h3>
+            <canvas id="distribution-chart"></canvas>
+            <div id="distribution-legend" class="distribution-legend"></div>
+          </div>
+        </section>
 
-      <div class="score-bar" id="score-bar"></div>
-
-      <div class="card-subtitle">Transcription Diff</div>
-      <div class="diff-grid">
-        <div class="diff-col ground-truth">
-          <div class="diff-label">Ground Truth</div>
-          <div class="diff-text" id="ground-truth-text">—</div>
-        </div>
-        <div class="diff-col generated">
-          <div class="diff-label">Generated</div>
-          <div class="diff-text" id="generated-text">—</div>
-        </div>
+        <section class="card table-card">
+          <div class="table-header">
+            <h3>Recent Test Runs</h3>
+            <span id="batch-status" class="batch-status"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="runs-table">
+              <thead>
+                <tr>
+                  <th>Test ID</th>
+                  <th>Audio File</th>
+                  <th>Language</th>
+                  <th>Accuracy</th>
+                  <th>Time</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="test-runs-tbody">
+                <tr><td colspan="6" class="empty-row">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
 
-      <div class="card-subtitle medical-title">Medical Differences <span class="warn-icon">⚠</span></div>
-      <ul class="diff-list medical-list" id="medical-diffs"></ul>
+      <!-- Detail View -->
+      <div id="detail-view" style="display:none">
+        <button id="back-btn" class="btn-secondary" type="button">← Back to Dashboard</button>
+        <header class="detail-header">
+          <div>
+            <h1 id="detail-title">Test Run</h1>
+            <p id="detail-meta" class="subtitle"></p>
+          </div>
+          <div class="header-actions">
+            <button id="pdf-btn" class="btn-outline" type="button">PDF</button>
+            <button id="excel-btn" class="btn-outline" type="button">Excel</button>
+          </div>
+        </header>
 
-      <details class="expand-section" open>
-        <summary>Summary Diff</summary>
-        <div class="expand-body" id="summary-diff"></div>
-      </details>
+        <section class="card">
+          <h3>Transcription</h3>
+          <div class="diff-grid">
+            <div>
+              <h4>Ground Truth</h4>
+              <pre id="ground-truth-text" class="text-panel"></pre>
+            </div>
+            <div>
+              <h4>Generated</h4>
+              <pre id="generated-text" class="text-panel"></pre>
+            </div>
+          </div>
+        </section>
 
-      <details class="expand-section">
-        <summary>Medication Diff</summary>
-        <div class="expand-body" id="medication-diff"></div>
-      </details>
+        <section class="card">
+          <h3>Medical Differences</h3>
+          <ul id="medical-diffs" class="diff-list"></ul>
+        </section>
 
-      <details class="expand-section" id="regression-section" style="display:none;">
-        <summary>Regression vs Previous Run</summary>
-        <div class="expand-body" id="regression-diff"></div>
-      </details>
+        <section class="card" id="med-validation-section">
+          <div id="med-validation"></div>
+        </section>
 
-      <div class="errors-box" id="errors-box" style="display:none;"></div>
-    </div>
+        <section class="card">
+          <h3>SOAP Summary</h3>
+          <div class="soap-tabs">
+            <button class="soap-tab active" data-tab="subjective" type="button">Subjective</button>
+            <button class="soap-tab" data-tab="objective" type="button">Objective</button>
+            <button class="soap-tab" data-tab="assessment" type="button">Assessment</button>
+            <button class="soap-tab" data-tab="plan" type="button">Plan</button>
+            <button class="soap-tab" data-tab="summary" type="button">Summary</button>
+          </div>
+          <pre id="soap-content" class="text-panel"></pre>
+        </section>
 
-  </section>
-
-  <!-- Past Results -->
-  <section id="panel-past" style="display:none;">
-    <div class="card">
-      <div class="card-title"><span class="dot"></span> Past Results</div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Test ID</th>
-              <th>Language</th>
-              <th>Audio File</th>
-              <th>Timestamp</th>
-              <th>Result</th>
-              <th>Score</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody id="past-results-body">
-            <tr><td colspan="7" class="empty-row">Loading…</td></tr>
-          </tbody>
-        </table>
+        <section class="card" id="errors-section" style="display:none">
+          <h3>Errors</h3>
+          <pre id="errors-box" class="errors-box"></pre>
+        </section>
       </div>
-    </div>
-  </section>
+    </main>
+  </div>
 
-</main>
-
-<script src="/js/medsum_test.js"></script>
+  <div id="toast" class="toast" style="display:none"></div>
+  <script src="/js/medsum_test.js"></script>
 </body>
 </html>

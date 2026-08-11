@@ -14,7 +14,11 @@ from medsum_testing.backend.services.drive_service import (
     list_test_cases,
 )
 from medsum_testing.backend.services.medsum_api import authenticate_doctor, verify_patient
-from medsum_testing.backend.services.result_store import list_results, load_result
+from medsum_testing.backend.services.result_store import (
+    list_results,
+    list_results_by_batch,
+    load_result,
+)
 
 bp = Blueprint("medsum_results", __name__)
 
@@ -23,6 +27,39 @@ bp = Blueprint("medsum_results", __name__)
 @bp.route("/results/", methods=["GET"])
 def list_all_results():
     return jsonify(list_results())
+
+
+@bp.route("/results/batch/<batch_id>", methods=["GET"])
+def get_batch_results(batch_id: str):
+    """Get all results for a batch run."""
+    batch = list_results_by_batch(batch_id)
+    total = len(batch)
+    completed = sum(1 for r in batch if r.get("status") == "complete")
+    failed = sum(1 for r in batch if r.get("status") == "failed")
+    pending = sum(
+        1 for r in batch if r.get("status") in ("pending", "running")
+    )
+
+    scores = [
+        (r.get("transcription_comparison") or {}).get("similarity_score")
+        for r in batch
+        if r.get("transcription_comparison")
+    ]
+    scores = [s for s in scores if s is not None]
+    avg_accuracy = round(sum(scores) / len(scores), 1) if scores else 0
+
+    passed = sum(1 for r in batch if r.get("final_result") == "pass")
+
+    return jsonify({
+        "batch_id": batch_id,
+        "total": total,
+        "completed": completed,
+        "failed": failed,
+        "pending": pending,
+        "passed": passed,
+        "avg_accuracy": avg_accuracy,
+        "results": batch,
+    })
 
 
 @bp.route("/results/<test_id>", methods=["GET"])

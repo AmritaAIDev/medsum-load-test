@@ -27,25 +27,41 @@ def load_result(test_id: str) -> Optional[TestResult]:
 
 
 def list_results() -> list[dict]:
+    return [summary for _, summary in _iter_result_files()]
+
+
+def load_all_results_raw() -> list[dict]:
+    """Full result dicts for dashboard and batch views."""
+    return [data for data, _ in _iter_result_files(full=True)]
+
+
+def list_results_by_batch(batch_id: str) -> list[dict]:
+    return [r for r in load_all_results_raw() if r.get("batch_id") == batch_id]
+
+
+def _iter_result_files(full: bool = False):
     results_dir = get_results_dir()
-    items = []
     for path in sorted(results_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            items.append(
-                {
-                    "id": data.get("test_id", path.stem),
-                    "filename": data.get("audio_filename", ""),
-                    "language": data.get("language", ""),
-                    "timestamp": data.get("timestamp", ""),
-                    "final_result": data.get("final_result", ""),
-                    "accuracy_score": data.get("accuracy_score"),
-                }
-            )
         except (json.JSONDecodeError, OSError):
             continue
-    return items
+        if full:
+            yield data, path
+        else:
+            yield path, {
+                "id": data.get("test_id", path.stem),
+                "test_id": data.get("test_id", path.stem),
+                "filename": data.get("audio_filename", ""),
+                "audio_filename": data.get("audio_filename", ""),
+                "language": data.get("language", ""),
+                "timestamp": data.get("timestamp", ""),
+                "final_result": data.get("final_result", ""),
+                "accuracy_score": data.get("accuracy_score"),
+                "status": data.get("status", ""),
+                "batch_id": data.get("batch_id", ""),
+            }
 
 
 def find_previous_result(

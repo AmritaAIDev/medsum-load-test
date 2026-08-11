@@ -106,6 +106,10 @@ class TestResult:
     progress_steps: list[dict[str, str]] = field(default_factory=list)
     final_result: str = "pending"
     job_id: str = ""
+    batch_id: str = ""
+    folder_label: str = ""
+    transcription_result: Any = None
+    medication_validation: Any = None
 
     def __post_init__(self) -> None:
         if not self.timestamp:

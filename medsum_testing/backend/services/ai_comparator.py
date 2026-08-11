@@ -170,7 +170,7 @@ def compare_summaries(
         )
 
 
-def compare_medications(
+def compare_medication_lists(
     before: Any,
     after_normalized: Any,
     generated: Any,
@@ -219,3 +219,92 @@ def compare_medications(
             summary=f"Medication comparison failed: {exc}",
             general_differences=[str(exc)],
         )
+
+
+def validate_medications(transcription_result: dict) -> dict:
+    """
+    Cross-check plan.medications vs debug.raw soap.plan.medications.
+    """
+    final_meds: list = []
+    raw_meds: list = []
+
+    try:
+        final_meds = transcription_result.get("plan", {}).get("medications", [])
+        if isinstance(final_meds, str):
+            final_meds = []
+        raw_meds = (
+            transcription_result
+            .get("debug", {})
+            .get("raw soap", {})
+            .get("plan", {})
+            .get("medications", [])
+        )
+        if isinstance(raw_meds, str):
+            raw_meds = []
+    except Exception:
+        pass
+
+    differences = []
+    max_len = max(len(final_meds), len(raw_meds))
+
+    for i in range(max_len):
+        final = final_meds[i] if i < len(final_meds) else None
+        raw = raw_meds[i] if i < len(raw_meds) else None
+
+        if final is None and raw is not None:
+            differences.append({
+                "type": "removed_in_final",
+                "raw_drug": raw.get("drug_name", ""),
+                "severity": "high",
+                "detail": f"Drug '{raw.get('drug_name')}' present in raw but missing in final output",
+            })
+            continue
+
+        if raw is None and final is not None:
+            differences.append({
+                "type": "added_in_final",
+                "final_drug": final.get("drug_name", ""),
+                "severity": "medium",
+                "detail": f"Drug '{final.get('drug_name')}' added in final but not in raw",
+            })
+            continue
+
+        if final is None or raw is None:
+            continue
+
+        for field in ("drug_name", "dose", "schedule", "duration", "generic_name", "instructions"):
+            raw_val = raw.get(field, "NA")
+            final_val = final.get(field, "NA")
+            if str(raw_val).strip() != str(final_val).strip():
+                differences.append({
+                    "type": "field_changed",
+                    "drug": final.get("drug_name", raw.get("drug_name", "")),
+                    "field": field,
+                    "raw_value": raw_val,
+                    "final_value": final_val,
+                    "severity": "high" if field in ("drug_name", "dose") else "medium",
+                    "detail": f"{field}: raw='{raw_val}' → final='{final_val}'",
+                })
+
+        if final.get("matched_drug_name") and final.get("drug_name"):
+            if final["matched_drug_name"] != final["drug_name"]:
+                differences.append({
+                    "type": "name_normalized",
+                    "drug": final["drug_name"],
+                    "matched_to": final["matched_drug_name"],
+                    "severity": "low",
+                    "detail": (
+                        f"Drug name normalized: '{final['drug_name']}' "
+                        f"→ '{final['matched_drug_name']}'"
+                    ),
+                })
+
+    return {
+        "raw_medications": raw_meds,
+        "final_medications": final_meds,
+        "raw_count": len(raw_meds),
+        "final_count": len(final_meds),
+        "differences": differences,
+        "has_critical_differences": any(d["severity"] == "high" for d in differences),
+        "difference_count": len(differences),
+    }

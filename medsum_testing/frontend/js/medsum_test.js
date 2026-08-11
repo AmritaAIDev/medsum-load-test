@@ -1,307 +1,446 @@
 const API = '/api/medsum-test';
 
-let driveFiles = [];
+let currentBatchId = null;
 let currentTestId = null;
-let pollTimer = null;
+let batchPollInterval = null;
+let accuracyChart = null;
+let distributionChart = null;
+let driveStats = { total: 0, with_transcript: 0 };
+let latestResults = [];
+let currentDetailResult = null;
+let activeSoapTab = 'subjective';
 
-const languageSelect = document.getElementById('language-select');
-const audioSelect = document.getElementById('audio-select');
-const aiModelSelect = document.getElementById('ai-model-select');
-const runBtn = document.getElementById('run-btn');
-const transcriptHint = document.getElementById('transcript-hint');
-const progressCard = document.getElementById('progress-card');
-const progressList = document.getElementById('progress-list');
-const resultsCard = document.getElementById('results-card');
-const scoreBar = document.getElementById('score-bar');
-const groundTruthText = document.getElementById('ground-truth-text');
-const generatedText = document.getElementById('generated-text');
-const medicalDiffs = document.getElementById('medical-diffs');
-const summaryDiff = document.getElementById('summary-diff');
-const medicationDiff = document.getElementById('medication-diff');
-const regressionSection = document.getElementById('regression-section');
-const regressionDiff = document.getElementById('regression-diff');
-const errorsBox = document.getElementById('errors-box');
-const pdfBtn = document.getElementById('pdf-btn');
-const excelBtn = document.getElementById('excel-btn');
-const pastResultsBody = document.getElementById('past-results-body');
+const STAT_CARDS = [
+  { id: 'stat-input', icon: '📤', label: 'Input Upload', sublabel: 'Requests Sent', key: 'total' },
+  { id: 'stat-gt', icon: '📋', label: 'Ground Truth Comparison', sublabel: 'Compared', key: 'with_transcript' },
+  { id: 'stat-output', icon: '✅', label: 'Output Validation', sublabel: 'Passed', key: 'passed' },
+  { id: 'stat-accuracy', icon: '🎯', label: 'Accuracy', sublabel: 'Overall Accuracy', key: 'avg_accuracy', suffix: '%' },
+  { id: 'stat-time', icon: '⏱', label: 'Time Taken', sublabel: 'Total Time', key: 'total_time' },
+  { id: 'stat-reports', icon: '📄', label: 'Basic Report', sublabel: 'Generated', key: 'report_count' },
+];
 
-document.getElementById('tab-run').addEventListener('click', () => showTab('run'));
-document.getElementById('tab-past').addEventListener('click', () => showTab('past'));
-languageSelect.addEventListener('change', populateAudioFiles);
-runBtn.addEventListener('click', runTest);
-pdfBtn.addEventListener('click', () => downloadReport('pdf'));
-excelBtn.addEventListener('click', () => downloadReport('excel'));
-
-function showTab(name) {
-  document.getElementById('panel-run').style.display = name === 'run' ? '' : 'none';
-  document.getElementById('panel-past').style.display = name === 'past' ? '' : 'none';
-  document.getElementById('tab-run').classList.toggle('active', name === 'run');
-  document.getElementById('tab-past').classList.toggle('active', name === 'past');
-  if (name === 'past') loadPastResults();
+function initPage() {
+  renderStatCards({});
+  loadDriveStats();
+  loadRecentResults();
+  bindEvents();
 }
 
-async function loadDriveFiles() {
+function bindEvents() {
+  document.getElementById('run-all-btn').addEventListener('click', runAllTests);
+  document.getElementById('back-btn').addEventListener('click', showDashboard);
+  document.getElementById('pdf-btn').addEventListener('click', () => downloadReport('pdf'));
+  document.getElementById('excel-btn').addEventListener('click', () => downloadReport('excel'));
+
+  document.querySelectorAll('.soap-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeSoapTab = btn.dataset.tab;
+      document.querySelectorAll('.soap-tab').forEach(b => b.classList.toggle('active', b === btn));
+      if (currentDetailResult) renderSOAPTabs(currentDetailResult.transcription_result);
+    });
+  });
+
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', e => {
+      e.preventDefault();
+      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+      item.classList.add('active');
+      if (item.dataset.nav !== 'dashboard') showDashboard();
+    });
+  });
+}
+
+async function loadDriveStats() {
   try {
     const resp = await fetch(`${API}/drive-files`);
-    if (!resp.ok) throw new Error(await resp.text());
+    if (!resp.ok) return;
     const data = await resp.json();
-    driveFiles = data.files || [];
-    languageSelect.innerHTML = (data.languages || [])
-      .map(l => `<option value="${esc(l)}">${esc(l)}</option>`)
-      .join('');
-    if (!data.languages?.length) {
-      languageSelect.innerHTML = '<option value="">No languages found</option>';
-    }
-    populateAudioFiles();
+    const files = data.files || [];
+    driveStats.total = files.length;
+    driveStats.with_transcript = files.filter(f => f.has_transcript).length;
+    renderStatCards({ total: driveStats.total, with_transcript: driveStats.with_transcript });
   } catch (err) {
-    languageSelect.innerHTML = '<option value="">Failed to load</option>';
-    transcriptHint.textContent = `Drive error: ${err.message}`;
-    transcriptHint.style.color = 'var(--red)';
+    console.warn('Drive stats failed:', err);
   }
 }
 
-function populateAudioFiles() {
-  const lang = languageSelect.value;
-  const files = driveFiles.filter(f => f.language === lang && f.status === 'ready');
-  audioSelect.innerHTML = files.length
-    ? files.map(f => `<option value="${esc(f.audio)}">${esc(f.audio)}${f.has_transcript ? '' : ' (no transcript)'}</option>`).join('')
-    : '<option value="">No audio files</option>';
-
-  const selected = files.find(f => f.audio === audioSelect.value) || files[0];
-  if (selected) {
-    audioSelect.value = selected.audio;
-    transcriptHint.textContent = selected.has_transcript
-      ? 'Ground truth transcript available'
-      : 'No ground truth — accuracy scoring will be skipped';
-    transcriptHint.style.color = selected.has_transcript ? 'var(--green)' : 'var(--yellow)';
-  } else {
-    transcriptHint.textContent = '';
+async function loadRecentResults() {
+  try {
+    const resp = await fetch(`${API}/results`);
+    if (!resp.ok) return;
+    const items = await resp.json();
+    latestResults = items;
+    renderTestRunsTable(items.map(normalizeResultSummary));
+    renderStatCards(computeStatsFromResults(items));
+  } catch (err) {
+    document.getElementById('test-runs-tbody').innerHTML =
+      `<tr><td colspan="6" class="empty-row">Error: ${esc(err.message)}</td></tr>`;
   }
 }
 
-audioSelect.addEventListener('change', () => {
-  const lang = languageSelect.value;
-  const file = driveFiles.find(f => f.language === lang && f.audio === audioSelect.value);
-  if (file) {
-    transcriptHint.textContent = file.has_transcript
-      ? 'Ground truth transcript available'
-      : 'No ground truth — accuracy scoring will be skipped';
-    transcriptHint.style.color = file.has_transcript ? 'var(--green)' : 'var(--yellow)';
-  }
-});
+function normalizeResultSummary(r) {
+  return {
+    test_id: r.test_id || r.id,
+    audio_filename: r.audio_filename || r.filename,
+    language: r.language,
+    status: r.status || 'complete',
+    final_result: r.final_result,
+    comparison: r.accuracy_score != null
+      ? { similarity_score: r.accuracy_score }
+      : (r.transcription_comparison || r.comparison),
+    transcription_result: r.transcription_result,
+  };
+}
 
-async function runTest() {
-  const language = languageSelect.value;
-  const audio_filename = audioSelect.value;
-  const ai_model = aiModelSelect.value;
+function computeStatsFromResults(results) {
+  const completed = results.filter(r => r.status === 'complete' || r.final_result);
+  const scores = completed
+    .map(r => r.accuracy_score ?? r.transcription_comparison?.similarity_score)
+    .filter(s => s != null);
+  const passed = completed.filter(r => r.final_result === 'pass').length;
+  return {
+    total: driveStats.total || results.length,
+    with_transcript: driveStats.with_transcript,
+    passed,
+    avg_accuracy: scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 10) / 10 : 0,
+    total_time: '--',
+    report_count: completed.length,
+  };
+}
 
-  if (!language || !audio_filename) {
-    alert('Select language and audio file.');
-    return;
-  }
+function renderStatCards(data) {
+  const grid = document.getElementById('stat-grid');
+  const stats = {
+    total: data.total ?? driveStats.total ?? '--',
+    with_transcript: data.with_transcript ?? driveStats.with_transcript ?? '--',
+    passed: data.passed ?? '--',
+    avg_accuracy: data.avg_accuracy ?? '--',
+    total_time: data.total_time ?? '--',
+    report_count: data.report_count ?? '--',
+  };
 
-  runBtn.disabled = true;
-  resultsCard.style.display = 'none';
-  progressCard.style.display = '';
-  progressList.innerHTML = DEFAULT_STEPS.map(s =>
-    `<li class="progress-item pending" data-step="${esc(s)}"><span class="pending-dot">○</span> ${esc(s)}</li>`
-  ).join('');
-  pdfBtn.disabled = true;
-  excelBtn.disabled = true;
-  currentTestId = null;
+  grid.innerHTML = STAT_CARDS.map(card => {
+    const val = stats[card.key] ?? '--';
+    const display = val === '--' ? '--' : `${val}${card.suffix || ''}`;
+    return `
+      <div class="stat-card" id="${card.id}">
+        <div class="stat-icon">${card.icon}</div>
+        <div>
+          <div class="stat-value">${esc(String(display))}</div>
+          <div class="stat-label">${esc(card.label)}</div>
+          <div class="stat-sublabel">${esc(card.sublabel)}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
 
-  if (pollTimer) clearInterval(pollTimer);
+async function runAllTests() {
+  const btn = document.getElementById('run-all-btn');
+  const model = document.getElementById('ai-model-select').value;
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Running...';
 
   try {
-    const resp = await fetch(`${API}/run`, {
+    const resp = await fetch(`${API}/run-all`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ language, audio_filename, ai_model }),
+      body: JSON.stringify({ ai_model: model }),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
-    currentTestId = data.test_id;
-    pollTimer = setInterval(() => pollResult(data.test_id), 3000);
-    pollResult(data.test_id);
+    showToast(`Started ${data.total} tests — batch ${data.batch_id.slice(0, 8)}…`);
+    currentBatchId = data.batch_id;
+    document.getElementById('batch-status').textContent =
+      `Batch running: 0 / ${data.total} complete`;
+
+    if (batchPollInterval) clearInterval(batchPollInterval);
+    batchPollInterval = setInterval(() => pollBatch(data.batch_id), 5000);
+    pollBatch(data.batch_id);
   } catch (err) {
-    runBtn.disabled = false;
-    progressCard.style.display = 'none';
-    alert(`Failed to start test: ${err.message}`);
+    showToast(`Run failed: ${err.message}`);
+    btn.disabled = false;
+    btn.textContent = '▶ Run All Tests';
   }
 }
 
-const DEFAULT_STEPS = [
-  'Fetching audio from Drive',
-  'Uploading audio to Django',
-  'Transcribing via Flask',
-  'Running AI comparison',
-];
-
-async function pollResult(testId) {
+async function pollBatch(batchId) {
   try {
-    const resp = await fetch(`${API}/results/${testId}`);
+    const resp = await fetch(`${API}/results/batch/${batchId}`);
     if (!resp.ok) return;
-    const result = await resp.json();
+    const data = await resp.json();
 
-    renderProgress(result.progress_steps || []);
-    if (result.status === 'running') return;
-
-    clearInterval(pollTimer);
-    pollTimer = null;
-    runBtn.disabled = false;
-    renderResults(result);
-  } catch {
-    /* keep polling */
-  }
-}
-
-function renderProgress(steps) {
-  progressList.querySelectorAll('.progress-item').forEach(item => {
-    const stepName = item.dataset.step;
-    const match = steps.find(s => s.step === stepName);
-    const status = match ? match.status : 'pending';
-    item.className = `progress-item ${status}`;
-    const icon = status === 'done' ? '<span class="check">✓</span>'
-      : status === 'active' ? '<span class="spinner"></span>'
-      : status === 'failed' ? '<span style="color:var(--red)">✗</span>'
-      : '<span class="pending-dot">○</span>';
-    item.innerHTML = `${icon} ${esc(stepName)}`;
-  });
-}
-
-function renderResults(result) {
-  resultsCard.style.display = '';
-  currentTestId = result.test_id;
-  pdfBtn.disabled = false;
-  excelBtn.disabled = false;
-
-  const tc = result.transcription_comparison || {};
-  const score = result.accuracy_skipped
-    ? 'Skipped'
-    : (tc.similarity_score != null ? `${Math.round(tc.similarity_score)}/100` : 'N/A');
-  const severity = tc.severity || 'low';
-
-  scoreBar.innerHTML = `
-    <span>Accuracy Score: <span class="score-value">${esc(String(score))}</span></span>
-    <span class="severity ${esc(severity)}">Severity: ${esc(severity)}</span>
-    <span class="result-badge ${esc(result.final_result || '')}">${esc(formatResult(result.final_result))}</span>
-    ${result.retry_count ? `<span style="color:var(--muted);font-size:12px;">Retries: ${result.retry_count}</span>` : ''}
-  `;
-
-  groundTruthText.textContent = result.ground_truth_transcription || '(none)';
-  generatedText.innerHTML = highlightDiff(
-    result.ground_truth_transcription || '',
-    result.generated_transcription || '',
-    tc.medical_differences || [],
-    tc.general_differences || []
-  );
-
-  const medItems = [
-    ...(tc.medical_differences || []),
-    ...(result.medication_comparison?.medical_differences || []),
-  ];
-  medicalDiffs.innerHTML = medItems.length
-    ? medItems.map(d => `<li>${esc(d)}</li>`).join('')
-    : '<li style="border-left-color:var(--border);background:var(--bg);color:var(--muted);">No medical differences flagged</li>';
-
-  summaryDiff.textContent = formatComparison(result.summary_comparison);
-  medicationDiff.textContent = formatMedComparison(result.medication_comparison);
-
-  if (result.regression_comparison && !result.regression_comparison.skipped) {
-    regressionSection.style.display = '';
-    regressionDiff.textContent = formatComparison(result.regression_comparison);
-  } else {
-    regressionSection.style.display = 'none';
-  }
-
-  if (result.errors?.length) {
-    errorsBox.style.display = '';
-    errorsBox.textContent = result.errors.join('\n\n');
-  } else {
-    errorsBox.style.display = 'none';
-  }
-}
-
-function formatComparison(comp) {
-  if (!comp) return 'N/A';
-  if (comp.skipped) return comp.skip_reason || 'Skipped';
-  const lines = [
-    comp.summary || '',
-    ...(comp.medical_differences || []).map(d => `[Medical] ${d}`),
-    ...(comp.general_differences || []).map(d => `[General] ${d}`),
-    comp.similarity_score != null ? `Similarity: ${comp.similarity_score}/100` : '',
-    `Severity: ${comp.severity || 'low'}`,
-  ].filter(Boolean);
-  return lines.join('\n');
-}
-
-function formatMedComparison(comp) {
-  if (!comp) return 'N/A';
-  if (comp.skipped) return comp.skip_reason || 'Skipped';
-  const lines = [
-    comp.summary || '',
-    ...(comp.added || []).map(d => `[Added] ${d}`),
-    ...(comp.removed || []).map(d => `[Removed] ${d}`),
-    ...(comp.changed || []).map(d => `[Changed] ${d}`),
-    ...(comp.medical_differences || []).map(d => `[Medical] ${d}`),
-  ].filter(Boolean);
-  return lines.join('\n') || 'No medication differences';
-}
-
-function highlightDiff(ground, generated, medicalDiffs, generalDiffs) {
-  let html = esc(generated || '(empty)');
-  const terms = new Set();
-  [...medicalDiffs, ...generalDiffs].forEach(d => {
-    const matches = d.match(/[\w\u0900-\u097F]+(?:\s*[\d.]+\s*mg)?/gi);
-    if (matches) matches.forEach(m => { if (m.length > 2) terms.add(m); });
-  });
-  terms.forEach(term => {
-    const re = new RegExp(`(${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
-    html = html.replace(re, '<span class="med-highlight">$1</span>');
-  });
-  return html;
-}
-
-async function loadPastResults() {
-  pastResultsBody.innerHTML = '<tr><td colspan="7" class="empty-row">Loading…</td></tr>';
-  try {
-    const resp = await fetch(`${API}/results`);
-    const items = await resp.json();
-    if (!items.length) {
-      pastResultsBody.innerHTML = '<tr><td colspan="7" class="empty-row">No past results</td></tr>';
-      return;
-    }
-    pastResultsBody.innerHTML = items.map(item => `
-      <tr>
-        <td class="mono" style="font-size:11px;">${esc(item.id.slice(0, 8))}…</td>
-        <td>${esc(item.language || '')}</td>
-        <td>${esc(item.filename || '')}</td>
-        <td style="font-size:12px;color:var(--muted);">${esc(formatTimestamp(item.timestamp))}</td>
-        <td><span class="result-badge ${esc(item.final_result || '')}">${esc(formatResult(item.final_result))}</span></td>
-        <td>${item.accuracy_score != null ? Math.round(item.accuracy_score) : '—'}</td>
-        <td><button class="view-link" data-id="${esc(item.id)}" type="button">View</button></td>
-      </tr>
-    `).join('');
-
-    pastResultsBody.querySelectorAll('.view-link').forEach(btn => {
-      btn.addEventListener('click', () => loadPastResult(btn.dataset.id));
+    renderStatCards({
+      total: data.total,
+      with_transcript: driveStats.with_transcript,
+      passed: data.passed,
+      avg_accuracy: data.avg_accuracy,
+      report_count: data.completed,
     });
+    renderTestRunsTable(data.results);
+    renderAccuracyChart(data.results);
+    renderDistributionChart(data.results);
+
+    document.getElementById('batch-status').textContent =
+      `Batch: ${data.completed} complete, ${data.failed} failed, ${data.pending} pending`;
+
+    if (data.pending === 0) {
+      clearInterval(batchPollInterval);
+      batchPollInterval = null;
+      const btn = document.getElementById('run-all-btn');
+      btn.disabled = false;
+      btn.textContent = '▶ Run All Tests';
+      showToast(`All ${data.total} tests complete — avg accuracy: ${data.avg_accuracy}%`);
+    }
   } catch (err) {
-    pastResultsBody.innerHTML = `<tr><td colspan="7" class="empty-row">Error: ${esc(err.message)}</td></tr>`;
+    console.warn('Batch poll failed:', err);
   }
 }
 
-async function loadPastResult(testId) {
-  showTab('run');
+function renderTestRunsTable(results) {
+  const tbody = document.getElementById('test-runs-tbody');
+  if (!results || !results.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-row">No test runs yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = results.slice(0, 30).map(r => {
+    const comp = r.transcription_comparison || r.comparison || {};
+    const score = comp.similarity_score ?? r.accuracy_score;
+    const accuracy = score != null ? `${Math.round(score)}%` : '--';
+    const accuracyClass = score >= 95 ? 'high' : score >= 80 ? 'med' :
+      score >= 60 ? 'warn' : score != null ? 'low' : '';
+    const statusBadge = r.status === 'complete' ? '✅ Completed' :
+      r.status === 'failed' ? '❌ Failed' :
+      r.status === 'running' ? '⏳ Running' : '⏸ Pending';
+    const time = formatDuration(r.transcription_result?.['total-time']);
+
+    return `<tr onclick="openTestDetail('${esc(r.test_id)}')" style="cursor:pointer">
+      <td>${esc((r.test_id || '').slice(0, 8))}…</td>
+      <td>${esc(r.audio_filename || '--')}</td>
+      <td>${esc(r.language || '--')}</td>
+      <td><span class="accuracy-badge ${accuracyClass}">${esc(accuracy)}</span></td>
+      <td>${esc(time)}</td>
+      <td>${statusBadge}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderAccuracyChart(results) {
+  const canvas = document.getElementById('accuracy-chart');
+  if (!canvas) return;
+
+  const completed = (results || [])
+    .filter(r => r.status === 'complete')
+    .map(r => ({
+      name: r.audio_filename,
+      score: (r.transcription_comparison || r.comparison || {}).similarity_score
+        ?? r.accuracy_score,
+    }))
+    .filter(r => r.score != null)
+    .slice(-10);
+
+  if (accuracyChart) accuracyChart.destroy();
+  if (!completed.length) return;
+
+  accuracyChart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: completed.map(r => (r.name || '').slice(0, 12)),
+      datasets: [{
+        data: completed.map(r => r.score),
+        borderColor: '#6C5CE7',
+        backgroundColor: 'rgba(108,92,231,0.1)',
+        tension: 0.4,
+        pointBackgroundColor: '#6C5CE7',
+        fill: true,
+      }],
+    },
+    options: {
+      responsive: true,
+      scales: { y: { min: 0, max: 100 } },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+function renderDistributionChart(results) {
+  const canvas = document.getElementById('distribution-chart');
+  const legend = document.getElementById('distribution-legend');
+  if (!canvas) return;
+
+  const scores = (results || [])
+    .map(r => (r.transcription_comparison || r.comparison || {}).similarity_score ?? r.accuracy_score)
+    .filter(s => s != null);
+
+  const high = scores.filter(s => s >= 95).length;
+  const med = scores.filter(s => s >= 80 && s < 95).length;
+  const warn = scores.filter(s => s >= 60 && s < 80).length;
+  const low = scores.filter(s => s < 60).length;
+  const total = scores.length || 1;
+
+  if (distributionChart) distributionChart.destroy();
+
+  if (!scores.length) {
+    legend.innerHTML = '<span class="legend-item">No completed scores yet</span>';
+    return;
+  }
+
+  distributionChart = new Chart(canvas.getContext('2d'), {
+    type: 'doughnut',
+    data: {
+      labels: ['>95%', '80-95%', '60-80%', '<60%'],
+      datasets: [{
+        data: [high, med, warn, low],
+        backgroundColor: ['#00B894', '#6C5CE7', '#FDCB6E', '#E17055'],
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+    },
+  });
+
+  const colors = ['#00B894', '#6C5CE7', '#FDCB6E', '#E17055'];
+  const counts = [high, med, warn, low];
+  const labels = ['>95%', '80-95%', '60-80%', '<60%'];
+  legend.innerHTML = labels.map((label, i) => {
+    const pct = Math.round(counts[i] / total * 100);
+    return `<div class="legend-item">
+      <span class="legend-dot" style="background:${colors[i]}"></span>
+      ${label} — ${counts[i]} (${pct}%)
+    </div>`;
+  }).join('');
+}
+
+async function openTestDetail(testId) {
   try {
     const resp = await fetch(`${API}/results/${testId}`);
-    const result = await resp.json();
-    progressCard.style.display = 'none';
-    renderResults(result);
-    renderProgress(result.progress_steps || DEFAULT_STEPS.map(s => ({ step: s, status: 'done' })));
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    currentTestId = testId;
+    currentDetailResult = data;
+    renderDetailPage(data);
   } catch (err) {
-    alert(`Failed to load result: ${err.message}`);
+    showToast(`Failed to load: ${err.message}`);
+  }
+}
+
+function renderDetailPage(result) {
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('detail-view').style.display = 'block';
+
+  const score = (result.transcription_comparison || {}).similarity_score;
+  document.getElementById('detail-title').textContent =
+    `Test ${result.test_id?.slice(0, 8)}… — ${result.audio_filename || ''}`;
+  document.getElementById('detail-meta').textContent =
+    `${result.language || ''} · ${result.status || ''} · ` +
+    `Accuracy: ${score != null ? Math.round(score) + '%' : 'N/A'} · ` +
+    `Duration: ${formatDuration(result.transcription_result?.['total-time'])}`;
+
+  document.getElementById('ground-truth-text').textContent =
+    result.ground_truth_transcription || '(none)';
+  document.getElementById('generated-text').textContent =
+    result.generated_transcription || '(empty)';
+
+  renderMedicalDifferences(result.transcription_comparison);
+  renderMedicationValidation(result.medication_validation);
+  renderSOAPTabs(result.transcription_result);
+
+  const errorsSection = document.getElementById('errors-section');
+  if (result.errors?.length) {
+    errorsSection.style.display = '';
+    document.getElementById('errors-box').textContent = result.errors.join('\n\n');
+  } else {
+    errorsSection.style.display = 'none';
+  }
+}
+
+function showDashboard() {
+  document.getElementById('dashboard-view').style.display = '';
+  document.getElementById('detail-view').style.display = 'none';
+  currentTestId = null;
+  currentDetailResult = null;
+}
+
+function renderMedicalDifferences(comp) {
+  const el = document.getElementById('medical-diffs');
+  const items = [
+    ...(comp?.medical_differences || []),
+    ...(comp?.general_differences || []),
+  ];
+  el.innerHTML = items.length
+    ? items.map(d => `<li>${esc(d)}</li>`).join('')
+    : '<li>No medical differences flagged</li>';
+}
+
+function renderMedicationValidation(medVal) {
+  const el = document.getElementById('med-validation');
+  if (!medVal) {
+    el.innerHTML = '<p style="color:var(--text-secondary)">No medication validation data</p>';
+    return;
+  }
+
+  const diffRows = (medVal.differences || []).map(d => `
+    <div class="med-diff ${d.severity}">
+      <span class="severity-badge ${d.severity}">${esc((d.severity || '').toUpperCase())}</span>
+      ${esc(d.detail || '')}
+    </div>
+  `).join('');
+
+  const finalMeds = medVal.final_medications || [];
+  const rawMeds = medVal.raw_medications || [];
+  const tableRows = finalMeds.map((med, i) => {
+    const raw = rawMeds[i] || {};
+    return `
+      <tr>
+        <td>${esc(med.drug_name || '--')}</td>
+        <td class="${raw.dose !== med.dose ? 'changed' : ''}">${esc(String(raw.dose ?? 'NA'))}</td>
+        <td class="${raw.dose !== med.dose ? 'changed' : ''}">${esc(String(med.dose ?? 'NA'))}</td>
+        <td class="${raw.schedule !== med.schedule ? 'changed' : ''}">${esc(String(raw.schedule ?? 'NA'))}</td>
+        <td class="${raw.schedule !== med.schedule ? 'changed' : ''}">${esc(String(med.schedule ?? 'NA'))}</td>
+      </tr>`;
+  }).join('');
+
+  el.innerHTML = `
+    <h3>Medication Validation
+      ${medVal.has_critical_differences
+        ? '<span class="badge danger">⚠ Critical Differences</span>'
+        : '<span class="badge success">✓ OK</span>'}
+    </h3>
+    <table class="med-table">
+      <thead>
+        <tr>
+          <th>Drug</th>
+          <th>Raw Dose</th>
+          <th>Final Dose</th>
+          <th>Raw Schedule</th>
+          <th>Final Schedule</th>
+        </tr>
+      </thead>
+      <tbody>${tableRows || '<tr><td colspan="5">No medications</td></tr>'}</tbody>
+    </table>
+    <div class="med-differences">${diffRows || '<p>No differences</p>'}</div>
+  `;
+}
+
+function renderSOAPTabs(tr) {
+  const el = document.getElementById('soap-content');
+  if (!tr) {
+    el.textContent = '(no SOAP data)';
+    return;
+  }
+
+  const section = tr[activeSoapTab];
+  if (typeof section === 'string') {
+    el.textContent = section || '(empty)';
+  } else if (section && typeof section === 'object') {
+    el.textContent = JSON.stringify(section, null, 2);
+  } else if (activeSoapTab === 'summary') {
+    el.textContent = tr.summary || tr.medical_summary || '(empty)';
+  } else {
+    el.textContent = '(empty)';
   }
 }
 
@@ -310,21 +449,21 @@ function downloadReport(format) {
   window.location.href = `${API}/report/${currentTestId}?format=${format}`;
 }
 
-function formatResult(val) {
-  const map = {
-    pass: 'Pass',
-    fail: 'Fail',
-    review: 'Review',
-    complete_no_accuracy: 'Complete (no GT)',
-    failed: 'Failed',
-    pending: 'Pending',
-  };
-  return map[val] || val || '—';
+function formatDuration(seconds) {
+  if (seconds == null || seconds === '') return '--';
+  const s = Number(seconds);
+  if (Number.isNaN(s)) return '--';
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return `${m}m ${rem}s`;
 }
 
-function formatTimestamp(ts) {
-  if (!ts) return '—';
-  try { return new Date(ts).toLocaleString(); } catch { return ts; }
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.style.display = '';
+  setTimeout(() => { toast.style.display = 'none'; }, 4000);
 }
 
 function esc(s) {
@@ -335,139 +474,10 @@ function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
-// ── Schedule panel ───────────────────────────────────────────────────────────
-
-const scheduleCron = document.getElementById('schedule-cron');
-const scheduleCronCustom = document.getElementById('schedule-cron-custom');
-const customCronField = document.getElementById('custom-cron-field');
-const scheduleModel = document.getElementById('schedule-model');
-const scheduleEnabled = document.getElementById('schedule-enabled');
-const saveScheduleBtn = document.getElementById('save-schedule-btn');
-const runAllBtn = document.getElementById('run-all-btn');
-const scheduleInfo = document.getElementById('schedule-info');
-const scheduleStatusBadge = document.getElementById('schedule-status-badge');
-const lastRunPanel = document.getElementById('last-run-panel');
-const lastRunList = document.getElementById('last-run-list');
-const toast = document.getElementById('toast');
-
-if (scheduleCron) {
-  scheduleCron.addEventListener('change', () => {
-    customCronField.style.display = scheduleCron.value === 'custom' ? '' : 'none';
-  });
-  saveScheduleBtn.addEventListener('click', saveSchedule);
-  runAllBtn.addEventListener('click', runAllNow);
-}
-
-function initPage() {
-  loadDriveFiles();
-  loadScheduleState();
-}
+window.openTestDetail = openTestDetail;
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initPage);
 } else {
   initPage();
-}
-
-function showToast(msg) {
-  toast.textContent = msg;
-  toast.style.display = '';
-  setTimeout(() => { toast.style.display = 'none'; }, 3000);
-}
-
-function getSelectedCron() {
-  if (scheduleCron.value === 'custom') {
-    return scheduleCronCustom.value.trim() || '0 2 * * *';
-  }
-  return scheduleCron.value;
-}
-
-async function loadScheduleState() {
-  const infoEl = document.getElementById('schedule-info');
-  if (!infoEl) return;
-  try {
-    const res = await fetch(`${API}/schedule`);
-    if (!res.ok) throw new Error(`Schedule fetch failed: ${res.status}`);
-    const scheduleData = await res.json();
-    renderSchedulePanel(scheduleData);
-  } catch (err) {
-    console.warn('Could not load schedule state:', err);
-    infoEl.textContent = `Failed to load schedule: ${err.message}`;
-  }
-}
-
-function renderSchedulePanel(data) {
-  scheduleEnabled.checked = !!data.enabled;
-  scheduleModel.value = data.ai_model || 'deepseek';
-
-  const cron = data.cron || '0 2 * * *';
-  const known = [...scheduleCron.options].some(o => o.value === cron);
-  if (known) {
-    scheduleCron.value = cron;
-    customCronField.style.display = 'none';
-  } else {
-    scheduleCron.value = 'custom';
-    scheduleCronCustom.value = cron;
-    customCronField.style.display = '';
-  }
-
-  scheduleStatusBadge.textContent = data.enabled ? 'ACTIVE' : 'INACTIVE';
-  scheduleStatusBadge.className = `schedule-status ${data.enabled ? 'active' : 'inactive'}`;
-
-  const nextRun = data.next_run ? formatTimestamp(data.next_run) : '—';
-  const lastRun = data.last_run ? formatTimestamp(data.last_run) : '—';
-  scheduleInfo.innerHTML = `
-    Status: <strong>${data.enabled ? 'Active' : 'Disabled'}</strong>
-    &nbsp;|&nbsp; Schedule: <strong>${esc(data.cron_human || cron)}</strong>
-    &nbsp;|&nbsp; Next run: <strong>${esc(nextRun)}</strong>
-    &nbsp;|&nbsp; Last run: <strong>${esc(lastRun)}</strong>
-  `;
-
-  if (data.last_run_status && data.last_run_status.length) {
-    lastRunPanel.style.display = '';
-    lastRunList.innerHTML = data.last_run_status.map(item => {
-      const cls = item.status === 'failed' ? 'failed' : item.status === 'skipped' ? 'skipped' : '';
-      const icon = item.status === 'complete' ? '✓' : item.status === 'skipped' ? '○' : '✗';
-      return `<li class="${cls}">${icon} ${esc(item.audio)} — ${esc(item.status)}${
-        item.error ? `<span class="run-error">${esc(item.error)}</span>` : ''
-      }${item.reason ? `<span class="run-error">${esc(item.reason)}</span>` : ''}</li>`;
-    }).join('');
-  } else {
-    lastRunPanel.style.display = 'none';
-  }
-}
-
-async function saveSchedule() {
-  const payload = {
-    enabled: scheduleEnabled.checked,
-    cron: getSelectedCron(),
-    ai_model: scheduleModel.value,
-  };
-  const res = await fetch(`${API}/schedule`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const err = await res.json();
-    showToast(`Save failed: ${err.error || res.status}`);
-    return;
-  }
-  showToast('Schedule saved');
-  loadScheduleState();
-}
-
-async function runAllNow() {
-  const res = await fetch(`${API}/schedule/run-now`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ai_model: scheduleModel.value }),
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    showToast(`Run failed: ${data.error || res.status}`);
-    return;
-  }
-  showToast(`Running ${data.test_count} tests — check Results panel`);
-  setTimeout(loadScheduleState, 5000);
 }
