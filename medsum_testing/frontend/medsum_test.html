@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MedSum — API Testing Dashboard</title>
+  <link rel="stylesheet" href="/css/medsum_test.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="logo">
+        <span class="logo-icon">🏥</span>
+        <span class="logo-text">MedSum</span>
+      </div>
+      <nav>
+        <a href="#dashboard" class="nav-item active" data-nav="dashboard">
+          <span class="nav-icon">📊</span> Dashboard
+        </a>
+        <a href="#tests" class="nav-item" data-nav="tests">
+          <span class="nav-icon">⚡</span> API Tests
+        </a>
+        <a href="#runs" class="nav-item" data-nav="runs">
+          <span class="nav-icon">📋</span> Test Runs
+        </a>
+        <a href="#reports" class="nav-item" data-nav="reports">
+          <span class="nav-icon">📄</span> Reports
+        </a>
+        <a href="#analytics" class="nav-item" data-nav="analytics">
+          <span class="nav-icon">📈</span> Analytics
+        </a>
+        <a href="#settings" class="nav-item" data-nav="settings">
+          <span class="nav-icon">⚙️</span> Settings
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <button class="logout-btn" type="button">🚪 Logout</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <!-- Dashboard View -->
+      <div id="dashboard-view">
+        <header class="page-header">
+          <div>
+            <h1>API Testing Dashboard</h1>
+            <p class="subtitle">Monitor and evaluate your backend API performance</p>
+          </div>
+          <div class="header-actions">
+            <select id="ai-model-select" class="select-input">
+              <option value="deepseek">DeepSeek</option>
+              <option value="gpt-4">GPT-4</option>
+            </select>
+            <button id="run-all-btn" class="btn-primary" type="button">▶ Run All Tests</button>
+          </div>
+        </header>
+
+        <section class="stat-grid" id="stat-grid"></section>
+
+        <section class="charts-row">
+          <div class="card chart-card">
+            <h3>Accuracy Over Time</h3>
+            <canvas id="accuracy-chart"></canvas>
+          </div>
+          <div class="card chart-card">
+            <h3>Accuracy Distribution</h3>
+            <canvas id="distribution-chart"></canvas>
+            <div id="distribution-legend" class="distribution-legend"></div>
+          </div>
+        </section>
+
+        <section class="card table-card">
+          <div class="table-header">
+            <h3>Recent Test Runs</h3>
+            <span id="batch-status" class="batch-status"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="runs-table">
+              <thead>
+                <tr>
+                  <th>Test ID</th>
+                  <th>Audio File</th>
+                  <th>Language</th>
+                  <th>Accuracy</th>
+                  <th>Time</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="test-runs-tbody">
+                <tr><td colspan="6" class="empty-row">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- Detail View -->
+      <div id="detail-view" style="display:none">
+        <button id="back-btn" class="btn-secondary" type="button">← Back to Dashboard</button>
+        <header class="detail-header">
+          <div>
+            <h1 id="detail-title">Test Run</h1>
+            <p id="detail-meta" class="subtitle"></p>
+          </div>
+          <div class="header-actions">
+            <button id="pdf-btn" class="btn-outline" type="button">PDF</button>
+            <button id="excel-btn" class="btn-outline" type="button">Excel</button>
+          </div>
+        </header>
+
+        <section class="card">
+          <h3>Transcription</h3>
+          <div class="diff-grid">
+            <div>
+              <h4>Ground Truth</h4>
+              <pre id="ground-truth-text" class="text-panel"></pre>
+            </div>
+            <div>
+              <h4>Generated</h4>
+              <pre id="generated-text" class="text-panel"></pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h3>Medical Differences</h3>
+          <ul id="medical-diffs" class="diff-list"></ul>
+        </section>
+
+        <section class="card" id="med-validation-section">
+          <div id="med-validation"></div>
+        </section>
+
+        <section class="card">
+          <h3>SOAP Summary</h3>
+          <div class="soap-tabs">
+            <button class="soap-tab active" data-tab="subjective" type="button">Subjective</button>
+            <button class="soap-tab" data-tab="objective" type="button">Objective</button>
+            <button class="soap-tab" data-tab="assessment" type="button">Assessment</button>
+            <button class="soap-tab" data-tab="plan" type="button">Plan</button>
+            <button class="soap-tab" data-tab="summary" type="button">Summary</button>
+          </div>
+          <pre id="soap-content" class="text-panel"></pre>
+        </section>
+
+        <section class="card" id="errors-section" style="display:none">
+          <h3>Errors</h3>
+          <pre id="errors-box" class="errors-box"></pre>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" style="display:none"></div>
+  <script src="/js/medsum_test.js"></script>
+</body>
+</html>
