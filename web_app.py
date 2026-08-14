@@ -302,7 +302,7 @@ HTML = r"""<!DOCTYPE html>
           <label>LLM</label>
           <select id="cfg-llm">
             <option value="OpenAI">OpenAI</option>
-            <option value="Gemma">Gemma</option>
+            # <option value="OpenAI">OpenAI</option>
             <option value="Param">Param</option>
           </select>
         </div>

@@ -49,12 +49,16 @@
           </div>
           <div class="header-actions">
             <select id="ai-model-select" class="select-input">
+              <option value="gpt-4o-mini" selected>gpt-4o-mini</option>
               <option value="deepseek">DeepSeek</option>
-              <option value="gpt-4">GPT-4</option>
             </select>
             <button id="run-all-btn" class="btn-primary" type="button">▶ Run All Tests</button>
           </div>
         </header>
+
+        <div id="ai-warning-banner" class="ai-warning-banner" style="display:none">
+          <span id="ai-warning-text"></span>
+        </div>
 
         <section class="stat-grid" id="stat-grid"></section>
 
@@ -79,7 +83,7 @@
             <table class="runs-table">
               <thead>
                 <tr>
-                  <th>Test ID</th>
+                  <th>Test Case ID</th>
                   <th>Audio File</th>
                   <th>Language</th>
                   <th>Accuracy</th>
@@ -100,6 +104,10 @@
         <button id="back-btn" class="btn-secondary" type="button">← Back to Dashboard</button>
         <header class="detail-header">
           <div>
+            <div class="detail-ids">
+              <span class="tc-ref" id="detail-tc-ref">—</span>
+              <span class="run-ref-small" id="detail-run-ref"></span>
+            </div>
             <h1 id="detail-title">Test Run</h1>
             <p id="detail-meta" class="subtitle"></p>
           </div>
@@ -109,40 +117,22 @@
           </div>
         </header>
 
-        <section class="card">
-          <h3>Transcription</h3>
-          <div class="diff-grid">
-            <div>
-              <h4>Ground Truth</h4>
-              <pre id="ground-truth-text" class="text-panel"></pre>
-            </div>
-            <div>
-              <h4>Generated</h4>
-              <pre id="generated-text" class="text-panel"></pre>
-            </div>
-          </div>
+        <div id="flask-error-banner"
+             style="display:none; background:#FFF3CD; color:#856404;
+                    padding:0.75rem 1rem; border-radius:8px; margin-bottom:1rem;
+                    font-size:13px; border:1px solid #FFECB5;">
+        </div>
+
+        <section class="section-card" id="transcription-section">
+          <div class="section-title">📝 Transcription Comparison</div>
+          <div id="transcription-diff"></div>
         </section>
 
-        <section class="card">
-          <h3>Medical Differences</h3>
-          <ul id="medical-diffs" class="diff-list"></ul>
-        </section>
-
-        <section class="card" id="med-validation-section">
-          <div id="med-validation"></div>
-        </section>
-
-        <section class="card">
-          <h3>SOAP Summary</h3>
-          <div class="soap-tabs">
-            <button class="soap-tab active" data-tab="subjective" type="button">Subjective</button>
-            <button class="soap-tab" data-tab="objective" type="button">Objective</button>
-            <button class="soap-tab" data-tab="assessment" type="button">Assessment</button>
-            <button class="soap-tab" data-tab="plan" type="button">Plan</button>
-            <button class="soap-tab" data-tab="summary" type="button">Summary</button>
-          </div>
-          <pre id="soap-content" class="text-panel"></pre>
-        </section>
+        <div id="translation-section" style="display:none;"></div>
+        <div id="soap-section" style="display:none;"></div>
+        <div id="medication-section" style="display:none;"></div>
+        <div id="medical-diff-section" style="display:none;"></div>
+        <div id="soap-comparison-section" style="display:none;"></div>
 
         <section class="card" id="errors-section" style="display:none">
           <h3>Errors</h3>

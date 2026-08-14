@@ -11,9 +11,11 @@ from typing import Any, Optional
 class ComparisonResult:
     similarity_score: Optional[float] = None
     medical_differences: list[str] = field(default_factory=list)
+    medical_difference_details: list[dict] = field(default_factory=list)
     general_differences: list[str] = field(default_factory=list)
     severity: str = "low"
     summary: str = ""
+    error: str = ""
     skipped: bool = False
     skip_reason: str = ""
 
@@ -27,9 +29,11 @@ class ComparisonResult:
         return cls(
             similarity_score=data.get("similarity_score"),
             medical_differences=data.get("medical_differences") or [],
+            medical_difference_details=data.get("medical_difference_details") or [],
             general_differences=data.get("general_differences") or [],
             severity=data.get("severity") or "low",
             summary=data.get("summary") or "",
+            error=data.get("error") or "",
             skipped=data.get("skipped", False),
             skip_reason=data.get("skip_reason") or "",
         )
@@ -75,7 +79,7 @@ class TestResult:
     status: str = "running"
     language: str = ""
     audio_filename: str = ""
-    ai_model: str = "gpt-4"
+    ai_model: str = "gpt-4o-mini"
     timestamp: str = ""
     test_case_id: str = ""
     patient_id: str = ""
@@ -108,8 +112,48 @@ class TestResult:
     job_id: str = ""
     batch_id: str = ""
     folder_label: str = ""
+    run_ref: str = ""
+    tc_ref: str = ""
     transcription_result: Any = None
+    flask_error: str = ""
     medication_validation: Any = None
+    translation: str = ""
+    soap_ground_truth: Any = None
+    has_soap_ground_truth: bool = False
+    soap_comparison: Any = None
+    translation_ground_truth: str = ""
+    has_translation_ground_truth: bool = False
+    translation_comparison: Any = None
+    saved_summary: Any = None
+    total_test_time_seconds: float | None = None
+    drive_download_time_seconds: float | None = None
+    audio_upload_time_seconds: float | None = None
+    ai_comparison_time_seconds: float | None = None
+    audio_size_bytes: int = 0
+    previous_test_id: str = ""
+    previous_similarity_score: float | None = None
+    regression_vs_previous: str = "na"
+    ai_model_used: str = ""
+    initiated_by: str = "manual"
+    target_environment: str = ""
+    medsum_version: str = ""
+    git_commit: str = ""
+    stt_model: str = ""
+    translation_model: str = ""
+    llm_model: str = ""
+    summary_template_id: str = ""
+    summary_template_name: str = ""
+    django_audio_endpoint: str = ""
+    flask_transcribe_endpoint: str = ""
+    django_summary_endpoint: str = ""
+    drive_audio_file_id: str = ""
+    drive_audio_filename: str = ""
+    drive_folder_id: str = ""
+    drive_transcript_file_id: str = ""
+    drive_soap_gt_file_id: str = ""
+    drive_translation_gt_file_id: str = ""
+    report_pdf_path: str = ""
+    report_excel_path: str = ""
 
     def __post_init__(self) -> None:
         if not self.timestamp:

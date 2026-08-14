@@ -8,7 +8,6 @@ let distributionChart = null;
 let driveStats = { total: 0, with_transcript: 0 };
 let latestResults = [];
 let currentDetailResult = null;
-let activeSoapTab = 'subjective';
 
 const STAT_CARDS = [
   { id: 'stat-input', icon: '📤', label: 'Input Upload', sublabel: 'Requests Sent', key: 'total' },
@@ -23,7 +22,43 @@ function initPage() {
   renderStatCards({});
   loadDriveStats();
   loadRecentResults();
+  checkAIConfig();
   bindEvents();
+}
+
+function getAccuracyDisplay(result) {
+  const comp = result.transcription_comparison || result.comparison || {};
+  const score = result.similarity_score ?? comp.similarity_score;
+
+  if (score != null && score !== '') {
+    const cssClass = score >= 95 ? 'high'
+      : score >= 80 ? 'med'
+      : score >= 60 ? 'warn'
+      : 'low';
+    return { text: `${Math.round(score)}%`, cssClass };
+  }
+
+  const compError = comp.error || result.comparison_error || '';
+  if (compError && (compError.includes('401') || compError.includes('Unauthorized'))) {
+    return { text: 'Auth Error', cssClass: 'error' };
+  }
+
+  return { text: '—', cssClass: 'muted' };
+}
+
+async function checkAIConfig() {
+  try {
+    const res = await fetch(`${API}/health`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const banner = document.getElementById('ai-warning-banner');
+    if (data.ai_warning && banner) {
+      banner.style.display = 'block';
+      document.getElementById('ai-warning-text').textContent = data.ai_warning;
+    }
+  } catch (err) {
+    console.warn('AI config check failed:', err);
+  }
 }
 
 function bindEvents() {
@@ -31,14 +66,6 @@ function bindEvents() {
   document.getElementById('back-btn').addEventListener('click', showDashboard);
   document.getElementById('pdf-btn').addEventListener('click', () => downloadReport('pdf'));
   document.getElementById('excel-btn').addEventListener('click', () => downloadReport('excel'));
-
-  document.querySelectorAll('.soap-tab').forEach(btn => {
-    btn.addEventListener('click', () => {
-      activeSoapTab = btn.dataset.tab;
-      document.querySelectorAll('.soap-tab').forEach(b => b.classList.toggle('active', b === btn));
-      if (currentDetailResult) renderSOAPTabs(currentDetailResult.transcription_result);
-    });
-  });
 
   document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', e => {
@@ -79,15 +106,19 @@ async function loadRecentResults() {
 }
 
 function normalizeResultSummary(r) {
+  const comp = r.transcription_comparison || r.comparison || {};
   return {
     test_id: r.test_id || r.id,
+    tc_ref: r.tc_ref,
+    run_ref: r.run_ref,
     audio_filename: r.audio_filename || r.filename,
     language: r.language,
     status: r.status || 'complete',
     final_result: r.final_result,
-    comparison: r.accuracy_score != null
-      ? { similarity_score: r.accuracy_score }
-      : (r.transcription_comparison || r.comparison),
+    similarity_score: r.similarity_score ?? r.accuracy_score ?? comp.similarity_score,
+    comparison: { ...comp, error: comp.error },
+    comparison_error: comp.error,
+    total_test_time_seconds: r.total_test_time_seconds,
     transcription_result: r.transcription_result,
   };
 }
@@ -150,7 +181,7 @@ async function runAllTests() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
-    showToast(`Started ${data.total} tests — batch ${data.batch_id.slice(0, 8)}…`);
+    showToast(`Batch ${data.batch_ref || data.batch_id.slice(0, 8)} — ${data.total} tests started`);
     currentBatchId = data.batch_id;
     document.getElementById('batch-status').textContent =
       `Batch running: 0 / ${data.total} complete`;
@@ -205,23 +236,39 @@ function renderTestRunsTable(results) {
     return;
   }
 
-  tbody.innerHTML = results.slice(0, 30).map(r => {
-    const comp = r.transcription_comparison || r.comparison || {};
-    const score = comp.similarity_score ?? r.accuracy_score;
-    const accuracy = score != null ? `${Math.round(score)}%` : '--';
-    const accuracyClass = score >= 95 ? 'high' : score >= 80 ? 'med' :
-      score >= 60 ? 'warn' : score != null ? 'low' : '';
+  tbody.innerHTML = results.slice(0, 50).map(r => {
+    const acc = getAccuracyDisplay(r);
+
+    const timeDisplay = r.total_test_time_seconds != null
+      ? formatDuration(r.total_test_time_seconds)
+      : '—';
+
     const statusBadge = r.status === 'complete' ? '✅ Completed' :
       r.status === 'failed' ? '❌ Failed' :
       r.status === 'running' ? '⏳ Running' : '⏸ Pending';
-    const time = formatDuration(r.transcription_result?.['total-time']);
 
-    return `<tr onclick="openTestDetail('${esc(r.test_id)}')" style="cursor:pointer">
-      <td>${esc((r.test_id || '').slice(0, 8))}…</td>
-      <td>${esc(r.audio_filename || '--')}</td>
-      <td>${esc(r.language || '--')}</td>
-      <td><span class="accuracy-badge ${accuracyClass}">${esc(accuracy)}</span></td>
-      <td>${esc(time)}</td>
+    const displayId = r.tc_ref
+      || r.run_ref
+      || `${(r.test_id || '').slice(0, 8)}…`;
+
+    const langClass = (r.language || '').toLowerCase().replace(/\s+/g, '-');
+
+    return `<tr onclick="openTestDetail('${esc(r.test_id)}')"
+                style="cursor:pointer"
+                title="${esc(r.run_ref || r.test_id || '')}">
+      <td class="run-id-cell">
+        <span class="tc-ref">${esc(displayId)}</span>
+      </td>
+      <td>${esc(r.audio_filename || '—')}</td>
+      <td>
+        <span class="lang-badge lang-${esc(langClass)}">
+          ${esc(r.language || '—')}
+        </span>
+      </td>
+      <td>
+        <span class="accuracy-badge ${acc.cssClass}">${esc(acc.text)}</span>
+      </td>
+      <td>${esc(timeDisplay)}</td>
       <td>${statusBadge}</td>
     </tr>`;
   }).join('');
@@ -331,22 +378,98 @@ function renderDetailPage(result) {
   document.getElementById('dashboard-view').style.display = 'none';
   document.getElementById('detail-view').style.display = 'block';
 
-  const score = (result.transcription_comparison || {}).similarity_score;
+  const comparison = result.transcription_comparison || result.comparison || {};
+  const score = comparison.similarity_score ?? result.accuracy_score ?? result.similarity_score;
+  const tr = result.transcription_result || {};
+
   document.getElementById('detail-title').textContent =
-    `Test ${result.test_id?.slice(0, 8)}… — ${result.audio_filename || ''}`;
-  document.getElementById('detail-meta').textContent =
-    `${result.language || ''} · ${result.status || ''} · ` +
-    `Accuracy: ${score != null ? Math.round(score) + '%' : 'N/A'} · ` +
-    `Duration: ${formatDuration(result.transcription_result?.['total-time'])}`;
+    `${result.audio_filename || 'Test Run'} — ${result.language || ''}`;
 
-  document.getElementById('ground-truth-text').textContent =
-    result.ground_truth_transcription || '(none)';
-  document.getElementById('generated-text').textContent =
-    result.generated_transcription || '(empty)';
+  const tcRefEl = document.getElementById('detail-tc-ref');
+  const runRefEl = document.getElementById('detail-run-ref');
+  if (tcRefEl) tcRefEl.textContent = result.tc_ref || '—';
+  if (runRefEl) runRefEl.textContent = result.run_ref || '';
 
-  renderMedicalDifferences(result.transcription_comparison);
-  renderMedicationValidation(result.medication_validation);
-  renderSOAPTabs(result.transcription_result);
+  const duration = result.total_test_time_seconds != null
+    ? formatDuration(result.total_test_time_seconds)
+    : '—';
+
+  document.getElementById('detail-meta').innerHTML =
+    `${esc(result.status || result.final_result || '')}` +
+    ` · Score: ${score != null ? Math.round(score) + '%' : '—'}` +
+    ` · Duration: ${esc(duration)}`;
+
+  const groundTruth = result.ground_truth_transcription || result.ground_truth || '';
+  const generated = result.generated_transcription || result.transcription || '';
+
+  const transcriptionSection = document.getElementById('transcription-section');
+  if (groundTruth || generated) {
+    renderTranscriptionDiff(groundTruth, generated);
+    if (transcriptionSection) transcriptionSection.style.display = 'block';
+  } else if (transcriptionSection) {
+    transcriptionSection.style.display = 'none';
+  }
+
+  const flaskError = result.flask_error || result.transcription_result?.error;
+  const flaskErrorText = flaskError && typeof flaskError === 'object'
+    ? JSON.stringify(flaskError)
+    : flaskError;
+  const errEl = document.getElementById('flask-error-banner');
+  if (errEl) {
+    if (flaskErrorText) {
+      errEl.style.display = 'block';
+      errEl.textContent = `⚠ LLM Error: ${flaskErrorText}`;
+    } else {
+      errEl.style.display = 'none';
+      errEl.textContent = '';
+    }
+  }
+
+  const translation = tr?.debug?.translation || result.generated_translation || result.translation || '';
+  const translationSection = document.getElementById('translation-section');
+  if (translation) {
+    renderTranslation(result);
+    if (translationSection) translationSection.style.display = 'block';
+  } else if (translationSection) {
+    translationSection.style.display = 'none';
+  }
+
+  const hasSOAP = tr.subjective || tr.objective || tr.assessment || tr.plan;
+  const soapSection = document.getElementById('soap-section');
+  if (hasSOAP) {
+    renderSOAPSummary(result);
+    if (soapSection) soapSection.style.display = 'block';
+  } else if (soapSection) {
+    soapSection.style.display = 'none';
+  }
+
+  const medVal = result.medication_validation;
+  const hasMeds = (medVal?.final_medications?.length > 0)
+    || (medVal?.raw_medications?.length > 0)
+    || (tr?.plan?.medications?.length > 0);
+  const medicationSection = document.getElementById('medication-section');
+  if (hasMeds) {
+    renderMedicationValidation(result);
+    if (medicationSection) medicationSection.style.display = 'block';
+  } else if (medicationSection) {
+    medicationSection.style.display = 'none';
+  }
+
+  const medicalDiffSection = document.getElementById('medical-diff-section');
+  if (comparison?.similarity_score != null) {
+    renderMedicalDifferences(comparison);
+    if (medicalDiffSection) medicalDiffSection.style.display = 'block';
+  } else if (medicalDiffSection) {
+    medicalDiffSection.style.display = 'none';
+  }
+
+  const soapComparisonSection = document.getElementById('soap-comparison-section');
+  if (result.soap_comparison?.similarity_score != null) {
+    renderSOAPComparison(result.soap_comparison);
+    if (soapComparisonSection) soapComparisonSection.style.display = 'block';
+  } else if (soapComparisonSection) {
+    soapComparisonSection.style.display = 'none';
+  }
 
   const errorsSection = document.getElementById('errors-section');
   if (result.errors?.length) {
@@ -357,91 +480,310 @@ function renderDetailPage(result) {
   }
 }
 
+function renderSOAPComparison(soapComp) {
+  const container = document.getElementById('soap-comparison-section');
+  if (!container) return;
+
+  const score = soapComp.similarity_score;
+  const scoreClass = score >= 95 ? 'high' : score >= 80 ? 'med' : score >= 60 ? 'warn' : 'low';
+  container.innerHTML = `
+    <div class="section-card">
+      <div class="section-title">
+        📋 SOAP Comparison
+        ${score != null
+    ? `<span class="accuracy-pill ${scoreClass}">${Math.round(score)}% match</span>`
+    : ''}
+      </div>
+      <p class="comparison-summary">${esc(soapComp.summary || '')}</p>
+    </div>`;
+}
+
+function computeWordDiff(groundTruth, generated) {
+  if (!groundTruth || !generated) {
+    return {
+      gtHtml: esc(groundTruth || ''),
+      genHtml: esc(generated || ''),
+    };
+  }
+
+  const normalize = str => str
+    .toLowerCase()
+    .replace(/[.,\-–—;:!?()]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const gtWords = (groundTruth || '').split(/\s+/);
+  const genWords = (generated || '').split(/\s+/);
+  const gtNorm = new Set(gtWords.map(normalize));
+
+  const gtHtml = gtWords.map(w => `<span>${esc(w)}</span>`).join(' ');
+
+  const genHtml = genWords.map(w => {
+    const norm = normalize(w);
+    if (gtNorm.has(norm)) {
+      return `<span>${esc(w)}</span>`;
+    }
+    const strippedW = norm.replace(/[^a-z0-9]/g, '');
+    const matchesPunctVariant = [...gtNorm].some(gt =>
+      gt.replace(/[^a-z0-9]/g, '') === strippedW
+    );
+    if (matchesPunctVariant) {
+      return `<span>${esc(w)}</span>`;
+    }
+    return `<span class="diff-highlight">${esc(w)}</span>`;
+  }).join(' ');
+
+  return { gtHtml, genHtml };
+}
+
+function renderTranscriptionDiff(groundTruth, generated) {
+  const container = document.getElementById('transcription-diff');
+  if (!container) return;
+
+  const { gtHtml, genHtml } = computeWordDiff(groundTruth, generated);
+
+  container.innerHTML = `
+    <div class="diff-grid">
+      <div class="diff-col">
+        <div class="diff-col-header">Ground Truth</div>
+        <div class="diff-text">${gtHtml || '<em>No ground truth available</em>'}</div>
+      </div>
+      <div class="diff-col">
+        <div class="diff-col-header">Generated</div>
+        <div class="diff-text generated-col">${genHtml || '<em>No transcription</em>'}</div>
+      </div>
+    </div>`;
+}
+
+function renderTranslation(result) {
+  const container = document.getElementById('translation-section');
+  if (!container) return;
+
+  const translation = result?.transcription_result?.debug?.translation
+    || result?.translation
+    || result?.text_translation
+    || '';
+
+  if (!translation) {
+    container.style.display = 'none';
+    return;
+  }
+
+  container.style.display = 'block';
+  container.innerHTML = `
+    <div class="section-card">
+      <div class="section-title">🌐 Translation (Debug)</div>
+      <div class="translation-text">${esc(translation)}</div>
+    </div>`;
+}
+
+function renderSOAPSummary(result) {
+  const container = document.getElementById('soap-section');
+  if (!container) return;
+
+  const tr = result?.transcription_result || {};
+  const subj = tr.subjective || result?.soap_subjective || {};
+  const obj = tr.objective || result?.soap_objective || {};
+  const asmt = tr.assessment || result?.soap_assessment || {};
+  const plan = tr.plan || result?.soap_plan || {};
+  const summary = tr.summary || result?.soap_summary || '';
+
+  const tabs = [
+    { id: 'subj', label: 'Subjective', content: subj },
+    { id: 'obj', label: 'Objective', content: obj },
+    { id: 'asmnt', label: 'Assessment', content: asmt },
+    { id: 'plan', label: 'Plan', content: plan },
+  ];
+
+  const tabHeaders = tabs.map((t, i) =>
+    `<button class="soap-tab ${i === 0 ? 'active' : ''}" type="button"
+             onclick="switchSOAPTab('${t.id}', this)">${esc(t.label)}</button>`
+  ).join('');
+
+  const tabContents = tabs.map((t, i) => `
+    <div id="soap-${t.id}" class="soap-content ${i === 0 ? 'active' : ''}">
+      ${renderSOAPFields(t.content)}
+    </div>
+  `).join('');
+
+  container.innerHTML = `
+    <div class="section-card">
+      <div class="section-title">📋 SOAP Summary</div>
+      ${summary ? `<div class="soap-summary-text">${esc(summary)}</div>` : ''}
+      <div class="soap-tabs">${tabHeaders}</div>
+      ${tabContents}
+    </div>`;
+}
+
+function renderSOAPFields(obj) {
+  if (!obj || typeof obj !== 'object') return '<em>No data</em>';
+  return Object.entries(obj).map(([key, val]) => {
+    const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    let valueHtml = '';
+    if (Array.isArray(val)) {
+      valueHtml = val.map(v =>
+        typeof v === 'object'
+          ? `<div class="soap-nested">${renderSOAPFields(v)}</div>`
+          : `<span>${esc(String(v))}</span>`
+      ).join(', ');
+    } else if (typeof val === 'object' && val !== null) {
+      valueHtml = `<div class="soap-nested">${renderSOAPFields(val)}</div>`;
+    } else {
+      valueHtml = val === 'NA' || val === '' || val == null
+        ? '<span class="soap-na">NA</span>'
+        : `<span>${esc(String(val))}</span>`;
+    }
+    return `
+      <div class="soap-field">
+        <div class="soap-field-label">${esc(label)}</div>
+        <div class="soap-field-value">${valueHtml}</div>
+      </div>`;
+  }).join('');
+}
+
+function switchSOAPTab(id, btn) {
+  document.querySelectorAll('.soap-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.soap-content').forEach(c => c.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(`soap-${id}`)?.classList.add('active');
+}
+
+function renderMedicationValidation(result) {
+  const container = document.getElementById('medication-section');
+  if (!container) return;
+
+  const medVal = result?.medication_validation;
+  const tr = result?.transcription_result || {};
+
+  const finalMeds = tr?.plan?.medications
+    || medVal?.final_medications || [];
+  const rawMeds = tr?.debug?.raw_soap?.plan?.medications
+    || tr?.debug?.['raw soap']?.plan?.medications
+    || medVal?.raw_medications || [];
+
+  const differences = medVal?.differences || [];
+  const diffMap = {};
+  differences.forEach(d => {
+    if (d.field) diffMap[`${d.drug}__${d.field}`] = d;
+  });
+
+  const FIELDS = ['drug_name', 'generic_name', 'dose', 'schedule',
+    'duration', 'instructions', 'matched_drug_name'];
+
+  const maxLen = Math.max(finalMeds.length, rawMeds.length, 0);
+
+  const rows = Array.from({ length: maxLen }, (_, i) => {
+    const final = finalMeds[i] || {};
+    const raw = rawMeds[i] || {};
+    const drugName = final.drug_name || raw.drug_name || `Drug ${i + 1}`;
+
+    return FIELDS.map((field, fi) => {
+      const finalVal = final[field] ?? '—';
+      const rawVal = raw[field] ?? '—';
+      const diff = diffMap[`${drugName}__${field}`];
+      const changed = String(rawVal) !== String(finalVal);
+
+      return `
+        <tr>
+          ${fi === 0 ? `<td class="med-drug-name" rowspan="${FIELDS.length}">${esc(drugName)}</td>` : ''}
+          <td class="med-field-name">${esc(field.replace(/_/g, ' '))}</td>
+          <td class="${changed ? 'med-changed' : ''}">${esc(String(rawVal))}</td>
+          <td class="${changed ? 'med-changed' : ''}">
+            ${esc(String(finalVal))}
+            ${changed && diff?.severity
+              ? `<span class="med-diff-badge ${esc(diff.severity)}">${esc(diff.severity)}</span>`
+              : ''}
+          </td>
+        </tr>`;
+    }).join('');
+  }).join('');
+
+  const diffSummary = differences.length > 0
+    ? `<div class="med-diff-summary warning">
+           ⚠ ${differences.length} difference${differences.length > 1 ? 's' : ''} found
+           ${medVal?.has_critical_differences
+      ? ' — <strong>critical differences present</strong>' : ''}
+       </div>`
+    : maxLen > 0
+      ? '<div class="med-diff-summary success">✓ Raw and final medications match</div>'
+      : '';
+
+  container.innerHTML = `
+    <div class="section-card">
+      <div class="section-title">💊 Medication Validation</div>
+      ${diffSummary}
+      ${maxLen > 0 ? `
+      <table class="med-table">
+        <thead>
+          <tr>
+            <th>Drug</th>
+            <th>Field</th>
+            <th>Raw LLM Output</th>
+            <th>Final Output (SNOMED)</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>` : '<p>No medications recorded for this consultation.</p>'}
+    </div>`;
+}
+
+function renderMedicalDifferences(comparison) {
+  const container = document.getElementById('medical-diff-section');
+  if (!container) return;
+
+  const structured = comparison?.medical_difference_details
+    || (comparison?.medical_differences || []).filter(d => typeof d === 'object' && d.severity);
+  const diffs = structured.filter(d => d.severity);
+
+  if (diffs.length === 0) {
+    container.innerHTML = `
+      <div class="section-card">
+        <div class="section-title">🏥 Medical Differences</div>
+        <div class="no-diffs">✓ No significant medical differences found</div>
+      </div>`;
+    return;
+  }
+
+  const rows = diffs.map(d => `
+    <div class="med-diff-row ${esc(d.severity || '')}">
+      <div class="med-diff-type">
+        <span class="severity-badge ${esc(d.severity || '')}">${esc(d.severity || '')}</span>
+        <span class="diff-type-label">${esc((d.type || 'difference').replace(/_/g, ' '))}</span>
+      </div>
+      <div class="med-diff-values">
+        <div class="diff-value ground-truth">
+          <span class="diff-label">Ground Truth</span>
+          <span>${esc(d.ground_truth || '—')}</span>
+        </div>
+        <div class="diff-arrow">→</div>
+        <div class="diff-value generated">
+          <span class="diff-label">Generated</span>
+          <span class="diff-highlight">${esc(d.generated || '—')}</span>
+        </div>
+      </div>
+    </div>
+  `).join('');
+
+  const score = comparison?.similarity_score;
+  const scoreClass = score >= 95 ? 'high' : score >= 80 ? 'med' : score >= 60 ? 'warn' : 'low';
+  container.innerHTML = `
+    <div class="section-card">
+      <div class="section-title">
+        🏥 Medical Differences
+        ${score != null
+    ? `<span class="accuracy-pill ${scoreClass}">${Math.round(score)}% match</span>`
+    : ''}
+      </div>
+      <p class="comparison-summary">${esc(comparison?.summary || '')}</p>
+      ${rows}
+    </div>`;
+}
+
 function showDashboard() {
   document.getElementById('dashboard-view').style.display = '';
   document.getElementById('detail-view').style.display = 'none';
   currentTestId = null;
   currentDetailResult = null;
-}
-
-function renderMedicalDifferences(comp) {
-  const el = document.getElementById('medical-diffs');
-  const items = [
-    ...(comp?.medical_differences || []),
-    ...(comp?.general_differences || []),
-  ];
-  el.innerHTML = items.length
-    ? items.map(d => `<li>${esc(d)}</li>`).join('')
-    : '<li>No medical differences flagged</li>';
-}
-
-function renderMedicationValidation(medVal) {
-  const el = document.getElementById('med-validation');
-  if (!medVal) {
-    el.innerHTML = '<p style="color:var(--text-secondary)">No medication validation data</p>';
-    return;
-  }
-
-  const diffRows = (medVal.differences || []).map(d => `
-    <div class="med-diff ${d.severity}">
-      <span class="severity-badge ${d.severity}">${esc((d.severity || '').toUpperCase())}</span>
-      ${esc(d.detail || '')}
-    </div>
-  `).join('');
-
-  const finalMeds = medVal.final_medications || [];
-  const rawMeds = medVal.raw_medications || [];
-  const tableRows = finalMeds.map((med, i) => {
-    const raw = rawMeds[i] || {};
-    return `
-      <tr>
-        <td>${esc(med.drug_name || '--')}</td>
-        <td class="${raw.dose !== med.dose ? 'changed' : ''}">${esc(String(raw.dose ?? 'NA'))}</td>
-        <td class="${raw.dose !== med.dose ? 'changed' : ''}">${esc(String(med.dose ?? 'NA'))}</td>
-        <td class="${raw.schedule !== med.schedule ? 'changed' : ''}">${esc(String(raw.schedule ?? 'NA'))}</td>
-        <td class="${raw.schedule !== med.schedule ? 'changed' : ''}">${esc(String(med.schedule ?? 'NA'))}</td>
-      </tr>`;
-  }).join('');
-
-  el.innerHTML = `
-    <h3>Medication Validation
-      ${medVal.has_critical_differences
-        ? '<span class="badge danger">⚠ Critical Differences</span>'
-        : '<span class="badge success">✓ OK</span>'}
-    </h3>
-    <table class="med-table">
-      <thead>
-        <tr>
-          <th>Drug</th>
-          <th>Raw Dose</th>
-          <th>Final Dose</th>
-          <th>Raw Schedule</th>
-          <th>Final Schedule</th>
-        </tr>
-      </thead>
-      <tbody>${tableRows || '<tr><td colspan="5">No medications</td></tr>'}</tbody>
-    </table>
-    <div class="med-differences">${diffRows || '<p>No differences</p>'}</div>
-  `;
-}
-
-function renderSOAPTabs(tr) {
-  const el = document.getElementById('soap-content');
-  if (!tr) {
-    el.textContent = '(no SOAP data)';
-    return;
-  }
-
-  const section = tr[activeSoapTab];
-  if (typeof section === 'string') {
-    el.textContent = section || '(empty)';
-  } else if (section && typeof section === 'object') {
-    el.textContent = JSON.stringify(section, null, 2);
-  } else if (activeSoapTab === 'summary') {
-    el.textContent = tr.summary || tr.medical_summary || '(empty)';
-  } else {
-    el.textContent = '(empty)';
-  }
 }
 
 function downloadReport(format) {
@@ -475,6 +817,7 @@ function esc(s) {
 }
 
 window.openTestDetail = openTestDetail;
+window.switchSOAPTab = switchSOAPTab;
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initPage);

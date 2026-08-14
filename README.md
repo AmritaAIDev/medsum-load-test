@@ -75,7 +75,7 @@ Each stage is timed and logged for performance analysis.
 
 3. **Advanced Settings**:
    - Language (e.g., en, hi, ta)
-   - LLM Model (OpenAI, Gemma, Param)
+   - LLM Model (OpenAI, OpenAI, Param)
    - STT Model (Bhasini, Bharatgen)
    - Translate Model (Bhasini, Bharatgen)
    - Template Type (SOAP or Discharge Summary)

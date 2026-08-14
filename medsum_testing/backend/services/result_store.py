@@ -53,14 +53,24 @@ def _iter_result_files(full: bool = False):
             yield path, {
                 "id": data.get("test_id", path.stem),
                 "test_id": data.get("test_id", path.stem),
+                "tc_ref": data.get("tc_ref", ""),
+                "run_ref": data.get("run_ref", ""),
                 "filename": data.get("audio_filename", ""),
                 "audio_filename": data.get("audio_filename", ""),
                 "language": data.get("language", ""),
                 "timestamp": data.get("timestamp", ""),
                 "final_result": data.get("final_result", ""),
                 "accuracy_score": data.get("accuracy_score"),
+                "similarity_score": (
+                    data.get("accuracy_score")
+                    or (data.get("transcription_comparison") or {}).get("similarity_score")
+                ),
                 "status": data.get("status", ""),
                 "batch_id": data.get("batch_id", ""),
+                "total_test_time_seconds": data.get("total_test_time_seconds"),
+                "comparison": data.get("transcription_comparison"),
+                "has_ground_truth": data.get("has_ground_truth", True),
+                "ground_truth_transcription": data.get("ground_truth_transcription", ""),
             }
 
 

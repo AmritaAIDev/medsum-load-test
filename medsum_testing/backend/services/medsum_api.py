@@ -128,15 +128,22 @@ def _extract_summary(body: dict) -> str:
     return text
 
 
-def authenticate_doctor(config: dict) -> tuple[str, str]:
+def authenticate_doctor(config: dict, *, force: bool = False) -> tuple[str, str]:
     """
     POST /api/login/
     Request:  { "phone_number": "...", "password": "..." }
     Response: { "access": "...", "refresh": "...", "user": {...} }
     Returns:  (access_token, doctor_id)
     """
-    clear_runtime()
     runtime = get_runtime()
+    if not force and runtime.get("access_token"):
+        doctor_id = runtime.get("doctor_id") or str(config["doctor"].get("id", ""))
+        log.info("AUTH ✓ using cached token — doctor_id: %s", doctor_id)
+        return runtime["access_token"], str(doctor_id)
+
+    if force:
+        clear_runtime()
+        runtime = get_runtime()
 
     base_url = config["backends"]["django_base_url"].rstrip("/")
     login_path = config["backends"].get("login_path", "/api/login/")
@@ -400,7 +407,7 @@ def transcribe_audio(
         "audio_base64": audio_b64,
         "isaudio": True,
         "language": lang,
-        "llm": llm_settings.get("llm_model", "Gemma"),
+        "llm": llm_settings.get("llm_model", "OpenAI"),
         "stt_model": llm_settings.get("stt_model", "Bhasini"),
         "translate_model": llm_settings.get("translation_type", "Bhasini"),
     }
@@ -543,3 +550,99 @@ def fetch_audio_data(session_id: str, token: str, config: dict) -> dict:
 
     log.info("FETCH_AUDIO_DATA ✓ response keys=%s", list(data.keys()) if isinstance(data, dict) else type(data))
     return data if isinstance(data, dict) else {}
+
+
+def get_runtime_state() -> dict:
+    """Return the current auth runtime state."""
+    return get_runtime()
+
+
+def create_batch(
+    batch_id: str,
+    ai_model: str,
+    config: dict,
+    token: str,
+    total_files: int = 0,
+) -> str:
+    """
+    POST /api/accuracy-testing/batches/create/
+    Returns batch_ref (e.g. BATCH-20260813-00001)
+    """
+    base_url = config["backends"]["django_base_url"].rstrip("/")
+    path = config["backends"].get(
+        "at_batch_create", "/api/accuracy-testing/batches/create/"
+    )
+    url = f"{base_url}{path}"
+
+    payload = {
+        "batch_id": batch_id,
+        "ai_model": ai_model,
+        "total_files": total_files,
+    }
+
+    log.info("CREATE_BATCH → POST %s batch_id=%s", url, batch_id)
+    try:
+        resp = requests.post(
+            url,
+            json=payload,
+            headers=_auth_headers(token),
+            timeout=30,
+        )
+        log.info("CREATE_BATCH ← %s", resp.status_code)
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            log.info("CREATE_BATCH ✓ batch_ref=%s", data.get("batch_ref"))
+            return data.get("batch_ref", "")
+        log.warning(
+            "CREATE_BATCH failed %s: %s",
+            resp.status_code,
+            resp.text[:200],
+        )
+    except Exception as exc:
+        log.warning("CREATE_BATCH error: %s", exc)
+    return ""
+
+
+def save_test_run(payload: dict, token: str, config: dict) -> dict:
+    """
+    POST /api/accuracy-testing/runs/create/
+    Upsert test run in Django DB.
+    Non-fatal — logs warning on failure, never raises.
+    """
+    if not config.get("features", {}).get("save_to_django_db", True):
+        log.info("SAVE_TEST_RUN: skipped (save_to_django_db=false in config)")
+        return payload
+
+    base_url = config["backends"]["django_base_url"].rstrip("/")
+    run_path = config["backends"].get(
+        "at_run_create", "/api/accuracy-testing/runs/create/"
+    )
+    url = f"{base_url}{run_path}"
+
+    log.info(
+        "SAVE_TEST_RUN → POST %s status=%s test_id=%s",
+        url,
+        payload.get("status"),
+        payload.get("test_id"),
+    )
+
+    try:
+        resp = requests.post(
+            url,
+            json=payload,
+            headers=_auth_headers(token),
+            timeout=30,
+        )
+        log.info("SAVE_TEST_RUN ← %s", resp.status_code)
+        if resp.status_code in (200, 201):
+            log.info("SAVE_TEST_RUN ✓ saved to Django DB")
+            return resp.json()
+        log.warning(
+            "SAVE_TEST_RUN failed %s: %s",
+            resp.status_code,
+            resp.text[:200],
+        )
+    except Exception as exc:
+        log.warning("SAVE_TEST_RUN error (non-fatal): %s", exc)
+
+    return payload

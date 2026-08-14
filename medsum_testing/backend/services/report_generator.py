@@ -202,3 +202,27 @@ def generate_excel(test_result: TestResult) -> bytes:
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
+
+
+def save_report_path(
+    test_id: str,
+    fmt: str,
+    path: str,
+    token: str,
+    config: dict,
+) -> None:
+    """Update the run record in Django with the generated report path."""
+    from datetime import datetime, timezone
+
+    from medsum_testing.backend.services import medsum_api
+
+    field = "report_pdf_path" if fmt == "pdf" else "report_excel_path"
+    medsum_api.save_test_run(
+        {
+            "test_id": test_id,
+            field: path,
+            "report_generated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        token,
+        config,
+    )

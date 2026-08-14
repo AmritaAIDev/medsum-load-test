@@ -12,6 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from medsum_testing.backend.routes.test_runner import execute_test_run
+from medsum_testing.backend.services import medsum_api
 from medsum_testing.backend.services.config_loader import get_config
 from medsum_testing.backend.services.drive_service import list_test_cases
 from medsum_testing.backend.services.result_store import has_recent_result
@@ -36,7 +37,17 @@ def run_all_tests(ai_model: str, skip_recent: bool = True) -> list[dict]:
     test_cases = [tc for tc in list_test_cases(config) if tc.get("status") == "ready"]
 
     logger.info("Scheduled run starting: %d test cases", len(test_cases))
-    _schedule_state["last_run"] = datetime.now(timezone.utc).isoformat()
+    with _schedule_lock:
+        _schedule_state["last_run"] = datetime.now(timezone.utc).isoformat()
+
+    try:
+        token, _ = medsum_api.authenticate_doctor(config)
+    except Exception as exc:
+        logger.error("Scheduled run auth failed: %s", exc)
+        status = [{"status": "failed", "error": str(exc)}]
+        with _schedule_lock:
+            _schedule_state["last_run_status"] = status
+        return status
 
     max_parallel = config.get("scheduler", {}).get("max_parallel_tests", 2)
     results: list[dict] = []
@@ -50,7 +61,9 @@ def run_all_tests(ai_model: str, skip_recent: bool = True) -> list[dict]:
                 "reason": "Result already exists from the last 60 seconds",
             }
         test_id = str(uuid.uuid4())
-        result = execute_test_run(tc["language"], audio, ai_model, test_id=test_id)
+        result = execute_test_run(
+            tc["language"], audio, ai_model, test_id=test_id, token=token
+        )
         if result.status == "complete":
             return {"audio": audio, "status": "complete", "test_id": test_id}
         error = result.errors[0] if result.errors else "Test failed"
@@ -61,7 +74,8 @@ def run_all_tests(ai_model: str, skip_recent: bool = True) -> list[dict]:
         for future in concurrent.futures.as_completed(futures):
             results.append(future.result())
 
-    _schedule_state["last_run_status"] = results
+    with _schedule_lock:
+        _schedule_state["last_run_status"] = results
     logger.info("Scheduled run complete: %s", results)
     return results
 
@@ -106,8 +120,8 @@ def stop_scheduler() -> None:
     with _schedule_lock:
         if _scheduler.running:
             _scheduler.shutdown(wait=False)
-    _schedule_state["enabled"] = False
-    _schedule_state["next_run"] = None
+        _schedule_state["enabled"] = False
+        _schedule_state["next_run"] = None
 
 
 def restart_scheduler(config: dict) -> None:
@@ -121,7 +135,7 @@ def get_schedule_state() -> dict:
             job = _scheduler.get_job("medsum_scheduled_run")
             if job:
                 _schedule_state["next_run"] = str(job.next_run_time)
-    return dict(_schedule_state)
+        return dict(_schedule_state)
 
 
 def trigger_run_now(ai_model: str) -> dict:

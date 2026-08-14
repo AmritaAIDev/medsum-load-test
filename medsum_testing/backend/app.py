@@ -22,6 +22,35 @@ from medsum_testing.backend.services.scheduler_service import start_scheduler
 FRONTEND_DIR = get_repo_root() / "medsum_testing" / "frontend"
 
 
+def _validate_ai_config(config: dict, logger) -> None:
+    ai = config.get("ai_comparison", {})
+    openai_key = (ai.get("openai_api_key") or "").strip()
+    deepseek_key = (ai.get("deepseek_api_key") or "").strip()
+
+    if not openai_key or openai_key.startswith("your-") or openai_key == "sk-...":
+        logger.warning("⚠ OpenAI API key not configured — gpt-4o-mini fallback unavailable")
+    else:
+        logger.info("✓ OpenAI API key configured")
+
+    if not deepseek_key or deepseek_key.startswith("your-"):
+        logger.warning("⚠ DeepSeek API key not configured — DeepSeek unavailable")
+    else:
+        logger.info("✓ DeepSeek API key configured")
+
+
+def _ai_config_warning(config: dict) -> str | None:
+    ai = config.get("ai_comparison", {})
+    openai_key = (ai.get("openai_api_key") or "").strip()
+    deepseek_key = (ai.get("deepseek_api_key") or "").strip()
+    if not openai_key.startswith("sk-") and not deepseek_key.startswith("sk-"):
+        return "AI API keys not configured — accuracy comparison unavailable"
+    if not openai_key.startswith("sk-"):
+        return "OpenAI API key not configured — gpt-4o-mini fallback unavailable"
+    if not deepseek_key.startswith("sk-"):
+        return "DeepSeek API key not configured — DeepSeek comparison unavailable"
+    return None
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
 
@@ -33,7 +62,12 @@ def create_app() -> Flask:
     @app.route("/api/medsum-test/health")
     def health():
         port = int(os.environ.get("MEDSUM_TEST_PORT", 5051))
-        return jsonify({"status": "ok", "port": port})
+        warning = None
+        try:
+            warning = _ai_config_warning(get_config())
+        except Exception:
+            pass
+        return jsonify({"status": "ok", "port": port, "ai_warning": warning})
 
     @app.route("/")
     def index():
@@ -50,6 +84,7 @@ def create_app() -> Flask:
     with app.app_context():
         try:
             cfg = get_config()
+            _validate_ai_config(cfg, app.logger)
             start_scheduler(cfg)
         except Exception as exc:
             app.logger.warning("Startup warning (non-fatal): %s", exc)

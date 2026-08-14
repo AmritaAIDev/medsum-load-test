@@ -1,0 +1,62 @@
+# MedSum Test Configuration
+# Copy to medsum_config.yaml and fill in your values — do NOT commit real credentials
+
+backends:
+  django_base_url: "https://test-medsum.amritaai.org"
+  flask_transcribe_url: "https://test-medsum.amritaai.org/transcribe"
+  login_path: "/api/login/"
+  patient_path: "/api/patient-data/"
+
+  # accuracy_testing endpoints
+  at_run_create: "/api/accuracy-testing/runs/create/"
+  at_run_detail: "/api/accuracy-testing/runs/"
+  at_batch_create: "/api/accuracy-testing/batches/create/"
+  at_batch_detail: "/api/accuracy-testing/batches/"
+  at_stats: "/api/accuracy-testing/stats/"
+  at_run_list: "/api/accuracy-testing/runs/"
+
+doctor:
+  id: "DOC_001"
+  phone_number: "9876543210"
+  password: "your_password_here"
+  name: "Dr. Test"
+  department: "General"
+  hospital_name: "Test Hospital"
+
+patient:
+  id: "PAT_001"
+
+google_drive:
+  service_account_json: "credentials/service_account.json"
+  root_folder_id: "YOUR_GOOGLE_DRIVE_FOLDER_ID"
+
+ai_comparison:
+  openai_api_key: "sk-..."
+  deepseek_api_key: "your-deepseek-key"
+  deepseek_base_url: "https://api.deepseek.com/v1"
+  openai_model: "gpt-4o-mini"
+  default_model: "gpt-4o-mini"
+
+test_settings:
+  buffer_seconds: 10
+  max_retries: 3
+  retry_interval_seconds: 5
+  run_all_stagger_seconds: 3
+
+features:
+  save_to_django_db: true
+
+llm_settings:
+  template_id: 4
+  llm_model: "OpenAI"
+  stt_model: "Bhasini"
+  translation_type: "Bhasini"
+  model_type: "gpt-4"
+  template_type: "standard"
+
+scheduler:
+  enabled: false
+  cron: "0 2 * * *"
+  ai_model: "deepseek"
+  notify_on_regression: false
+  max_parallel_tests: 2

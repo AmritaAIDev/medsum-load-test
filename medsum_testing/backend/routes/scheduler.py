@@ -57,8 +57,9 @@ def update_schedule():
     cron = body.get("cron", "0 2 * * *").strip()
     ai_model = body.get("ai_model", "deepseek").strip()
 
-    if ai_model not in ("gpt-4", "deepseek"):
-        return jsonify({"error": "ai_model must be 'gpt-4' or 'deepseek'"}), 400
+    VALID_MODELS = ("gpt-4o-mini", "gpt-4", "deepseek")
+    if ai_model not in VALID_MODELS:
+        return jsonify({"error": f"ai_model must be one of {VALID_MODELS}"}), 400
 
     update_schedule_config(enabled, cron, ai_model)
     config = load_config(force_reload=True)
@@ -85,7 +86,8 @@ def run_now():
     body = request.get_json(silent=True) or {}
     config = get_config()
     ai_model = body.get("ai_model") or config.get("scheduler", {}).get("ai_model", "deepseek")
-    if ai_model not in ("gpt-4", "deepseek"):
-        return jsonify({"error": "ai_model must be 'gpt-4' or 'deepseek'"}), 400
+    VALID_MODELS = ("gpt-4o-mini", "gpt-4", "deepseek")
+    if ai_model not in VALID_MODELS:
+        return jsonify({"error": f"ai_model must be one of {VALID_MODELS}"}), 400
     result = trigger_run_now(ai_model)
     return jsonify(result), 202

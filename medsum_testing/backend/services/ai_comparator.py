@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -11,36 +12,61 @@ from openai import OpenAI
 from medsum_testing.backend.models.test_result import ComparisonResult, MedComparisonResult
 from medsum_testing.backend.services.config_loader import get_config
 
-SYSTEM_PROMPT = """You are a medical AI evaluator. Compare the provided texts and return
-ONLY valid JSON. No markdown, no explanation, no preamble. Raw JSON only.
+log = logging.getLogger("medsum_ai")
+
+SYSTEM_PROMPT = """You are a medical AI evaluator comparing two medical
+transcriptions. Return ONLY valid JSON — no markdown, no preamble.
+
+IMPORTANT RULES FOR COMPARISON:
+- Do NOT flag differences in punctuation (commas, full stops, em-dashes, hyphens)
+- Do NOT flag differences between digit form and written form of the same number
+  (e.g. "150" vs "one hundred fifty" = SAME, "2" vs "two" = SAME)
+- Do NOT flag differences in spacing or line breaks
+- Do NOT flag differences in capitalisation of non-medical terms
+- DO flag differences in: drug names, dosages, diagnoses, procedures,
+  symptoms, medical terminology, frequencies, durations
+- A missing or extra em-dash, comma, or full stop is NOT a medical difference
 
 Schema:
 {
-  "similarity_score": <0-100>,
+  "similarity_score": <0-100, where 100 = identical meaning>,
   "medical_differences": [
     {
-      "type": "dosage|medication_name|diagnosis|procedure|frequency|investigation|symptom",
-      "ground_truth": "<exact text>",
-      "generated": "<exact text>",
+      "type": "dosage|medication_name|diagnosis|procedure|frequency|symptom|duration",
+      "ground_truth": "<exact phrase from ground truth>",
+      "generated": "<exact phrase from generated>",
       "severity": "critical|high|medium|low"
     }
   ],
-  "general_differences": ["<plain text difference>"],
+  "general_differences": [
+    "<only non-trivial wording differences — NOT punctuation or number format>"
+  ],
   "overall_severity": "critical|high|medium|low|none",
   "regression_vs_previous": "<better|worse|same|not_applicable>",
-  "summary": "<2 sentence human-readable verdict>"
+  "summary": "<2 sentence verdict focusing on medical accuracy only>"
 }"""
 
 
 def get_ai_client(model: str, config: dict) -> tuple[OpenAI, str]:
-    ai = config.get("ai_comparison", {})
+    return _get_client(model, config)
+
+
+def _get_client(model: str, config: dict) -> tuple[OpenAI, str]:
+    """Returns (OpenAI client, model_name) for the given model string."""
+    ai_config = config.get("ai_comparison", {})
+
     if model == "deepseek":
         client = OpenAI(
-            api_key=ai.get("deepseek_api_key", ""),
-            base_url=ai.get("deepseek_base_url", "https://api.deepseek.com/v1"),
+            api_key=(ai_config.get("deepseek_api_key") or "").strip(),
+            base_url=ai_config.get(
+                "deepseek_base_url", "https://api.deepseek.com/v1"
+            ),
         )
         return client, "deepseek-chat"
-    return OpenAI(api_key=ai.get("openai_api_key", "")), "gpt-4"
+
+    client = OpenAI(api_key=(ai_config.get("openai_api_key") or "").strip())
+    model_name = ai_config.get("openai_model", "gpt-4o-mini")
+    return client, model_name
 
 
 def parse_ai_json(raw: str) -> dict[str, Any]:
@@ -95,15 +121,279 @@ def _to_comparison(data: dict[str, Any]) -> ComparisonResult:
     return ComparisonResult(
         similarity_score=data.get("similarity_score"),
         medical_differences=medical,
+        medical_difference_details=data.get("medical_differences") or [],
         general_differences=data.get("general_differences") or [],
         severity=severity,
         summary=data.get("summary") or "",
+        error=data.get("error") or "",
     )
 
 
+SOAP_KEYS = ["subjective", "objective", "assessment", "plan", "summary"]
+
+
+def extract_soap_from_result(tr: dict) -> dict | None:
+    """
+    Extract SOAP sections from Flask transcription result.
+    Returns dict with SOAP sections, or None if LLM failed or no SOAP found.
+    """
+    if not tr or not isinstance(tr, dict):
+        return None
+
+    # Check if LLM failed — "error" key at top level means SOAP not generated
+    top_level_error = tr.get("error")
+    if top_level_error:
+        log.warning(
+            "extract_soap_from_result: Flask LLM error detected: %s",
+            str(top_level_error)[:200],
+        )
+        # Don't return None yet — still try to get SOAP if present
+
+    # Try top level first
+    top_level = {}
+    for k in SOAP_KEYS:
+        val = tr.get(k)
+        if isinstance(val, dict) and val:
+            top_level[k] = val
+        elif isinstance(val, str) and val.strip():
+            top_level[k] = val
+
+    if top_level:
+        log.info(
+            "SOAP extracted from top level: keys=%s", list(top_level.keys())
+        )
+        return top_level
+
+    # Fallback — try debug.raw_soap or debug["raw soap"]
+    debug = tr.get("debug") or {}
+    # Try both key variants — Flask uses "raw soap" (space) in some responses
+    raw_soap = debug.get("raw_soap") or debug.get("raw soap") or {}
+
+    # Validate raw_soap is actual SOAP data, not an error object
+    if isinstance(raw_soap, dict) and "error" not in raw_soap:
+        fallback = {}
+        for k in SOAP_KEYS:
+            val = raw_soap.get(k)
+            if isinstance(val, dict) and val:
+                fallback[k] = val
+            elif isinstance(val, str) and val.strip():
+                fallback[k] = val
+        if fallback:
+            log.info(
+                "SOAP extracted from raw_soap fallback: keys=%s",
+                list(fallback.keys()),
+            )
+            return fallback
+    elif isinstance(raw_soap, dict) and "error" in raw_soap:
+        log.warning(
+            "extract_soap_from_result: raw_soap contains error, not SOAP data: %s",
+            str(raw_soap.get("error", ""))[:200],
+        )
+
+    log.warning(
+        "extract_soap_from_result: no SOAP sections found. "
+        "Top-level error: %s. Top-level keys: %s",
+        bool(top_level_error),
+        list(tr.keys()),
+    )
+    return None
+
+
+def compare_soap(
+    soap_ground_truth: dict,
+    soap_generated: dict,
+    model: str,
+    config: dict | None = None,
+) -> dict[str, Any]:
+    """
+    Compare ground truth SOAP with generated SOAP section by section.
+    Returns similarity score, per-section differences, and severity.
+    Falls back to GPT-4 if DeepSeek fails.
+    """
+    config = config or get_config()
+    if not soap_ground_truth or not soap_generated:
+        return {
+            "similarity_score": None,
+            "overall_severity": "unknown",
+            "section_details": {},
+            "error": "Missing ground truth or generated SOAP",
+        }
+
+    system_prompt = """You are a medical AI evaluator comparing two SOAP notes.
+Return ONLY valid JSON. No markdown, no preamble.
+
+Compare section by section. For each section identify:
+- Missing information (in ground truth but not in generated)
+- Incorrect information (different values for same field)
+- Extra information (in generated but not in ground truth)
+
+IGNORE: punctuation differences, em-dashes, number format (150 vs one-fifty),
+        capitalisation of non-medical terms, "NA" vs blank.
+
+Schema:
+{
+  "similarity_score": <0-100>,
+  "overall_severity": "none|low|medium|high|critical",
+  "summary": "<2 sentence verdict>",
+  "section_details": {
+    "subjective": {
+      "score": <0-100>,
+      "differences": [
+        {
+          "field": "chief_complaint",
+          "ground_truth": "<value>",
+          "generated": "<value>",
+          "type": "missing|incorrect|extra",
+          "severity": "low|medium|high|critical"
+        }
+      ]
+    },
+    "objective":  { "score": <0-100>, "differences": [] },
+    "assessment": { "score": <0-100>, "differences": [] },
+    "plan":       { "score": <0-100>, "differences": [] }
+  }
+}"""
+
+    user_prompt = (
+        f"Ground Truth SOAP:\n{json.dumps(soap_ground_truth, indent=2)[:3000]}\n\n"
+        f"Generated SOAP:\n{json.dumps(soap_generated, indent=2)[:3000]}\n\n"
+        "Compare these SOAP notes and return JSON only."
+    )
+
+    models_to_try = ["deepseek", "gpt-4o-mini"] if model == "deepseek" else ["gpt-4o-mini"]
+    last_error = None
+
+    for attempt_model in models_to_try:
+        try:
+            log.info("SOAP_COMPARE: trying model=%s", attempt_model)
+            client, model_name = _get_client(attempt_model, config)
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=2000,
+                temperature=0,
+            )
+            raw = resp.choices[0].message.content or "{}"
+            clean = re.sub(r"```json|```", "", raw).strip()
+            result = json.loads(clean)
+            log.info(
+                "SOAP_COMPARE ✓ model=%s score=%s",
+                attempt_model,
+                result.get("similarity_score"),
+            )
+            return result
+        except Exception as exc:
+            log.warning("SOAP_COMPARE failed with %s: %s", attempt_model, exc)
+            last_error = exc
+            continue
+
+    return {
+        "similarity_score": None,
+        "overall_severity": "unknown",
+        "section_details": {},
+        "error": str(last_error),
+    }
+
+
+def compare_translations(
+    ground_truth_translation: str,
+    generated_translation: str,
+    model: str,
+    config: dict | None = None,
+) -> dict[str, Any]:
+    """
+    Compare ground truth translation with generated translation.
+    Both are plain English text.
+    Same DeepSeek → GPT-4 fallback as other comparisons.
+    """
+    config = config or get_config()
+    if not ground_truth_translation or not generated_translation:
+        return {
+            "similarity_score": None,
+            "overall_severity": "unknown",
+            "differences": [],
+            "error": "Missing ground truth or generated translation",
+        }
+
+    system_prompt = """You are a medical AI evaluator comparing two English
+translations of a doctor-patient conversation.
+Return ONLY valid JSON. No markdown, no preamble.
+
+IGNORE: punctuation, em-dashes, number format differences (150 vs one-fifty),
+        minor wording differences that preserve meaning.
+DO FLAG: missing medical information, incorrect medical terms,
+         wrong drug names, wrong dosages, wrong diagnoses.
+
+Schema:
+{
+  "similarity_score": <0-100>,
+  "overall_severity": "none|low|medium|high|critical",
+  "differences": [
+    {
+      "ground_truth": "<phrase from ground truth>",
+      "generated":   "<phrase from generated>",
+      "type":        "missing|incorrect|extra",
+      "severity":    "low|medium|high|critical"
+    }
+  ],
+  "summary": "<2 sentence verdict>"
+}"""
+
+    user_prompt = (
+        f"Ground Truth Translation:\n{ground_truth_translation[:3000]}\n\n"
+        f"Generated Translation:\n{generated_translation[:3000]}\n\n"
+        "Compare and return JSON only."
+    )
+
+    models_to_try = ["deepseek", "gpt-4o-mini"] if model == "deepseek" else ["gpt-4o-mini"]
+    last_error = None
+
+    for attempt_model in models_to_try:
+        try:
+            log.info("TRANS_COMPARE: trying model=%s", attempt_model)
+            client, model_name = _get_client(attempt_model, config)
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=1000,
+                temperature=0,
+            )
+            raw = resp.choices[0].message.content or "{}"
+            clean = re.sub(r"```json|```", "", raw).strip()
+            result = json.loads(clean)
+            log.info(
+                "TRANS_COMPARE ✓ model=%s score=%s",
+                attempt_model,
+                result.get("similarity_score"),
+            )
+            return result
+        except Exception as exc:
+            log.warning("TRANS_COMPARE failed with %s: %s", attempt_model, exc)
+            last_error = exc
+            continue
+
+    return {
+        "similarity_score": None,
+        "overall_severity": "unknown",
+        "differences": [],
+        "error": str(last_error),
+    }
+
+
 def compare_transcriptions(
-    ground_truth: str, generated: str, model: str = "gpt-4"
+    ground_truth: str,
+    generated: str,
+    model: str = "gpt-4o-mini",
+    config: dict | None = None,
 ) -> ComparisonResult:
+    config = config or get_config()
+
     if not ground_truth.strip():
         return ComparisonResult(
             skipped=True,
@@ -120,27 +410,49 @@ def compare_transcriptions(
 
     prompt = (
         "Compare ground truth transcription vs generated transcription.\n"
-        "Identify word-level differences. Flag medical differences: drug names, dosages, "
-        "frequencies, diagnoses, procedures.\n\n"
+        "Focus on medical meaning only — ignore punctuation, em-dashes, spacing, "
+        "and number format differences (digits vs words).\n"
+        "Flag medical differences: drug names, dosages, frequencies, diagnoses, "
+        "procedures, symptoms.\n\n"
         f"GROUND TRUTH:\n{ground_truth}\n\nGENERATED:\n{generated}"
     )
-    try:
-        return _to_comparison(_call_llm(prompt, model))
-    except Exception as exc:
-        return ComparisonResult(
-            severity="high",
-            summary=f"AI comparison failed: {exc}",
-            general_differences=[str(exc)],
-        )
+
+    models_to_try = ["deepseek", "gpt-4o-mini"] if model == "deepseek" else ["gpt-4o-mini"]
+    log.info("AI_COMPARE: will try models in order: %s", models_to_try)
+
+    last_error = None
+    for attempt_model in models_to_try:
+        try:
+            log.info("AI_COMPARE: attempting with model=%s", attempt_model)
+            result = _to_comparison(_call_llm(prompt, attempt_model))
+            log.info(
+                "AI_COMPARE ✓ succeeded with model=%s score=%s",
+                attempt_model,
+                result.similarity_score,
+            )
+            return result
+        except Exception as exc:
+            log.warning("AI_COMPARE: model=%s failed: %s", attempt_model, exc)
+            last_error = exc
+            continue
+
+    err_msg = f"All models failed. Last: {last_error}"
+    log.error("AI_COMPARE: ALL models failed. Last error: %s", last_error)
+    return ComparisonResult(
+        severity="high",
+        summary=err_msg,
+        error=err_msg,
+        general_differences=[str(last_error) if last_error else err_msg],
+    )
 
 
 def compare_summaries(
-    previous_summary: Any, current_summary: Any, model: str = "gpt-4"
+    previous_summary: Any, current_summary: Any, model: str = "gpt-4o-mini"
 ) -> ComparisonResult:
     if previous_summary is None or current_summary is None:
         return ComparisonResult(
             skipped=True,
-            skip_reason="No previous summary for regression comparison",
+            skip_reason="No previous summary for comparison",
         )
 
     prev = (
@@ -155,9 +467,8 @@ def compare_summaries(
     )
 
     prompt = (
-        "Compare previous summary vs current summary for regression.\n"
-        "Check: missing clinical info, incorrect info, structural differences, regression.\n"
-        "Set regression_vs_previous accordingly.\n\n"
+        "Compare previous summary vs current summary.\n"
+        "Check: missing clinical info, incorrect info, structural differences.\n\n"
         f"PREVIOUS SUMMARY:\n{prev}\n\nCURRENT SUMMARY:\n{curr}"
     )
     try:
@@ -170,11 +481,50 @@ def compare_summaries(
         )
 
 
+def compare_regression(
+    previous_transcription: str,
+    current_transcription: str,
+    model: str = "gpt-4o-mini",
+) -> ComparisonResult:
+    """Compare the previous run's transcription against the current one for degradation."""
+    prev = (previous_transcription or "").strip()
+    curr = (current_transcription or "").strip()
+    if not prev:
+        return ComparisonResult(
+            skipped=True,
+            skip_reason="No previous transcription for regression comparison",
+        )
+    if not curr:
+        return ComparisonResult(
+            similarity_score=0,
+            severity="high",
+            summary="Current transcription is empty while a previous run produced output",
+            medical_differences=["No generated transcription produced in this run"],
+        )
+
+    prompt = (
+        "Compare the previous test-run transcription (baseline) vs the current run "
+        "to detect REGRESSION — medical information lost, newly incorrect, or newly added.\n"
+        "This is not a ground-truth comparison; the previous run is the baseline.\n"
+        "Set regression_vs_previous to better, worse, same, or not_applicable.\n\n"
+        f"PREVIOUS TRANSCRIPTION (baseline):\n{prev}\n\n"
+        f"CURRENT TRANSCRIPTION:\n{curr}"
+    )
+    try:
+        return _to_comparison(_call_llm(prompt, model))
+    except Exception as exc:
+        return ComparisonResult(
+            severity="medium",
+            summary=f"Regression comparison failed: {exc}",
+            general_differences=[str(exc)],
+        )
+
+
 def compare_medication_lists(
     before: Any,
     after_normalized: Any,
     generated: Any,
-    model: str = "gpt-4",
+    model: str = "gpt-4o-mini",
 ) -> MedComparisonResult:
     if not any([before, after_normalized, generated]):
         return MedComparisonResult(
@@ -223,7 +573,7 @@ def compare_medication_lists(
 
 def validate_medications(transcription_result: dict) -> dict:
     """
-    Cross-check plan.medications vs debug.raw soap.plan.medications.
+    Cross-check plan.medications vs debug.raw_soap.plan.medications.
     """
     final_meds: list = []
     raw_meds: list = []
@@ -232,13 +582,14 @@ def validate_medications(transcription_result: dict) -> dict:
         final_meds = transcription_result.get("plan", {}).get("medications", [])
         if isinstance(final_meds, str):
             final_meds = []
-        raw_meds = (
-            transcription_result
-            .get("debug", {})
-            .get("raw soap", {})
-            .get("plan", {})
-            .get("medications", [])
-        )
+        debug = transcription_result.get("debug") or {}
+        raw_soap = debug.get("raw_soap") or debug.get("raw soap") or {}
+
+        # Guard against error-only raw_soap
+        if isinstance(raw_soap, dict) and "error" in raw_soap and len(raw_soap) == 1:
+            raw_soap = {}
+
+        raw_meds = raw_soap.get("plan", {}).get("medications", [])
         if isinstance(raw_meds, str):
             raw_meds = []
     except Exception:

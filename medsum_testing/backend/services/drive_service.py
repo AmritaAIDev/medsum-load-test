@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+import time as _time
 from typing import Any
 
 from google.oauth2 import service_account
@@ -12,6 +13,10 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 from medsum_testing.backend.services.config_loader import get_config
+
+log = logging.getLogger("medsum_drive")
+
+_test_cases_cache: dict = {"data": None, "timestamp": 0.0, "ttl": 300}
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
@@ -63,6 +68,75 @@ def _strip_script_suffix(name: str) -> str:
     return name
 
 
+SOAP_GT_SUFFIXES = ("_soap", "_soap.txt", "_soap.json")
+
+
+def _is_soap_filename(filename: str) -> bool:
+    """True when filename is a SOAP ground truth file (_soap, _soap.txt, etc.)."""
+    return is_soap_gt(filename)
+
+
+def is_soap_gt(filename: str) -> bool:
+    """True when filename is a SOAP ground truth file."""
+    lower = filename.lower()
+    if any(lower.endswith(s) for s in SOAP_GT_SUFFIXES):
+        return True
+    for ext in (".txt", ".json", ".docx"):
+        if lower.endswith(ext) and lower[: -len(ext)].endswith("_soap"):
+            return True
+    return False
+
+
+TRANSLATION_GT_SUFFIXES = (
+    "_translation.txt",
+    "_translation",
+    "_trans.txt",
+    "_trans",
+    "_english.txt",
+    "_english",
+)
+
+
+def is_translation_gt(filename: str) -> bool:
+    """Check if a file is a translation ground truth file."""
+    name = filename.lower()
+    return any(
+        name.endswith(s) or name.endswith(s + ".txt")
+        for s in ("_translation", "_trans", "_english")
+    )
+
+
+def get_translation_base(filename: str) -> str:
+    """
+    Strip translation suffix to get matching audio base name.
+    '02_english_05_translation.txt' → 'english_05'
+    """
+    name = filename.lower()
+    for ext in (".txt", ".json", ".docx"):
+        if name.endswith(ext):
+            name = name[: -len(ext)]
+    for suffix in ("_translation", "_trans", "_english"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return _strip_number_prefix(name)
+
+
+def get_soap_base(filename: str) -> str:
+    """
+    Strip soap suffix to get matching audio base name.
+    '02_english_05_soap.txt' -> 'english_05'
+    '02_english_05_soap'     -> 'english_05'
+    """
+    name = filename.lower()
+    for ext in (".txt", ".json", ".docx"):
+        if name.endswith(ext):
+            name = name[: -len(ext)]
+    if name.endswith("_soap"):
+        name = name[: -5]
+    return _strip_number_prefix(name)
+
+
 def _match_key(filename: str) -> str:
     """
     Normalised match key for pairing audio <-> transcript.
@@ -87,10 +161,25 @@ def get_drive_service(config: dict | None = None):
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
+def invalidate_test_cases_cache() -> None:
+    """Call when Drive files may have changed."""
+    _test_cases_cache["data"] = None
+    _test_cases_cache["timestamp"] = 0.0
+
+
 def list_test_cases(config: dict | None = None) -> list[dict]:
-    logging.getLogger("medsum_drive").info(
-        "list_test_cases() v8 called — new matching logic active"
-    )
+    now = _time.time()
+    if (
+        _test_cases_cache["data"] is not None
+        and now - _test_cases_cache["timestamp"] < _test_cases_cache["ttl"]
+    ):
+        log.info(
+            "list_test_cases() — returning cached result (%d cases)",
+            len(_test_cases_cache["data"]),
+        )
+        return _test_cases_cache["data"]
+
+    log.info("list_test_cases() v8 called — new matching logic active")
     config = config or get_config()
     service = get_drive_service(config)
     root_id = config["google_drive"]["root_folder_id"]
@@ -128,7 +217,20 @@ def list_test_cases(config: dict | None = None) -> list[dict]:
         )
 
         audio_files = [f for f in files if f["mimeType"] in AUDIO_MIME_TYPES]
-        transcript_files = [f for f in files if f["mimeType"] in TRANSCRIPT_MIME_TYPES]
+        transcript_files = [
+            f for f in files
+            if f["mimeType"] in TRANSCRIPT_MIME_TYPES
+            and not is_soap_gt(f["name"])
+            and not is_translation_gt(f["name"])
+        ]
+        soap_gt_files = [
+            f for f in files
+            if f["mimeType"] in TRANSCRIPT_MIME_TYPES and is_soap_gt(f["name"])
+        ]
+        translation_gt_files = [
+            f for f in files
+            if f["mimeType"] in TRANSCRIPT_MIME_TYPES and is_translation_gt(f["name"])
+        ]
 
         if not audio_files:
             continue
@@ -138,14 +240,27 @@ def list_test_cases(config: dict | None = None) -> list[dict]:
             key = _match_key(tf["name"])
             transcript_map[key] = tf
 
+        soap_map: dict[str, dict] = {}
+        for sf in soap_gt_files:
+            key = get_soap_base(sf["name"])
+            soap_map[key] = sf
+
+        translation_map: dict[str, dict] = {}
+        for tf in translation_gt_files:
+            key = get_translation_base(tf["name"])
+            translation_map[key] = tf
+
         for af in audio_files:
             audio_key = _match_key(af["name"])
             transcript = transcript_map.get(audio_key)
+            soap_gt_file = soap_map.get(audio_key)
+            translation_gt_file = translation_map.get(audio_key)
 
             test_cases.append(
                 {
                     "language": language,
                     "folder_label": folder["name"],
+                    "folder_id": folder["id"],
                     "audio_filename": af["name"],
                     "audio_file_id": af["id"],
                     "audio_mime_type": af["mimeType"],
@@ -153,11 +268,28 @@ def list_test_cases(config: dict | None = None) -> list[dict]:
                     "transcript_file_id": transcript["id"] if transcript else None,
                     "transcript_mime_type": transcript["mimeType"] if transcript else None,
                     "has_transcript": transcript is not None,
+                    "soap_gt_filename": soap_gt_file["name"] if soap_gt_file else None,
+                    "soap_gt_file_id": soap_gt_file["id"] if soap_gt_file else None,
+                    "soap_gt_mime_type": soap_gt_file["mimeType"] if soap_gt_file else None,
+                    "has_soap_ground_truth": soap_gt_file is not None,
+                    "translation_gt_filename": (
+                        translation_gt_file["name"] if translation_gt_file else None
+                    ),
+                    "translation_gt_file_id": (
+                        translation_gt_file["id"] if translation_gt_file else None
+                    ),
+                    "translation_gt_mime_type": (
+                        translation_gt_file["mimeType"] if translation_gt_file else None
+                    ),
+                    "has_translation_ground_truth": translation_gt_file is not None,
+                    "is_english": language.lower() in ("english", "en"),
                     "status": "ready",
                     "ground_truth_flag": "" if transcript else "no_ground_truth",
                 }
             )
 
+    _test_cases_cache["data"] = test_cases
+    _test_cases_cache["timestamp"] = _time.time()
     return test_cases
 
 
@@ -229,3 +361,51 @@ def download_file(file_id: str, service=None) -> bytes:
 
 def download_audio(file_id: str) -> bytes:
     return download_file(file_id)
+
+
+def download_soap_ground_truth(
+    file_id: str, mime_type: str, service=None
+) -> dict | None:
+    """
+    Download _soap.txt and parse as JSON.
+    Returns parsed dict or None if parsing fails.
+    """
+    import json
+
+    log = logging.getLogger("medsum_drive")
+    service = service or get_drive_service()
+    try:
+        raw_text = download_transcript(file_id, mime_type, service)
+        clean = raw_text.strip()
+        if clean.startswith("\ufeff"):
+            clean = clean[1:]
+        parsed = json.loads(clean)
+        log.info("SOAP_GT: parsed successfully, keys=%s", list(parsed.keys()))
+        return parsed
+    except json.JSONDecodeError as exc:
+        log.warning("SOAP_GT: JSON parse failed: %s — treating as None", exc)
+        return None
+    except Exception as exc:
+        log.warning("SOAP_GT: download failed: %s — treating as None", exc)
+        return None
+
+
+def download_translation_ground_truth(
+    file_id: str, mime_type: str, service=None
+) -> str | None:
+    """
+    Download translation ground truth as plain text.
+    Returns text string or None if download fails.
+    """
+    log = logging.getLogger("medsum_drive")
+    service = service or get_drive_service()
+    try:
+        text = download_transcript(file_id, mime_type, service)
+        clean = text.strip()
+        if clean:
+            log.info("TRANSLATION_GT: downloaded %d chars", len(clean))
+            return clean
+        return None
+    except Exception as exc:
+        log.warning("TRANSLATION_GT: download failed: %s", exc)
+        return None
