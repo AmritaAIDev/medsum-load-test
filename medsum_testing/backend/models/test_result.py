@@ -88,7 +88,10 @@ class TestResult:
     session_datetime: str = ""
     audio_duration_seconds: int = 0
     ground_truth_transcription: str = ""
+    ground_truth: str = ""
     generated_transcription: str = ""
+    transcription: str = ""
+    generated_translation: str = ""
     previous_transcription: str = ""
     generated_summary: Any = None
     previous_summary: Any = None
@@ -97,6 +100,7 @@ class TestResult:
     medications_after_normalization: Any = None
     medications_generated: Any = None
     transcription_comparison: Optional[ComparisonResult] = None
+    comparison: Any = None
     summary_comparison: Optional[ComparisonResult] = None
     medication_comparison: Optional[MedComparisonResult] = None
     regression_comparison: Optional[ComparisonResult] = None
@@ -119,6 +123,8 @@ class TestResult:
     medication_validation: Any = None
     translation: str = ""
     soap_ground_truth: Any = None
+    soap_generated: Any = None
+    soap_raw: Any = None
     has_soap_ground_truth: bool = False
     soap_comparison: Any = None
     translation_ground_truth: str = ""
@@ -181,10 +187,32 @@ class TestResult:
             if self.regression_comparison
             else None
         )
+        if not data.get("ground_truth"):
+            data["ground_truth"] = self.ground_truth_transcription
+        if not data.get("transcription"):
+            data["transcription"] = self.generated_transcription
+        if not data.get("generated_translation"):
+            data["generated_translation"] = self.translation or self.text_translation
+        if not data.get("comparison") and data.get("transcription_comparison"):
+            tc = data["transcription_comparison"]
+            if tc and not tc.get("skipped"):
+                data["comparison"] = {
+                    "similarity_score": tc.get("similarity_score"),
+                    "medical_differences": (
+                        tc.get("medical_difference_details")
+                        or tc.get("medical_differences")
+                        or []
+                    ),
+                    "general_differences": tc.get("general_differences") or [],
+                    "overall_severity": tc.get("severity") or tc.get("overall_severity") or "low",
+                    "summary": tc.get("summary") or "",
+                    "error": tc.get("error") or "",
+                }
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TestResult:
+        data = dict(data)
         tc = data.pop("transcription_comparison", None)
         sc = data.pop("summary_comparison", None)
         mc = data.pop("medication_comparison", None)
@@ -192,8 +220,8 @@ class TestResult:
         known = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known}
         result = cls(**filtered)
-        result.transcription_comparison = ComparisonResult.from_dict(tc)
-        result.summary_comparison = ComparisonResult.from_dict(sc)
-        result.medication_comparison = MedComparisonResult.from_dict(mc)
-        result.regression_comparison = ComparisonResult.from_dict(rc)
+        result.transcription_comparison = ComparisonResult.from_dict(tc) if tc else None
+        result.summary_comparison = ComparisonResult.from_dict(sc) if sc else None
+        result.medication_comparison = MedComparisonResult.from_dict(mc) if mc else None
+        result.regression_comparison = ComparisonResult.from_dict(rc) if rc else None
         return result

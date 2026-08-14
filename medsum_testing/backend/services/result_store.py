@@ -62,13 +62,14 @@ def _iter_result_files(full: bool = False):
                 "final_result": data.get("final_result", ""),
                 "accuracy_score": data.get("accuracy_score"),
                 "similarity_score": (
-                    data.get("accuracy_score")
+                    (data.get("comparison") or {}).get("similarity_score")
+                    or data.get("accuracy_score")
                     or (data.get("transcription_comparison") or {}).get("similarity_score")
                 ),
                 "status": data.get("status", ""),
                 "batch_id": data.get("batch_id", ""),
                 "total_test_time_seconds": data.get("total_test_time_seconds"),
-                "comparison": data.get("transcription_comparison"),
+                "comparison": data.get("comparison") or data.get("transcription_comparison"),
                 "has_ground_truth": data.get("has_ground_truth", True),
                 "ground_truth_transcription": data.get("ground_truth_transcription", ""),
             }

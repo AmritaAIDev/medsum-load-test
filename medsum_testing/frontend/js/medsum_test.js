@@ -27,8 +27,10 @@ function initPage() {
 }
 
 function getAccuracyDisplay(result) {
-  const comp = result.transcription_comparison || result.comparison || {};
-  const score = result.similarity_score ?? comp.similarity_score;
+  const score = result.comparison?.similarity_score
+    ?? result.similarity_score
+    ?? result.transcription_comparison?.similarity_score
+    ?? result.accuracy_score;
 
   if (score != null && score !== '') {
     const cssClass = score >= 95 ? 'high'
@@ -36,11 +38,6 @@ function getAccuracyDisplay(result) {
       : score >= 60 ? 'warn'
       : 'low';
     return { text: `${Math.round(score)}%`, cssClass };
-  }
-
-  const compError = comp.error || result.comparison_error || '';
-  if (compError && (compError.includes('401') || compError.includes('Unauthorized'))) {
-    return { text: 'Auth Error', cssClass: 'error' };
   }
 
   return { text: '—', cssClass: 'muted' };
@@ -106,7 +103,7 @@ async function loadRecentResults() {
 }
 
 function normalizeResultSummary(r) {
-  const comp = r.transcription_comparison || r.comparison || {};
+  const comp = r.comparison || r.transcription_comparison || {};
   return {
     test_id: r.test_id || r.id,
     tc_ref: r.tc_ref,
@@ -115,7 +112,10 @@ function normalizeResultSummary(r) {
     language: r.language,
     status: r.status || 'complete',
     final_result: r.final_result,
-    similarity_score: r.similarity_score ?? r.accuracy_score ?? comp.similarity_score,
+    similarity_score: r.comparison?.similarity_score
+      ?? r.similarity_score
+      ?? r.accuracy_score
+      ?? comp.similarity_score,
     comparison: { ...comp, error: comp.error },
     comparison_error: comp.error,
     total_test_time_seconds: r.total_test_time_seconds,
@@ -126,7 +126,7 @@ function normalizeResultSummary(r) {
 function computeStatsFromResults(results) {
   const completed = results.filter(r => r.status === 'complete' || r.final_result);
   const scores = completed
-    .map(r => r.accuracy_score ?? r.transcription_comparison?.similarity_score)
+    .map(r => r.comparison?.similarity_score ?? r.accuracy_score ?? r.transcription_comparison?.similarity_score)
     .filter(s => s != null);
   const passed = completed.filter(r => r.final_result === 'pass').length;
   return {
@@ -282,8 +282,9 @@ function renderAccuracyChart(results) {
     .filter(r => r.status === 'complete')
     .map(r => ({
       name: r.audio_filename,
-      score: (r.transcription_comparison || r.comparison || {}).similarity_score
-        ?? r.accuracy_score,
+      score: (r.comparison || r.transcription_comparison || {}).similarity_score
+        ?? r.accuracy_score
+        ?? r.similarity_score,
     }))
     .filter(r => r.score != null)
     .slice(-10);
@@ -318,7 +319,7 @@ function renderDistributionChart(results) {
   if (!canvas) return;
 
   const scores = (results || [])
-    .map(r => (r.transcription_comparison || r.comparison || {}).similarity_score ?? r.accuracy_score)
+    .map(r => (r.comparison || r.transcription_comparison || {}).similarity_score ?? r.accuracy_score ?? r.similarity_score)
     .filter(s => s != null);
 
   const high = scores.filter(s => s >= 95).length;
@@ -378,9 +379,11 @@ function renderDetailPage(result) {
   document.getElementById('dashboard-view').style.display = 'none';
   document.getElementById('detail-view').style.display = 'block';
 
-  const comparison = result.transcription_comparison || result.comparison || {};
+  const comparison = result.comparison || result.transcription_comparison || {};
   const score = comparison.similarity_score ?? result.accuracy_score ?? result.similarity_score;
   const tr = result.transcription_result || {};
+
+  renderAccuracySummary(result);
 
   document.getElementById('detail-title').textContent =
     `${result.audio_filename || 'Test Run'} — ${result.language || ''}`;
@@ -427,7 +430,7 @@ function renderDetailPage(result) {
 
   const translation = tr?.debug?.translation || result.generated_translation || result.translation || '';
   const translationSection = document.getElementById('translation-section');
-  if (translation) {
+  if (translation || result.translation_ground_truth || result.translation_comparison) {
     renderTranslation(result);
     if (translationSection) translationSection.style.display = 'block';
   } else if (translationSection) {
@@ -464,7 +467,7 @@ function renderDetailPage(result) {
   }
 
   const soapComparisonSection = document.getElementById('soap-comparison-section');
-  if (result.soap_comparison?.similarity_score != null) {
+  if (hasSoapComparison(result.soap_comparison)) {
     renderSOAPComparison(result.soap_comparison);
     if (soapComparisonSection) soapComparisonSection.style.display = 'block';
   } else if (soapComparisonSection) {
@@ -480,13 +483,86 @@ function renderDetailPage(result) {
   }
 }
 
+function renderAccuracySummary(result) {
+  const container = document.getElementById('accuracy-summary');
+  if (!container) return;
+
+  const transScore = result.comparison?.similarity_score
+    ?? result.transcription_comparison?.similarity_score;
+  const transScore2 = result.translation_comparison?.similarity_score;
+  const soapScore = result.soap_comparison?.scores?.gt_vs_generated
+    ?? result.soap_comparison?.gt_vs_generated?.similarity_score;
+  const soapRawScore = result.soap_comparison?.scores?.gt_vs_raw
+    ?? result.soap_comparison?.gt_vs_raw?.similarity_score;
+  const soapDelta = result.soap_comparison?.scores?.raw_vs_generated
+    ?? result.soap_comparison?.raw_vs_generated?.similarity_score;
+  const medDiffs = result.medication_validation?.difference_count;
+
+  function scoreChip(label, score, tooltip = '') {
+    if (score == null) return `
+            <div class="acc-chip muted" title="${tooltip}">
+                <span class="acc-label">${label}</span>
+                <span class="acc-score">—</span>
+            </div>`;
+    const cls = score >= 90 ? 'high' : score >= 75 ? 'med'
+      : score >= 60 ? 'warn' : 'low';
+    return `
+            <div class="acc-chip ${cls}" title="${tooltip}">
+                <span class="acc-label">${label}</span>
+                <span class="acc-score">${Math.round(score)}%</span>
+            </div>`;
+  }
+
+  function medChip(diffs) {
+    if (diffs == null) return `
+            <div class="acc-chip muted">
+                <span class="acc-label">Medications</span>
+                <span class="acc-score">—</span>
+            </div>`;
+    const cls = diffs === 0 ? 'high' : diffs <= 2 ? 'med' : 'warn';
+    return `
+            <div class="acc-chip ${cls}">
+                <span class="acc-label">Medications</span>
+                <span class="acc-score">${diffs} diff${diffs !== 1 ? 's' : ''}</span>
+            </div>`;
+  }
+
+  container.innerHTML = `
+        <div class="accuracy-bar">
+            ${scoreChip('Transcription', transScore,
+    'Ground truth transcript vs generated transcription')}
+            ${scoreChip('Translation', transScore2,
+    'Ground truth translation vs generated translation')}
+            ${scoreChip('SOAP (GT→Gen)', soapScore,
+    'Ground truth SOAP vs generated SOAP')}
+            ${scoreChip('SOAP (GT→Raw)', soapRawScore,
+    'Ground truth SOAP vs raw LLM SOAP')}
+            ${scoreChip('SOAP (Raw→Gen)', soapDelta,
+    'Raw LLM SOAP vs final generated SOAP (post-processing delta)')}
+            ${medChip(medDiffs)}
+        </div>`;
+}
+
+function hasSoapComparison(soapComp) {
+  if (!soapComp) return false;
+  if (soapComp.scores) {
+    return Object.values(soapComp.scores).some(s => s != null);
+  }
+  return soapComp.similarity_score != null
+    || soapComp.gt_vs_generated
+    || soapComp.raw_vs_generated
+    || soapComp.gt_vs_raw;
+}
+
 function renderSOAPComparison(soapComp) {
   const container = document.getElementById('soap-comparison-section');
   if (!container) return;
 
-  const score = soapComp.similarity_score;
-  const scoreClass = score >= 95 ? 'high' : score >= 80 ? 'med' : score >= 60 ? 'warn' : 'low';
-  container.innerHTML = `
+  const isThreeWay = !!(soapComp.scores || soapComp.gt_vs_generated || soapComp.raw_vs_generated || soapComp.gt_vs_raw);
+  if (!isThreeWay) {
+    const score = soapComp.similarity_score;
+    const scoreClass = score >= 95 ? 'high' : score >= 80 ? 'med' : score >= 60 ? 'warn' : 'low';
+    container.innerHTML = `
     <div class="section-card">
       <div class="section-title">
         📋 SOAP Comparison
@@ -495,6 +571,42 @@ function renderSOAPComparison(soapComp) {
     : ''}
       </div>
       <p class="comparison-summary">${esc(soapComp.summary || '')}</p>
+    </div>`;
+    return;
+  }
+
+  const panels = [
+    { key: 'gt_vs_generated', label: 'SOAP GT → Generated' },
+    { key: 'gt_vs_raw', label: 'SOAP GT → Raw LLM' },
+    { key: 'raw_vs_generated', label: 'SOAP Raw → Generated' },
+  ];
+  const scores = soapComp.scores || {};
+
+  const panelHtml = panels.map(({ key, label }) => {
+    const detail = soapComp[key];
+    const score = scores[key] ?? detail?.similarity_score;
+    if (score == null && !detail) {
+      return `<div class="soap-panel muted">
+        <div class="soap-panel-label">${esc(label)}</div>
+        <div class="soap-panel-score">—</div>
+        <p class="comparison-summary">Not available</p>
+      </div>`;
+    }
+    const cls = score == null ? 'muted'
+      : score >= 90 ? 'high'
+        : score >= 75 ? 'med'
+          : score >= 60 ? 'warn' : 'low';
+    return `<div class="soap-panel ${cls}">
+        <div class="soap-panel-label">${esc(label)}</div>
+        <div class="soap-panel-score">${score != null ? Math.round(score) + '%' : '—'}</div>
+        <p class="comparison-summary">${esc(detail?.summary || '')}</p>
+      </div>`;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="section-card">
+      <div class="section-title">📋 SOAP Comparison</div>
+      <div class="soap-three-way">${panelHtml}</div>
     </div>`;
 }
 
@@ -559,21 +671,50 @@ function renderTranslation(result) {
   const container = document.getElementById('translation-section');
   if (!container) return;
 
-  const translation = result?.transcription_result?.debug?.translation
+  const generated = result?.generated_translation
+    || result?.transcription_result?.debug?.translation
     || result?.translation
     || result?.text_translation
     || '';
+  const groundTruth = result?.translation_ground_truth
+    || result?.ground_truth_translation
+    || '';
 
-  if (!translation) {
+  if (!generated && !groundTruth) {
     container.style.display = 'none';
     return;
   }
 
+  const score = result?.translation_comparison?.similarity_score;
+  const scoreClass = score >= 90 ? 'high' : score >= 75 ? 'med' : score >= 60 ? 'warn' : 'low';
+  const scorePill = score != null
+    ? `<span class="accuracy-pill ${scoreClass}">${Math.round(score)}% match</span>`
+    : '';
+
   container.style.display = 'block';
+  if (groundTruth) {
+    const { gtHtml, genHtml } = computeWordDiff(groundTruth, generated);
+    container.innerHTML = `
+    <div class="section-card">
+      <div class="section-title">🌐 Translation Comparison ${scorePill}</div>
+      <div class="diff-grid">
+        <div class="diff-col">
+          <div class="diff-col-header">Ground Truth</div>
+          <div class="diff-text">${gtHtml || '<em>No ground truth available</em>'}</div>
+        </div>
+        <div class="diff-col">
+          <div class="diff-col-header">Generated</div>
+          <div class="diff-text generated-col">${genHtml || '<em>No translation</em>'}</div>
+        </div>
+      </div>
+    </div>`;
+    return;
+  }
+
   container.innerHTML = `
     <div class="section-card">
-      <div class="section-title">🌐 Translation (Debug)</div>
-      <div class="translation-text">${esc(translation)}</div>
+      <div class="section-title">🌐 Translation (Debug) ${scorePill}</div>
+      <div class="translation-text">${esc(generated)}</div>
     </div>`;
 }
 

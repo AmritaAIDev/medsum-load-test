@@ -34,12 +34,28 @@ def _update_step(result: TestResult, step: str, status: str) -> None:
 def _comparison_to_dict(comp) -> dict | None:
     if not comp or getattr(comp, "skipped", False):
         return None
+    if isinstance(comp, dict):
+        if comp.get("skipped"):
+            return None
+        return {
+            "similarity_score": comp.get("similarity_score"),
+            "medical_differences": (
+                comp.get("medical_difference_details")
+                or comp.get("medical_differences")
+                or []
+            ),
+            "general_differences": comp.get("general_differences") or [],
+            "overall_severity": comp.get("overall_severity") or comp.get("severity") or "low",
+            "summary": comp.get("summary") or "",
+            "error": comp.get("error") or "",
+        }
     return {
         "similarity_score": comp.similarity_score,
         "medical_differences": comp.medical_difference_details or [],
         "general_differences": comp.general_differences or [],
         "overall_severity": comp.severity,
         "summary": comp.summary,
+        "error": getattr(comp, "error", "") or "",
     }
 
 
@@ -76,16 +92,22 @@ def _build_db_payload(result: TestResult) -> dict:
         "has_translation_ground_truth": result.has_translation_ground_truth,
         "translation_comparison": result.translation_comparison,
 
-        "transcription": result.generated_transcription,
-        "translation": result.translation or result.text_translation,
+        "transcription": result.transcription or result.generated_transcription,
+        "translation": (
+            result.generated_translation
+            or result.translation
+            or result.text_translation
+        ),
 
         "transcription_result": tr,
 
         "soap_ground_truth": result.soap_ground_truth,
+        "soap_generated": result.soap_generated,
+        "soap_raw": result.soap_raw,
         "has_soap_ground_truth": result.has_soap_ground_truth,
         "soap_comparison": result.soap_comparison,
 
-        "comparison": _comparison_to_dict(result.transcription_comparison),
+        "comparison": result.comparison or _comparison_to_dict(result.transcription_comparison),
         "ai_model_used": result.ai_model_used or result.ai_model,
 
         "medication_validation": result.medication_validation,
@@ -346,6 +368,7 @@ def execute_test_run(
         log.info("[%s] drive_download_time_seconds=%s", test_id, timings["drive_download_time_seconds"])
 
         result.ground_truth_transcription = ground_truth
+        result.ground_truth = ground_truth
         result.soap_ground_truth = soap_ground_truth
         result.has_soap_ground_truth = soap_ground_truth is not None
         result.translation_ground_truth = translation_ground_truth or ""
@@ -455,17 +478,6 @@ def execute_test_run(
             list(raw_soap_dbg.keys()) if raw_soap_dbg else "EMPTY",
         )
 
-        log.info("[%s] Validating medications...", test_id)
-        medication_validation = ai_comparator.validate_medications(transcription_result)
-        result.medication_validation = medication_validation
-        log.info(
-            "[%s] Medications: raw=%s, final=%s, differences=%s",
-            test_id,
-            medication_validation["raw_count"],
-            medication_validation["final_count"],
-            medication_validation["difference_count"],
-        )
-
         log.info("[%s] STEP 9: Saving summary to Django...", test_id)
         saved_summary = medsum_api.save_summary(
             session_id=session_id,
@@ -504,101 +516,207 @@ def execute_test_run(
             result.previous_transcription = previous.generated_transcription
             result.previous_summary = previous.generated_summary
             result.previous_test_id = previous.test_id
-            result.previous_similarity_score = previous.accuracy_score
+            prev_comp = previous.comparison or {}
+            if not isinstance(prev_comp, dict):
+                prev_comp = {}
+            result.previous_similarity_score = (
+                prev_comp.get("similarity_score")
+                or (
+                    previous.transcription_comparison.similarity_score
+                    if previous.transcription_comparison
+                    else None
+                )
+                or previous.accuracy_score
+            )
+            log.info(
+                "[%s] Previous result: score=%s",
+                test_id,
+                result.previous_similarity_score,
+            )
         else:
             log.info("[%s] Previous result: none", test_id)
 
-        log.info("[%s] STEP 12: AI comparison with %s...", test_id, ai_model)
-        t0 = time.time()
-        if result.has_ground_truth and ground_truth.strip():
-            if language_code == "en":
-                log.info("[%s] English: running transcription comparison (GT vs Generated)", test_id)
-            result.transcription_comparison = ai_comparator.compare_transcriptions(
+        # ─────────────────────────────────────────────────────────
+        # STEP: Extract all data from Flask response
+        # ─────────────────────────────────────────────────────────
+        transcription = transcription_result.get("transcription", "") or transcription
+        debug = transcription_result.get("debug") or {}
+        gen_translation = debug.get("translation", "") or result.translation or ""
+
+        # Raw soap — handle both key variants
+        raw_soap_block = debug.get("raw_soap") or debug.get("raw soap") or {}
+        # Only use if it contains actual SOAP keys, not just {"error": "..."}
+        soap_raw = None
+        if isinstance(raw_soap_block, dict) and any(
+            k in raw_soap_block
+            for k in ["subjective", "objective", "assessment", "plan", "summary"]
+        ):
+            soap_raw = raw_soap_block
+
+        # Generated SOAP from top level
+        soap_generated = ai_comparator.extract_soap_from_result(
+            transcription_result, allow_raw_fallback=False
+        )
+
+        log.info(
+            "[%s] Data available — transcription: %d chars, "
+            "gen_translation: %d chars, soap_generated: %s, soap_raw: %s",
+            test_id,
+            len(transcription),
+            len(gen_translation),
+            bool(soap_generated),
+            bool(soap_raw),
+        )
+
+        t_ai_start = time.time()
+
+        # ─────────────────────────────────────────────────────────
+        # COMPARISON 1 — Transcription: Ground Truth vs Generated
+        # ─────────────────────────────────────────────────────────
+        transcription_comparison = None
+        if ground_truth and transcription:
+            log.info("[%s] Running transcription comparison...", test_id)
+            t0 = time.time()
+            transcription_comparison = ai_comparator.compare_transcriptions(
                 ground_truth, transcription, ai_model, config
             )
-            result.accuracy_score = result.transcription_comparison.similarity_score
-            result.ai_model_used = ai_model
-            log.info("[%s] Comparison score: %s", test_id, result.accuracy_score)
+            timings["ai_transcription_comparison_time"] = round(time.time() - t0, 3)
+            log.info(
+                "[%s] Transcription comparison score: %s severity: %s",
+                test_id,
+                transcription_comparison.similarity_score,
+                transcription_comparison.severity,
+            )
         else:
-            log.info("[%s] Skipping comparison — no ground truth", test_id)
-            result.transcription_comparison = ai_comparator.compare_transcriptions(
-                "", transcription, ai_model, config
+            log.info(
+                "[%s] Skipping transcription comparison — GT: %s, Generated: %s",
+                test_id, bool(ground_truth), bool(transcription),
             )
             if not result.accuracy_skip_reason:
                 result.accuracy_skipped = True
                 result.accuracy_skip_reason = "No ground truth available"
-        timings["ai_comparison_time_seconds"] = round(time.time() - t0, 3)
-        log.info("[%s] ai_comparison_time_seconds=%s", test_id, timings["ai_comparison_time_seconds"])
 
-        soap_comparison = None
-        # Log what we're passing to extract_soap_from_result
-        _soap_debug = {
-            k: type(transcription_result.get(k)).__name__
-            for k in ai_comparator.SOAP_KEYS
-        }
-        log.info(
-            "[%s] SOAP key types in transcription_result: %s",
-            test_id,
-            _soap_debug,
-        )
-
-        soap_generated = ai_comparator.extract_soap_from_result(transcription_result)
-        log.info(
-            "[%s] soap_generated: %s",
-            test_id,
-            list(soap_generated.keys()) if soap_generated else None,
-        )
-
-        if soap_ground_truth and soap_generated:
-            log.info("[%s] Running SOAP comparison...", test_id)
-            soap_comparison = ai_comparator.compare_soap(
-                soap_ground_truth, soap_generated, ai_model, config
-            )
-            log.info(
-                "[%s] SOAP score: %s",
-                test_id,
-                soap_comparison.get("similarity_score"),
-            )
-        elif soap_ground_truth and not soap_generated:
-            log.warning(
-                "[%s] SOAP GT available but no generated SOAP — "
-                "check extract_soap_from_result()",
-                test_id,
-            )
-        else:
-            log.info("[%s] No SOAP GT — skipping SOAP comparison", test_id)
-        result.soap_comparison = soap_comparison
-
-        generated_translation = (
-            transcription_result.get("debug", {}).get("translation", "")
-            or result.translation
-            or ""
-        )
+        # ─────────────────────────────────────────────────────────
+        # COMPARISON 2 — Translation: Ground Truth vs Generated
+        # ─────────────────────────────────────────────────────────
         translation_comparison = None
-        if language_code != "en" and translation_ground_truth and generated_translation:
+        gt_translation = translation_ground_truth or ""
+
+        # For English: _script = ground truth transcription = ground truth translation
+        # Compare it against debug.translation from Flask
+        if language_code == "en":
+            gt_translation = ground_truth  # always use script as translation GT for English
+
+        if gt_translation and gen_translation:
             log.info("[%s] Running translation comparison...", test_id)
             t0 = time.time()
             translation_comparison = ai_comparator.compare_translations(
-                translation_ground_truth,
-                generated_translation,
+                gt_translation,      # English _script content
+                gen_translation,     # debug.translation from Flask
                 ai_model,
                 config,
             )
+            timings["ai_translation_comparison_time"] = round(time.time() - t0, 3)
             log.info(
                 "[%s] Translation comparison score: %s",
                 test_id,
                 translation_comparison.get("similarity_score"),
             )
-        elif language_code == "en":
-            log.info("[%s] English audio — skipping separate translation comparison", test_id)
         else:
             log.info(
-                "[%s] Skipping translation comparison — GT available: %s, Generated: %s",
-                test_id,
-                bool(translation_ground_truth),
-                bool(generated_translation),
+                "[%s] Skipping translation comparison — GT: %s, Generated: %s",
+                test_id, bool(gt_translation), bool(gen_translation),
             )
-        result.translation_comparison = translation_comparison
+
+        # ─────────────────────────────────────────────────────────
+        # COMPARISON 3 — SOAP (three-way when GT exists)
+        # ─────────────────────────────────────────────────────────
+        soap_comparison = None
+
+        if soap_ground_truth:
+            log.info("[%s] Running three-way SOAP comparison...", test_id)
+            t0 = time.time()
+            soap_comparison = ai_comparator.compare_soap_three_way(
+                soap_ground_truth=soap_ground_truth,
+                soap_generated=soap_generated,
+                soap_raw=soap_raw,
+                model=ai_model,
+                config=config,
+            )
+            timings["ai_soap_comparison_time"] = round(time.time() - t0, 3)
+            log.info(
+                "[%s] SOAP scores — GT/Gen: %s, GT/Raw: %s, Raw/Gen: %s",
+                test_id,
+                soap_comparison["scores"].get("gt_vs_generated"),
+                soap_comparison["scores"].get("gt_vs_raw"),
+                soap_comparison["scores"].get("raw_vs_generated"),
+            )
+        elif soap_generated and soap_raw:
+            # No GT but both generated and raw exist — compare them
+            log.info("[%s] No SOAP GT — comparing Raw vs Generated only...", test_id)
+            t0 = time.time()
+            raw_vs_gen = ai_comparator.compare_soap(
+                soap_raw, soap_generated, ai_model, config
+            )
+            timings["ai_soap_comparison_time"] = round(time.time() - t0, 3)
+            soap_comparison = {
+                "gt_vs_generated":  None,
+                "gt_vs_raw":        None,
+                "raw_vs_generated": raw_vs_gen,
+                "scores": {
+                    "gt_vs_generated":  None,
+                    "gt_vs_raw":        None,
+                    "raw_vs_generated": raw_vs_gen.get("similarity_score"),
+                }
+            }
+            log.info(
+                "[%s] Raw vs Generated SOAP score: %s",
+                test_id,
+                raw_vs_gen.get("similarity_score"),
+            )
+        else:
+            log.info(
+                "[%s] Skipping SOAP comparison — GT: %s, Generated: %s, Raw: %s",
+                test_id, bool(soap_ground_truth),
+                bool(soap_generated), bool(soap_raw),
+            )
+
+        # ─────────────────────────────────────────────────────────
+        # COMPARISON 4 — Medication validation (raw vs generated)
+        # ─────────────────────────────────────────────────────────
+        medication_validation = ai_comparator.compare_medications(transcription_result)
+        log.info(
+            "[%s] Medication validation — raw: %d, final: %d, differences: %d",
+            test_id,
+            medication_validation.get("raw_count", 0),
+            medication_validation.get("final_count", 0),
+            medication_validation.get("difference_count", 0),
+        )
+
+        timings["ai_comparison_time_seconds"] = round(time.time() - t_ai_start, 3)
+        log.info("[%s] ai_comparison_time_seconds=%s", test_id, timings["ai_comparison_time_seconds"])
+
+        # ─────────────────────────────────────────────────────────
+        # Save all comparison results to result object
+        # ─────────────────────────────────────────────────────────
+        result.transcription         = transcription
+        result.generated_transcription = transcription
+        result.generated_translation = gen_translation
+        result.translation           = gen_translation
+        result.text_translation      = gen_translation
+        result.soap_generated        = soap_generated
+        result.soap_raw              = soap_raw
+        result.ground_truth          = ground_truth
+
+        # Primary comparison (transcription) — used for main accuracy score
+        result.transcription_comparison = transcription_comparison
+        result.comparison              = _comparison_to_dict(transcription_comparison)
+        result.translation_comparison  = translation_comparison
+        result.soap_comparison         = soap_comparison
+        result.medication_validation   = medication_validation
+        if transcription_comparison and not getattr(transcription_comparison, "skipped", False):
+            result.accuracy_score = transcription_comparison.similarity_score
+            result.ai_model_used = ai_model
 
         if previous and previous.generated_summary is not None:
             result.summary_comparison = ai_comparator.compare_summaries(

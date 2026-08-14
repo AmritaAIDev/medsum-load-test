@@ -62,10 +62,11 @@ def _get_client(model: str, config: dict) -> tuple[OpenAI, str]:
                 "deepseek_base_url", "https://api.deepseek.com/v1"
             ),
         )
-        return client, "deepseek-chat"
+        model_name = ai_config.get("deepseek_model", "deepseek-chat")
+        return client, model_name
 
     client = OpenAI(api_key=(ai_config.get("openai_api_key") or "").strip())
-    model_name = ai_config.get("openai_model", "gpt-4o-mini")
+    model_name = ai_config.get("openai_model", "gpt-4o")
     return client, model_name
 
 
@@ -132,7 +133,7 @@ def _to_comparison(data: dict[str, Any]) -> ComparisonResult:
 SOAP_KEYS = ["subjective", "objective", "assessment", "plan", "summary"]
 
 
-def extract_soap_from_result(tr: dict) -> dict | None:
+def extract_soap_from_result(tr: dict, allow_raw_fallback: bool = True) -> dict | None:
     """
     Extract SOAP sections from Flask transcription result.
     Returns dict with SOAP sections, or None if LLM failed or no SOAP found.
@@ -163,6 +164,15 @@ def extract_soap_from_result(tr: dict) -> dict | None:
             "SOAP extracted from top level: keys=%s", list(top_level.keys())
         )
         return top_level
+
+    if not allow_raw_fallback:
+        log.warning(
+            "extract_soap_from_result: no top-level SOAP (raw fallback disabled). "
+            "Top-level error: %s. Top-level keys: %s",
+            bool(top_level_error),
+            list(tr.keys()),
+        )
+        return None
 
     # Fallback — try debug.raw_soap or debug["raw soap"]
     debug = tr.get("debug") or {}
@@ -296,6 +306,57 @@ Schema:
         "section_details": {},
         "error": str(last_error),
     }
+
+
+def compare_soap_three_way(
+    soap_ground_truth: dict | None,
+    soap_generated: dict | None,
+    soap_raw: dict | None,
+    model: str,
+    config: dict,
+) -> dict:
+    """
+    Three-way SOAP comparison:
+      gt_vs_generated  — GT vs final Flask output  (main accuracy)
+      gt_vs_raw        — GT vs raw LLM output      (raw accuracy)
+      raw_vs_generated — raw vs final              (post-processing delta)
+    """
+    results = {
+        "gt_vs_generated":  None,
+        "gt_vs_raw":        None,
+        "raw_vs_generated": None,
+        "scores": {
+            "gt_vs_generated":  None,
+            "gt_vs_raw":        None,
+            "raw_vs_generated": None,
+        }
+    }
+
+    if soap_ground_truth and soap_generated:
+        results["gt_vs_generated"] = compare_soap(
+            soap_ground_truth, soap_generated, model, config
+        )
+        results["scores"]["gt_vs_generated"] = (
+            results["gt_vs_generated"].get("similarity_score")
+        )
+
+    if soap_ground_truth and soap_raw:
+        results["gt_vs_raw"] = compare_soap(
+            soap_ground_truth, soap_raw, model, config
+        )
+        results["scores"]["gt_vs_raw"] = (
+            results["gt_vs_raw"].get("similarity_score")
+        )
+
+    if soap_raw and soap_generated:
+        results["raw_vs_generated"] = compare_soap(
+            soap_raw, soap_generated, model, config
+        )
+        results["scores"]["raw_vs_generated"] = (
+            results["raw_vs_generated"].get("similarity_score")
+        )
+
+    return results
 
 
 def compare_translations(
@@ -659,3 +720,8 @@ def validate_medications(transcription_result: dict) -> dict:
         "has_critical_differences": any(d["severity"] == "high" for d in differences),
         "difference_count": len(differences),
     }
+
+
+def compare_medications(transcription_result: dict) -> dict:
+    """Alias for validate_medications — raw SOAP meds vs generated plan.medications."""
+    return validate_medications(transcription_result)
