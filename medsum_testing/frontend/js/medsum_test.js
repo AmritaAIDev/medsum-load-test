@@ -26,21 +26,134 @@ function initPage() {
   bindEvents();
 }
 
-function getAccuracyDisplay(result) {
-  const score = result.comparison?.similarity_score
-    ?? result.similarity_score
-    ?? result.transcription_comparison?.similarity_score
-    ?? result.accuracy_score;
+/**
+ * Extract the AI comparison summary string. Never use difference lists/objects.
+ */
+function aiSummary(compOrText) {
+  if (compOrText == null || compOrText === '') return '';
+  if (typeof compOrText === 'string') return compOrText;
+  if (Array.isArray(compOrText)) return '';
+  if (typeof compOrText === 'object') {
+    if (typeof compOrText.summary === 'string' && compOrText.summary.trim()) {
+      return compOrText.summary;
+    }
+    if (typeof compOrText.error === 'string' && compOrText.error.trim()) {
+      return compOrText.error;
+    }
+  }
+  return '';
+}
 
-  if (score != null && score !== '') {
-    const cssClass = score >= 95 ? 'high'
-      : score >= 80 ? 'med'
-      : score >= 60 ? 'warn'
-      : 'low';
-    return { text: `${Math.round(score)}%`, cssClass };
+/**
+ * Creates a score pill that shows the AI summary on click.
+ * @param {number|null} score - 0-100 or null
+ * @param {string|object} reason - AI summary string, or comparison object with .summary
+ * @param {string} label - short label shown in pill
+ * @param {string} id - unique id for this pill
+ */
+function scorePill(score, reason, label, id) {
+  const safeLabel = esc(label || '');
+  const safeId = String(id).replace(/[^a-zA-Z0-9_-]/g, '');
+
+  if (score == null || score === '') {
+    return `<span class="score-pill muted" title="${safeLabel}">—<span class="pill-label">${safeLabel}</span></span>`;
   }
 
-  return { text: '—', cssClass: 'muted' };
+  const n = Math.round(Number(score));
+  if (Number.isNaN(n)) {
+    return `<span class="score-pill muted" title="${safeLabel}">—<span class="pill-label">${safeLabel}</span></span>`;
+  }
+
+  const cls = n >= 90 ? 'high' : n >= 75 ? 'med' :
+              n >= 60 ? 'warn' : 'low';
+
+  const displayReason = esc(
+    aiSummary(reason) || 'No reasoning available from AI comparison.'
+  );
+
+  return `
+        <span class="score-pill-wrapper">
+            <span class="score-pill ${cls}"
+                  id="pill-${safeId}"
+                  onclick="event.stopPropagation(); toggleReason('${safeId}')"
+                  title="Click to see why">
+                ${n}%
+                <span class="pill-label">${safeLabel}</span>
+            </span>
+            <div class="reason-box" id="reason-${safeId}" style="display:none">
+                <div class="reason-header">
+                    <span>WHY ${n}%? — ${safeLabel}</span>
+                    <button type="button" class="reason-close"
+                            onclick="event.stopPropagation(); toggleReason('${safeId}')">✕</button>
+                </div>
+                <div class="reason-text">${displayReason}</div>
+            </div>
+        </span>`;
+}
+
+function toggleReason(id) {
+  const box = document.getElementById(`reason-${id}`);
+  if (!box) return;
+
+  const isOpen = box.style.display !== 'none';
+
+  document.querySelectorAll('.reason-box').forEach(b => {
+    b.style.display = 'none';
+  });
+
+  if (!isOpen) {
+    box.style.display = 'block';
+    const rect = box.getBoundingClientRect();
+    if (rect.right > window.innerWidth - 20) {
+      box.classList.add('align-right');
+    } else {
+      box.classList.remove('align-right');
+    }
+  }
+}
+
+function makeCollapsible(id, title, contentHtml, {
+  defaultOpen = false,
+  score = null,
+  scoreReason = null,
+  scoreLabel = '',
+  headerRight = '',
+} = {}) {
+  const arrow = defaultOpen ? '▼' : '▶';
+  const scoreBadge = score != null
+    ? scorePill(score, scoreReason, scoreLabel, `${id}-header`)
+    : '';
+
+  return `
+        <div class="collapsible-section" id="section-${id}">
+            <div class="collapsible-header" onclick="toggleSection('${id}')">
+                <span class="collapsible-arrow" id="arrow-${id}">${arrow}</span>
+                <span class="collapsible-title">${title}</span>
+                <span onclick="event.stopPropagation()">${scoreBadge}</span>
+                ${headerRight}
+            </div>
+            <div class="collapsible-body" id="body-${id}"
+                 style="display:${defaultOpen ? 'block' : 'none'}">
+                ${contentHtml}
+            </div>
+        </div>`;
+}
+
+function toggleSection(id) {
+  const body = document.getElementById(`body-${id}`);
+  const arrow = document.getElementById(`arrow-${id}`);
+  if (!body) return;
+  const open = body.style.display !== 'none';
+  body.style.display = open ? 'none' : 'block';
+  if (arrow) arrow.textContent = open ? '▶' : '▼';
+}
+
+function comparisonSummary(comp) {
+  return aiSummary(comp);
+}
+
+function hasKeys(obj) {
+  return !!obj && typeof obj === 'object' && Object.keys(obj).length > 0;
 }
 
 async function checkAIConfig() {
@@ -71,6 +184,14 @@ function bindEvents() {
       item.classList.add('active');
       if (item.dataset.nav !== 'dashboard') showDashboard();
     });
+  });
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.score-pill-wrapper') && !e.target.closest('.score-pill-wrap')) {
+      document.querySelectorAll('.reason-box').forEach(b => {
+        b.style.display = 'none';
+      });
+    }
   });
 }
 
@@ -116,8 +237,9 @@ function normalizeResultSummary(r) {
       ?? r.similarity_score
       ?? r.accuracy_score
       ?? comp.similarity_score,
-    comparison: { ...comp, error: comp.error },
+    comparison: { ...comp, error: comp.error, summary: comp.summary },
     comparison_error: comp.error,
+    comparison_summary: comp.summary || '',
     total_test_time_seconds: r.total_test_time_seconds,
     transcription_result: r.transcription_result,
   };
@@ -237,7 +359,15 @@ function renderTestRunsTable(results) {
   }
 
   tbody.innerHTML = results.slice(0, 50).map(r => {
-    const acc = getAccuracyDisplay(r);
+    const score = r.comparison?.similarity_score
+      ?? r.similarity_score
+      ?? r.transcription_comparison?.similarity_score
+      ?? r.accuracy_score;
+    const reason = aiSummary(r.comparison)
+      || r.comparison_summary
+      || aiSummary(r.transcription_comparison)
+      || '';
+    const pillId = `table-${String(r.test_id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`;
 
     const timeDisplay = r.total_test_time_seconds != null
       ? formatDuration(r.total_test_time_seconds)
@@ -265,8 +395,8 @@ function renderTestRunsTable(results) {
           ${esc(r.language || '—')}
         </span>
       </td>
-      <td>
-        <span class="accuracy-badge ${acc.cssClass}">${esc(acc.text)}</span>
+      <td onclick="event.stopPropagation()">
+        ${scorePill(score, reason, 'Accuracy', pillId)}
       </td>
       <td>${esc(timeDisplay)}</td>
       <td>${statusBadge}</td>
@@ -379,39 +509,20 @@ function renderDetailPage(result) {
   document.getElementById('dashboard-view').style.display = 'none';
   document.getElementById('detail-view').style.display = 'block';
 
-  const comparison = result.comparison || result.transcription_comparison || {};
-  const score = comparison.similarity_score ?? result.accuracy_score ?? result.similarity_score;
-  const tr = result.transcription_result || {};
-
-  renderAccuracySummary(result);
-
+  document.getElementById('detail-tc-ref').textContent = result.tc_ref || '—';
+  document.getElementById('detail-run-ref').textContent = result.run_ref || '—';
   document.getElementById('detail-title').textContent =
-    `${result.audio_filename || 'Test Run'} — ${result.language || ''}`;
-
-  const tcRefEl = document.getElementById('detail-tc-ref');
-  const runRefEl = document.getElementById('detail-run-ref');
-  if (tcRefEl) tcRefEl.textContent = result.tc_ref || '—';
-  if (runRefEl) runRefEl.textContent = result.run_ref || '';
+    `${result.audio_filename || ''} — ${result.language || ''}`;
 
   const duration = result.total_test_time_seconds != null
     ? formatDuration(result.total_test_time_seconds)
     : '—';
-
-  document.getElementById('detail-meta').innerHTML =
-    `${esc(result.status || result.final_result || '')}` +
-    ` · Score: ${score != null ? Math.round(score) + '%' : '—'}` +
-    ` · Duration: ${esc(duration)}`;
-
-  const groundTruth = result.ground_truth_transcription || result.ground_truth || '';
-  const generated = result.generated_transcription || result.transcription || '';
-
-  const transcriptionSection = document.getElementById('transcription-section');
-  if (groundTruth || generated) {
-    renderTranscriptionDiff(groundTruth, generated);
-    if (transcriptionSection) transcriptionSection.style.display = 'block';
-  } else if (transcriptionSection) {
-    transcriptionSection.style.display = 'none';
+  const meta = document.getElementById('detail-meta');
+  if (meta) {
+    meta.textContent = `${result.status || result.final_result || ''} · Duration: ${duration}`;
   }
+
+  renderAccuracySummary(result);
 
   const flaskError = result.flask_error || result.transcription_result?.error;
   const flaskErrorText = flaskError && typeof flaskError === 'object'
@@ -428,57 +539,21 @@ function renderDetailPage(result) {
     }
   }
 
-  const translation = tr?.debug?.translation || result.generated_translation || result.translation || '';
-  const translationSection = document.getElementById('translation-section');
-  if (translation || result.translation_ground_truth || result.translation_comparison) {
-    renderTranslation(result);
-    if (translationSection) translationSection.style.display = 'block';
-  } else if (translationSection) {
-    translationSection.style.display = 'none';
-  }
-
-  const hasSOAP = tr.subjective || tr.objective || tr.assessment || tr.plan;
-  const soapSection = document.getElementById('soap-section');
-  if (hasSOAP) {
-    renderSOAPSummary(result);
-    if (soapSection) soapSection.style.display = 'block';
-  } else if (soapSection) {
-    soapSection.style.display = 'none';
-  }
-
-  const medVal = result.medication_validation;
-  const hasMeds = (medVal?.final_medications?.length > 0)
-    || (medVal?.raw_medications?.length > 0)
-    || (tr?.plan?.medications?.length > 0);
-  const medicationSection = document.getElementById('medication-section');
-  if (hasMeds) {
-    renderMedicationValidation(result);
-    if (medicationSection) medicationSection.style.display = 'block';
-  } else if (medicationSection) {
-    medicationSection.style.display = 'none';
-  }
-
-  const medicalDiffSection = document.getElementById('medical-diff-section');
-  if (comparison?.similarity_score != null) {
-    renderMedicalDifferences(comparison);
-    if (medicalDiffSection) medicalDiffSection.style.display = 'block';
-  } else if (medicalDiffSection) {
-    medicalDiffSection.style.display = 'none';
-  }
-
-  const soapComparisonSection = document.getElementById('soap-comparison-section');
-  if (hasSoapComparison(result.soap_comparison)) {
-    renderSOAPComparison(result.soap_comparison);
-    if (soapComparisonSection) soapComparisonSection.style.display = 'block';
-  } else if (soapComparisonSection) {
-    soapComparisonSection.style.display = 'none';
+  const sections = document.getElementById('detail-sections');
+  if (sections) {
+    sections.innerHTML = [
+      renderTranscriptionComparison(result),
+      renderTranslationComparison(result),
+      renderSOAPComparison(result),
+      renderMedicationValidation(result),
+    ].filter(Boolean).join('');
   }
 
   const errorsSection = document.getElementById('errors-section');
   if (result.errors?.length) {
     errorsSection.style.display = '';
     document.getElementById('errors-box').textContent = result.errors.join('\n\n');
-  } else {
+  } else if (errorsSection) {
     errorsSection.style.display = 'none';
   }
 }
@@ -487,437 +562,484 @@ function renderAccuracySummary(result) {
   const container = document.getElementById('accuracy-summary');
   if (!container) return;
 
-  const transScore = result.comparison?.similarity_score
-    ?? result.transcription_comparison?.similarity_score;
-  const transScore2 = result.translation_comparison?.similarity_score;
-  const soapScore = result.soap_comparison?.scores?.gt_vs_generated
-    ?? result.soap_comparison?.gt_vs_generated?.similarity_score;
-  const soapRawScore = result.soap_comparison?.scores?.gt_vs_raw
-    ?? result.soap_comparison?.gt_vs_raw?.similarity_score;
-  const soapDelta = result.soap_comparison?.scores?.raw_vs_generated
-    ?? result.soap_comparison?.raw_vs_generated?.similarity_score;
-  const medDiffs = result.medication_validation?.difference_count;
+  const transComp = result.comparison || result.transcription_comparison || {};
+  const transComp2 = result.translation_comparison || {};
+  const soapComp = result.soap_comparison || {};
+  const soapScores = soapComp.scores || {};
+  const medVal = result.medication_validation || {};
 
-  function scoreChip(label, score, tooltip = '') {
-    if (score == null) return `
-            <div class="acc-chip muted" title="${tooltip}">
-                <span class="acc-label">${label}</span>
-                <span class="acc-score">—</span>
-            </div>`;
-    const cls = score >= 90 ? 'high' : score >= 75 ? 'med'
-      : score >= 60 ? 'warn' : 'low';
-    return `
-            <div class="acc-chip ${cls}" title="${tooltip}">
-                <span class="acc-label">${label}</span>
-                <span class="acc-score">${Math.round(score)}%</span>
-            </div>`;
-  }
+  const soapGenScore = soapScores.gt_vs_generated ?? soapComp.gt_vs_generated?.similarity_score;
+  const soapRawScore = soapScores.gt_vs_raw ?? soapComp.gt_vs_raw?.similarity_score;
+  const soapDeltaScore = soapScores.raw_vs_generated ?? soapComp.raw_vs_generated?.similarity_score;
 
-  function medChip(diffs) {
-    if (diffs == null) return `
-            <div class="acc-chip muted">
-                <span class="acc-label">Medications</span>
-                <span class="acc-score">—</span>
-            </div>`;
-    const cls = diffs === 0 ? 'high' : diffs <= 2 ? 'med' : 'warn';
-    return `
-            <div class="acc-chip ${cls}">
-                <span class="acc-label">Medications</span>
-                <span class="acc-score">${diffs} diff${diffs !== 1 ? 's' : ''}</span>
-            </div>`;
-  }
+  const medCount = medVal.difference_count || 0;
+  const medCls = medCount === 0 ? 'high' : (medVal.has_critical_differences ? 'low' : 'warn');
+  const medLabel = medCount === 0
+    ? '✓ Meds'
+    : `${medCount} Med Diff${medCount !== 1 ? 's' : ''}`;
 
   container.innerHTML = `
-        <div class="accuracy-bar">
-            ${scoreChip('Transcription', transScore,
-    'Ground truth transcript vs generated transcription')}
-            ${scoreChip('Translation', transScore2,
-    'Ground truth translation vs generated translation')}
-            ${scoreChip('SOAP (GT→Gen)', soapScore,
-    'Ground truth SOAP vs generated SOAP')}
-            ${scoreChip('SOAP (GT→Raw)', soapRawScore,
-    'Ground truth SOAP vs raw LLM SOAP')}
-            ${scoreChip('SOAP (Raw→Gen)', soapDelta,
-    'Raw LLM SOAP vs final generated SOAP (post-processing delta)')}
-            ${medChip(medDiffs)}
+        <div class="acc-bar-title">Accuracy Overview</div>
+        <div class="acc-bar-chips">
+            ${scorePill(
+              transComp.similarity_score,
+              transComp.summary,
+              'Transcription',
+              'acc-transcription'
+            )}
+            ${scorePill(
+              transComp2.similarity_score,
+              transComp2.summary,
+              'Translation',
+              'acc-translation'
+            )}
+            ${scorePill(
+              soapGenScore,
+              soapComp.gt_vs_generated?.summary,
+              'SOAP GT→Gen',
+              'acc-soap-gen'
+            )}
+            ${scorePill(
+              soapRawScore,
+              soapComp.gt_vs_raw?.summary,
+              'SOAP GT→Raw',
+              'acc-soap-raw'
+            )}
+            ${scorePill(
+              soapDeltaScore,
+              soapComp.raw_vs_generated?.summary,
+              'SOAP Raw→Gen',
+              'acc-soap-delta'
+            )}
+            <span class="score-pill ${medCls}"
+                  onclick="toggleSection('medication')"
+                  title="Click to see medication validation">
+                ${esc(medLabel)}
+            </span>
         </div>`;
 }
 
-function hasSoapComparison(soapComp) {
-  if (!soapComp) return false;
-  if (soapComp.scores) {
-    return Object.values(soapComp.scores).some(s => s != null);
+function formatDiffItem(d, { showType = true } = {}) {
+  if (d == null) return '';
+  if (typeof d === 'string') {
+    return `<div class="diff-item-plain">• ${esc(d)}</div>`;
   }
-  return soapComp.similarity_score != null
-    || soapComp.gt_vs_generated
-    || soapComp.raw_vs_generated
-    || soapComp.gt_vs_raw;
+  const sev = d.severity || 'medium';
+  const typeHtml = showType && d.type
+    ? `<span class="diff-type">${esc(String(d.type).replace(/_/g, ' '))}</span>`
+    : '';
+  return `
+            <div class="diff-item ${esc(sev)}">
+                <span class="sev-badge ${esc(sev)}">${esc(sev)}</span>
+                ${typeHtml}
+                <span class="diff-gt">GT: ${esc(d.ground_truth || '—')}</span>
+                <span class="arrow">→</span>
+                <span class="diff-gen">Generated: ${esc(d.generated || '—')}</span>
+            </div>`;
 }
 
-function renderSOAPComparison(soapComp) {
-  const container = document.getElementById('soap-comparison-section');
-  if (!container) return;
+function renderTranscriptionComparison(result) {
+  const gt = result.ground_truth || result.ground_truth_transcription || '';
+  const gen = result.transcription || result.generated_transcription || '';
+  if (!gt && !gen) return '';
 
-  const isThreeWay = !!(soapComp.scores || soapComp.gt_vs_generated || soapComp.raw_vs_generated || soapComp.gt_vs_raw);
-  if (!isThreeWay) {
-    const score = soapComp.similarity_score;
-    const scoreClass = score >= 95 ? 'high' : score >= 80 ? 'med' : score >= 60 ? 'warn' : 'low';
-    container.innerHTML = `
-    <div class="section-card">
-      <div class="section-title">
-        📋 SOAP Comparison
-        ${score != null
-    ? `<span class="accuracy-pill ${scoreClass}">${Math.round(score)}% match</span>`
-    : ''}
-      </div>
-      <p class="comparison-summary">${esc(soapComp.summary || '')}</p>
-    </div>`;
-    return;
-  }
+  const comp = result.comparison || result.transcription_comparison || {};
+  const score = comp.similarity_score;
 
-  const panels = [
-    { key: 'gt_vs_generated', label: 'SOAP GT → Generated' },
-    { key: 'gt_vs_raw', label: 'SOAP GT → Raw LLM' },
-    { key: 'raw_vs_generated', label: 'SOAP Raw → Generated' },
-  ];
-  const scores = soapComp.scores || {};
+  const { gtHtml, genHtml } = computeWordDiff(gt, gen);
 
-  const panelHtml = panels.map(({ key, label }) => {
-    const detail = soapComp[key];
-    const score = scores[key] ?? detail?.similarity_score;
-    if (score == null && !detail) {
-      return `<div class="soap-panel muted">
-        <div class="soap-panel-label">${esc(label)}</div>
-        <div class="soap-panel-score">—</div>
-        <p class="comparison-summary">Not available</p>
-      </div>`;
+  const medDiffs = (comp.medical_difference_details || []).length
+    ? comp.medical_difference_details
+    : (comp.medical_differences || []);
+  const genDiffs = comp.general_differences || [];
+
+  const medDiffHtml = medDiffs.length === 0 ? '' : `
+        <div class="diff-section-label">Medical Differences</div>
+        ${medDiffs.map(d => formatDiffItem(d)).join('')}`;
+
+  const genDiffHtml = genDiffs.length === 0 ? '' : `
+        <div class="diff-section-label" style="margin-top:0.75rem">General Differences</div>
+        ${genDiffs.map(d => formatDiffItem(d, { showType: false })).join('')}`;
+
+  const scoreHtml = score != null ? `
+        <div class="section-score-row">
+            ${scorePill(score, comp.summary, 'Transcription Accuracy', 'trans-score')}
+        </div>` : '';
+
+  const content = `
+        ${scoreHtml}
+        <div class="diff-legend-row">
+            <span><span class="legend-swatch missing"></span> Missing from generated</span>
+            <span><span class="legend-swatch wrong"></span> Not in ground truth</span>
+        </div>
+        <div class="diff-grid">
+            <div class="diff-col">
+                <div class="diff-col-header">Ground Truth</div>
+                <div class="diff-text">${gtHtml || '<em>No ground truth</em>'}</div>
+            </div>
+            <div class="diff-col">
+                <div class="diff-col-header">Generated</div>
+                <div class="diff-text">${genHtml || '<em>No transcription</em>'}</div>
+            </div>
+        </div>
+        ${medDiffHtml}
+        ${genDiffHtml}`;
+
+  return makeCollapsible('transcription', '📝 Transcription Comparison', content, {
+    defaultOpen: false,
+    score,
+    scoreReason: comp.summary,
+    scoreLabel: 'Transcription',
+  });
+}
+
+function renderTranslationComparison(result) {
+  const lang = (result.language || '').toLowerCase();
+  const gtTrans = result.ground_truth_translation
+    || result.translation_ground_truth
+    || (lang === 'english' ? (result.ground_truth || result.ground_truth_transcription || '') : '');
+  const genTrans = result.generated_translation
+    || result.translation
+    || result.text_translation
+    || result.transcription_result?.debug?.translation
+    || '';
+  if (!gtTrans && !genTrans) return '';
+
+  const comp = result.translation_comparison || {};
+  const score = comp.similarity_score;
+
+  const { gtHtml, genHtml } = computeWordDiff(gtTrans, genTrans);
+
+  const diffs = comp.differences || comp.medical_differences || [];
+  const diffsHtml = diffs.length === 0 ? '' : `
+        <div class="diff-section-label" style="margin-top:0.75rem">Differences Found</div>
+        ${diffs.map(d => formatDiffItem(d, { showType: false })).join('')}`;
+
+  const scoreHtml = score != null ? `
+        <div class="section-score-row">
+            ${scorePill(score, comp.summary, 'Translation Accuracy', 'trans2-score')}
+            ${lang === 'english'
+              ? '<span class="note-text">Ground truth = _script file (English audio)</span>'
+              : ''}
+        </div>` : '';
+
+  const content = `
+        ${scoreHtml}
+        <div class="diff-grid">
+            <div class="diff-col">
+                <div class="diff-col-header">Ground Truth Translation</div>
+                <div class="diff-text">${gtHtml || '<em>No ground truth</em>'}</div>
+            </div>
+            <div class="diff-col">
+                <div class="diff-col-header">Generated Translation</div>
+                <div class="diff-text">${genHtml || '<em>No translation</em>'}</div>
+            </div>
+        </div>
+        ${diffsHtml}`;
+
+  return makeCollapsible('translation', '🌐 Translation Comparison', content, {
+    defaultOpen: false,
+    score,
+    scoreReason: comp.summary,
+    scoreLabel: 'Translation',
+  });
+}
+
+function soapFieldTable(gtSection, genSection, sectionKey) {
+  if (!gtSection && !genSection) return '<em>No data</em>';
+
+  const gt = typeof gtSection === 'object' && gtSection && !Array.isArray(gtSection) ? gtSection : {};
+  const gen = typeof genSection === 'object' && genSection && !Array.isArray(genSection) ? genSection : {};
+  const allKeys = [...new Set([...Object.keys(gt), ...Object.keys(gen)])];
+  const norm = v => String(v || '').toLowerCase().replace(/[.,\-–—\s]/g, '').trim();
+
+  const rows = allKeys.map(field => {
+    const gtVal = gt[field];
+    const genVal = gen[field];
+
+    if (field === 'medications' && (Array.isArray(gtVal) || Array.isArray(genVal))) {
+      const gtMeds = Array.isArray(gtVal) ? gtVal : [];
+      const genMeds = Array.isArray(genVal) ? genVal : [];
+      const maxLen = Math.max(gtMeds.length, genMeds.length);
+      if (maxLen === 0) return '';
+
+      const medRows = Array.from({ length: maxLen }, (_, i) => {
+        const gm = gtMeds[i] || {};
+        const gn = genMeds[i] || {};
+        const MED_FIELDS = ['drug_name', 'dose', 'schedule', 'duration', 'instructions'];
+        return MED_FIELDS.map(mf => {
+          const gv = String(gm[mf] || '—');
+          const nv = String(gn[mf] || '—');
+          const diff = norm(gv) !== norm(nv) && gv !== '—' && nv !== '—';
+          const label = (i > 0 && mf === 'drug_name')
+            ? `Drug ${i + 1}: ${mf.replace(/_/g, ' ')}`
+            : mf.replace(/_/g, ' ');
+          return `<tr class="${diff ? 'soap-diff-row' : ''}">
+                        <td class="soap-field-name" style="padding-left:1.5rem">${esc(label)}</td>
+                        <td class="${diff ? 'diff-cell' : ''}">${esc(gv)}</td>
+                        <td class="${diff ? 'diff-cell diff-cell-gen' : ''}">${esc(nv)}</td>
+                        <td class="diff-flag">${diff ? '⚠' : ''}</td>
+                    </tr>`;
+        }).join('');
+      }).join('');
+
+      return `<tr>
+                <td class="soap-field-name" colspan="4"
+                    style="background:var(--bg);font-weight:600;padding-top:0.5rem">
+                    Medications (${maxLen})
+                </td>
+            </tr>${medRows}`;
     }
-    const cls = score == null ? 'muted'
-      : score >= 90 ? 'high'
-        : score >= 75 ? 'med'
-          : score >= 60 ? 'warn' : 'low';
-    return `<div class="soap-panel ${cls}">
-        <div class="soap-panel-label">${esc(label)}</div>
-        <div class="soap-panel-score">${score != null ? Math.round(score) + '%' : '—'}</div>
-        <p class="comparison-summary">${esc(detail?.summary || '')}</p>
-      </div>`;
+
+    const gtStr = gtVal != null && typeof gtVal !== 'object' ? String(gtVal) : (gtVal == null ? '—' : JSON.stringify(gtVal));
+    const genStr = genVal != null && typeof genVal !== 'object' ? String(genVal) : (genVal == null ? '—' : JSON.stringify(genVal));
+    const isDiff = norm(gtStr) !== norm(genStr)
+      && gtStr !== 'NA' && genStr !== 'NA'
+      && gtStr !== '—' && genStr !== '—';
+
+    return `<tr class="${isDiff ? 'soap-diff-row' : ''}">
+            <td class="soap-field-name">${esc(field.replace(/_/g, ' '))}</td>
+            <td class="${isDiff ? 'diff-cell' : ''}">${esc(gtStr)}</td>
+            <td class="${isDiff ? 'diff-cell diff-cell-gen' : ''}">${esc(genStr)}</td>
+            <td class="diff-flag">${isDiff ? '⚠' : ''}</td>
+        </tr>`;
   }).join('');
 
-  container.innerHTML = `
-    <div class="section-card">
-      <div class="section-title">📋 SOAP Comparison</div>
-      <div class="soap-three-way">${panelHtml}</div>
-    </div>`;
+  return `<table class="soap-compare-table">
+        <thead><tr>
+            <th>Field</th>
+            <th>Ground Truth</th>
+            <th>Generated</th>
+            <th></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+    </table>`;
 }
 
-function computeWordDiff(groundTruth, generated) {
-  if (!groundTruth || !generated) {
+function generatedSOAPFromResult(result) {
+  if (hasKeys(result.soap_generated)) return result.soap_generated;
+  const tr = result.transcription_result || {};
+  if (tr.subjective || tr.objective || tr.assessment || tr.plan || tr.summary) {
     return {
-      gtHtml: esc(groundTruth || ''),
-      genHtml: esc(generated || ''),
+      subjective: tr.subjective,
+      objective: tr.objective,
+      assessment: tr.assessment,
+      plan: tr.plan,
+      summary: tr.summary,
     };
   }
-
-  const normalize = str => str
-    .toLowerCase()
-    .replace(/[.,\-–—;:!?()]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  const gtWords = (groundTruth || '').split(/\s+/);
-  const genWords = (generated || '').split(/\s+/);
-  const gtNorm = new Set(gtWords.map(normalize));
-
-  const gtHtml = gtWords.map(w => `<span>${esc(w)}</span>`).join(' ');
-
-  const genHtml = genWords.map(w => {
-    const norm = normalize(w);
-    if (gtNorm.has(norm)) {
-      return `<span>${esc(w)}</span>`;
-    }
-    const strippedW = norm.replace(/[^a-z0-9]/g, '');
-    const matchesPunctVariant = [...gtNorm].some(gt =>
-      gt.replace(/[^a-z0-9]/g, '') === strippedW
-    );
-    if (matchesPunctVariant) {
-      return `<span>${esc(w)}</span>`;
-    }
-    return `<span class="diff-highlight">${esc(w)}</span>`;
-  }).join(' ');
-
-  return { gtHtml, genHtml };
+  return {};
 }
 
-function renderTranscriptionDiff(groundTruth, generated) {
-  const container = document.getElementById('transcription-diff');
-  if (!container) return;
+function renderSOAPComparison(result) {
+  const comp = result.soap_comparison || {};
+  const scores = comp.scores || {};
+  const gtSOAP = result.soap_ground_truth || {};
+  const genSOAP = generatedSOAPFromResult(result);
 
-  const { gtHtml, genHtml } = computeWordDiff(groundTruth, generated);
+  if (!hasKeys(gtSOAP) && !hasKeys(genSOAP) && !hasKeys(comp)) return '';
 
-  container.innerHTML = `
-    <div class="diff-grid">
-      <div class="diff-col">
-        <div class="diff-col-header">Ground Truth</div>
-        <div class="diff-text">${gtHtml || '<em>No ground truth available</em>'}</div>
-      </div>
-      <div class="diff-col">
-        <div class="diff-col-header">Generated</div>
-        <div class="diff-text generated-col">${genHtml || '<em>No transcription</em>'}</div>
-      </div>
-    </div>`;
-}
+  const SECTIONS = ['subjective', 'objective', 'assessment', 'plan', 'summary'];
 
-function renderTranslation(result) {
-  const container = document.getElementById('translation-section');
-  if (!container) return;
+  const sectionsHtml = SECTIONS.map(sec => {
+    const gtSec = gtSOAP[sec];
+    const genSec = genSOAP[sec];
+    if (!gtSec && !genSec) return '';
 
-  const generated = result?.generated_translation
-    || result?.transcription_result?.debug?.translation
-    || result?.translation
-    || result?.text_translation
-    || '';
-  const groundTruth = result?.translation_ground_truth
-    || result?.ground_truth_translation
-    || '';
-
-  if (!generated && !groundTruth) {
-    container.style.display = 'none';
-    return;
-  }
-
-  const score = result?.translation_comparison?.similarity_score;
-  const scoreClass = score >= 90 ? 'high' : score >= 75 ? 'med' : score >= 60 ? 'warn' : 'low';
-  const scorePill = score != null
-    ? `<span class="accuracy-pill ${scoreClass}">${Math.round(score)}% match</span>`
-    : '';
-
-  container.style.display = 'block';
-  if (groundTruth) {
-    const { gtHtml, genHtml } = computeWordDiff(groundTruth, generated);
-    container.innerHTML = `
-    <div class="section-card">
-      <div class="section-title">🌐 Translation Comparison ${scorePill}</div>
-      <div class="diff-grid">
-        <div class="diff-col">
-          <div class="diff-col-header">Ground Truth</div>
-          <div class="diff-text">${gtHtml || '<em>No ground truth available</em>'}</div>
-        </div>
-        <div class="diff-col">
-          <div class="diff-col-header">Generated</div>
-          <div class="diff-text generated-col">${genHtml || '<em>No translation</em>'}</div>
-        </div>
-      </div>
-    </div>`;
-    return;
-  }
-
-  container.innerHTML = `
-    <div class="section-card">
-      <div class="section-title">🌐 Translation (Debug) ${scorePill}</div>
-      <div class="translation-text">${esc(generated)}</div>
-    </div>`;
-}
-
-function renderSOAPSummary(result) {
-  const container = document.getElementById('soap-section');
-  if (!container) return;
-
-  const tr = result?.transcription_result || {};
-  const subj = tr.subjective || result?.soap_subjective || {};
-  const obj = tr.objective || result?.soap_objective || {};
-  const asmt = tr.assessment || result?.soap_assessment || {};
-  const plan = tr.plan || result?.soap_plan || {};
-  const summary = tr.summary || result?.soap_summary || '';
-
-  const tabs = [
-    { id: 'subj', label: 'Subjective', content: subj },
-    { id: 'obj', label: 'Objective', content: obj },
-    { id: 'asmnt', label: 'Assessment', content: asmt },
-    { id: 'plan', label: 'Plan', content: plan },
-  ];
-
-  const tabHeaders = tabs.map((t, i) =>
-    `<button class="soap-tab ${i === 0 ? 'active' : ''}" type="button"
-             onclick="switchSOAPTab('${t.id}', this)">${esc(t.label)}</button>`
-  ).join('');
-
-  const tabContents = tabs.map((t, i) => `
-    <div id="soap-${t.id}" class="soap-content ${i === 0 ? 'active' : ''}">
-      ${renderSOAPFields(t.content)}
-    </div>
-  `).join('');
-
-  container.innerHTML = `
-    <div class="section-card">
-      <div class="section-title">📋 SOAP Summary</div>
-      ${summary ? `<div class="soap-summary-text">${esc(summary)}</div>` : ''}
-      <div class="soap-tabs">${tabHeaders}</div>
-      ${tabContents}
-    </div>`;
-}
-
-function renderSOAPFields(obj) {
-  if (!obj || typeof obj !== 'object') return '<em>No data</em>';
-  return Object.entries(obj).map(([key, val]) => {
-    const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-    let valueHtml = '';
-    if (Array.isArray(val)) {
-      valueHtml = val.map(v =>
-        typeof v === 'object'
-          ? `<div class="soap-nested">${renderSOAPFields(v)}</div>`
-          : `<span>${esc(String(v))}</span>`
-      ).join(', ');
-    } else if (typeof val === 'object' && val !== null) {
-      valueHtml = `<div class="soap-nested">${renderSOAPFields(val)}</div>`;
+    let content;
+    if (typeof gtSec === 'string' || typeof genSec === 'string') {
+      const norm = v => String(v || '').toLowerCase().replace(/[.,\-–]/g, '').trim();
+      const isDiff = norm(gtSec) !== norm(genSec);
+      content = `
+                <div class="diff-grid">
+                    <div class="diff-col">
+                        <div class="diff-col-header">Ground Truth</div>
+                        <div class="diff-text ${isDiff ? 'diff-text-warn' : ''}">${esc(gtSec || '—')}</div>
+                    </div>
+                    <div class="diff-col">
+                        <div class="diff-col-header">Generated</div>
+                        <div class="diff-text ${isDiff ? 'diff-text-warn' : ''}">${esc(genSec || '—')}</div>
+                    </div>
+                </div>`;
     } else {
-      valueHtml = val === 'NA' || val === '' || val == null
-        ? '<span class="soap-na">NA</span>'
-        : `<span>${esc(String(val))}</span>`;
+      content = soapFieldTable(gtSec, genSec, sec);
     }
-    return `
-      <div class="soap-field">
-        <div class="soap-field-label">${esc(label)}</div>
-        <div class="soap-field-value">${valueHtml}</div>
-      </div>`;
-  }).join('');
-}
 
-function switchSOAPTab(id, btn) {
-  document.querySelectorAll('.soap-tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.soap-content').forEach(c => c.classList.remove('active'));
-  btn.classList.add('active');
-  document.getElementById(`soap-${id}`)?.classList.add('active');
+    return makeCollapsible(
+      `soap-sec-${sec}`,
+      sec.charAt(0).toUpperCase() + sec.slice(1),
+      content,
+      { defaultOpen: false }
+    );
+  }).join('');
+
+  const soapGenScore = scores.gt_vs_generated ?? comp.gt_vs_generated?.similarity_score;
+  const soapRawScore = scores.gt_vs_raw ?? comp.gt_vs_raw?.similarity_score;
+  const soapDeltaScore = scores.raw_vs_generated ?? comp.raw_vs_generated?.similarity_score;
+
+  const scoreRow = `
+        <div class="soap-three-scores">
+            <div class="soap-score-item">
+                <div class="soap-score-label">GT → Generated</div>
+                ${scorePill(soapGenScore, comp.gt_vs_generated?.summary, 'GT vs Generated', 'soap-gt-gen')}
+            </div>
+            <div class="soap-score-item">
+                <div class="soap-score-label">GT → Raw LLM</div>
+                ${scorePill(soapRawScore, comp.gt_vs_raw?.summary, 'GT vs Raw', 'soap-gt-raw')}
+            </div>
+            <div class="soap-score-item">
+                <div class="soap-score-label">Raw → Generated</div>
+                ${scorePill(soapDeltaScore, comp.raw_vs_generated?.summary, 'Raw vs Generated', 'soap-raw-gen')}
+            </div>
+        </div>`;
+
+  const content = scoreRow + sectionsHtml;
+
+  return makeCollapsible('soap', '📋 SOAP Comparison', content, {
+    defaultOpen: true,
+    score: soapGenScore,
+    scoreReason: comp.gt_vs_generated?.summary,
+    scoreLabel: 'SOAP GT→Gen',
+  });
 }
 
 function renderMedicationValidation(result) {
-  const container = document.getElementById('medication-section');
-  if (!container) return;
+  const tr = result.transcription_result || {};
+  const debug = tr.debug || {};
+  const rawSoap = debug.raw_soap || debug['raw soap'] || {};
+  const medVal = result.medication_validation || {};
 
-  const medVal = result?.medication_validation;
-  const tr = result?.transcription_result || {};
+  const finalMeds = tr.plan?.medications || medVal.final_medications || [];
+  const rawMeds = rawSoap.plan?.medications || medVal.raw_medications || [];
+  const gtMeds = result.soap_ground_truth?.plan?.medications || [];
 
-  const finalMeds = tr?.plan?.medications
-    || medVal?.final_medications || [];
-  const rawMeds = tr?.debug?.raw_soap?.plan?.medications
-    || tr?.debug?.['raw soap']?.plan?.medications
-    || medVal?.raw_medications || [];
+  if (!finalMeds.length && !rawMeds.length && !gtMeds.length) return '';
 
-  const differences = medVal?.differences || [];
-  const diffMap = {};
-  differences.forEach(d => {
-    if (d.field) diffMap[`${d.drug}__${d.field}`] = d;
-  });
+  const FIELDS = ['drug_name', 'dose', 'schedule', 'duration', 'instructions', 'generic_name'];
+  const norm = v => String(v || '').toLowerCase().replace(/[.,\-–—\s]/g, '').trim();
+  const maxLen = Math.max(finalMeds.length, rawMeds.length, gtMeds.length);
+  const hasGT = gtMeds.length > 0;
+  const colHeaders = hasGT
+    ? '<th>Field</th><th>Raw LLM</th><th>Ground Truth</th><th>Final Generated</th>'
+    : '<th>Field</th><th>Raw LLM</th><th>Final Generated</th>';
 
-  const FIELDS = ['drug_name', 'generic_name', 'dose', 'schedule',
-    'duration', 'instructions', 'matched_drug_name'];
-
-  const maxLen = Math.max(finalMeds.length, rawMeds.length, 0);
-
-  const rows = Array.from({ length: maxLen }, (_, i) => {
+  const medsHtml = Array.from({ length: maxLen }, (_, i) => {
     const final = finalMeds[i] || {};
     const raw = rawMeds[i] || {};
-    const drugName = final.drug_name || raw.drug_name || `Drug ${i + 1}`;
+    const gt = gtMeds[i] || {};
+    const name = gt.drug_name || final.drug_name || raw.drug_name || `Drug ${i + 1}`;
 
-    return FIELDS.map((field, fi) => {
-      const finalVal = final[field] ?? '—';
-      const rawVal = raw[field] ?? '—';
-      const diff = diffMap[`${drugName}__${field}`];
-      const changed = String(rawVal) !== String(finalVal);
+    let drugDiffs = 0;
+    const rows = FIELDS.map(field => {
+      const rawVal = String(raw[field] ?? '—');
+      const gtVal = String(gt[field] ?? '—');
+      const finalVal = String(final[field] ?? '—');
 
-      return `
-        <tr>
-          ${fi === 0 ? `<td class="med-drug-name" rowspan="${FIELDS.length}">${esc(drugName)}</td>` : ''}
-          <td class="med-field-name">${esc(field.replace(/_/g, ' '))}</td>
-          <td class="${changed ? 'med-changed' : ''}">${esc(String(rawVal))}</td>
-          <td class="${changed ? 'med-changed' : ''}">
-            ${esc(String(finalVal))}
-            ${changed && diff?.severity
-              ? `<span class="med-diff-badge ${esc(diff.severity)}">${esc(diff.severity)}</span>`
-              : ''}
-          </td>
-        </tr>`;
+      const rawDiffFinal = norm(rawVal) !== norm(finalVal) && rawVal !== '—' && finalVal !== '—';
+      const gtDiffFinal = hasGT && norm(gtVal) !== norm(finalVal) && gtVal !== '—' && finalVal !== '—';
+      const gtDiffRaw = hasGT && norm(gtVal) !== norm(rawVal) && gtVal !== '—' && rawVal !== '—';
+
+      if (rawDiffFinal || gtDiffFinal) drugDiffs++;
+
+      if (hasGT) {
+        return `<tr>
+                    <td class="med-field">${esc(field.replace(/_/g, ' '))}</td>
+                    <td class="${gtDiffRaw ? 'diff-cell-raw' : ''}">${esc(rawVal)}</td>
+                    <td class="med-gt-col">${esc(gtVal)}</td>
+                    <td class="${gtDiffFinal ? 'diff-cell-gen' : rawDiffFinal ? 'diff-cell-raw' : ''}">${esc(finalVal)}</td>
+                </tr>`;
+      }
+      return `<tr>
+                    <td class="med-field">${esc(field.replace(/_/g, ' '))}</td>
+                    <td class="${rawDiffFinal ? 'diff-cell-raw' : ''}">${esc(rawVal)}</td>
+                    <td class="${rawDiffFinal ? 'diff-cell-gen' : ''}">${esc(finalVal)}</td>
+                </tr>`;
     }).join('');
+
+    const badge = drugDiffs === 0
+      ? '<span class="score-pill high" style="font-size:11px;padding:2px 8px">✓</span>'
+      : `<span class="score-pill ${drugDiffs <= 1 ? 'warn' : 'low'}" style="font-size:11px;padding:2px 8px">${drugDiffs} diff${drugDiffs !== 1 ? 's' : ''}</span>`;
+
+    const content = `
+            <table class="med-compare-table">
+                <thead><tr>${colHeaders}</tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
+
+    return makeCollapsible(`med-drug-${i}`, `💊 ${esc(name)}`, content, {
+      defaultOpen: true,
+      headerRight: `<span onclick="event.stopPropagation()">${badge}</span>`,
+    });
   }).join('');
 
-  const diffSummary = differences.length > 0
-    ? `<div class="med-diff-summary warning">
-           ⚠ ${differences.length} difference${differences.length > 1 ? 's' : ''} found
-           ${medVal?.has_critical_differences
-      ? ' — <strong>critical differences present</strong>' : ''}
-       </div>`
-    : maxLen > 0
-      ? '<div class="med-diff-summary success">✓ Raw and final medications match</div>'
-      : '';
+  const totalDiffs = medVal.difference_count || 0;
+  const hasCritical = medVal.has_critical_differences;
+  const overallBadge = totalDiffs === 0
+    ? '<span class="score-pill high" style="font-size:12px">✓ All Match</span>'
+    : `<span class="score-pill ${hasCritical ? 'low' : 'warn'}" style="font-size:12px">${totalDiffs} diff${totalDiffs !== 1 ? 's' : ''}</span>`;
 
-  container.innerHTML = `
-    <div class="section-card">
-      <div class="section-title">💊 Medication Validation</div>
-      ${diffSummary}
-      ${maxLen > 0 ? `
-      <table class="med-table">
-        <thead>
-          <tr>
-            <th>Drug</th>
-            <th>Field</th>
-            <th>Raw LLM Output</th>
-            <th>Final Output (SNOMED)</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>` : '<p>No medications recorded for this consultation.</p>'}
-    </div>`;
+  return makeCollapsible('medication', '💊 Medication Validation', medsHtml, {
+    defaultOpen: true,
+    headerRight: `<span onclick="event.stopPropagation()">${overallBadge}</span>`,
+  });
 }
 
-function renderMedicalDifferences(comparison) {
-  const container = document.getElementById('medical-diff-section');
-  if (!container) return;
+function computeWordDiff(a, b) {
+  if (!a && !b) return { gtHtml: '', genHtml: '' };
+  if (!a) return { gtHtml: '', genHtml: esc(b) };
+  if (!b) return { gtHtml: esc(a), genHtml: '' };
 
-  const structured = comparison?.medical_difference_details
-    || (comparison?.medical_differences || []).filter(d => typeof d === 'object' && d.severity);
-  const diffs = structured.filter(d => d.severity);
+  const norm = s => String(s)
+    .toLowerCase()
+    .replace(/[.,\-–—;:!?()[\]{}"“”‘’'`/\\]/g, '')
+    .replace(/\s+/g, '')
+    .trim();
 
-  if (diffs.length === 0) {
-    container.innerHTML = `
-      <div class="section-card">
-        <div class="section-title">🏥 Medical Differences</div>
-        <div class="no-diffs">✓ No significant medical differences found</div>
-      </div>`;
-    return;
-  }
+  const aWords = String(a).split(/\s+/).filter(Boolean);
+  const bWords = String(b).split(/\s+/).filter(Boolean);
 
-  const rows = diffs.map(d => `
-    <div class="med-diff-row ${esc(d.severity || '')}">
-      <div class="med-diff-type">
-        <span class="severity-badge ${esc(d.severity || '')}">${esc(d.severity || '')}</span>
-        <span class="diff-type-label">${esc((d.type || 'difference').replace(/_/g, ' '))}</span>
-      </div>
-      <div class="med-diff-values">
-        <div class="diff-value ground-truth">
-          <span class="diff-label">Ground Truth</span>
-          <span>${esc(d.ground_truth || '—')}</span>
-        </div>
-        <div class="diff-arrow">→</div>
-        <div class="diff-value generated">
-          <span class="diff-label">Generated</span>
-          <span class="diff-highlight">${esc(d.generated || '—')}</span>
-        </div>
-      </div>
-    </div>
-  `).join('');
+  const aNorm = new Set(aWords.map(norm).filter(Boolean));
+  const bNorm = new Set(bWords.map(norm).filter(Boolean));
 
-  const score = comparison?.similarity_score;
-  const scoreClass = score >= 95 ? 'high' : score >= 80 ? 'med' : score >= 60 ? 'warn' : 'low';
-  container.innerHTML = `
-    <div class="section-card">
-      <div class="section-title">
-        🏥 Medical Differences
-        ${score != null
-    ? `<span class="accuracy-pill ${scoreClass}">${Math.round(score)}% match</span>`
-    : ''}
-      </div>
-      <p class="comparison-summary">${esc(comparison?.summary || '')}</p>
-      ${rows}
-    </div>`;
+  const bigrams = words => {
+    const bg = new Set();
+    for (let i = 0; i < words.length - 1; i++) {
+      const pair = norm(words[i] + words[i + 1]);
+      if (pair) bg.add(pair);
+    }
+    return bg;
+  };
+  const aBigrams = bigrams(aWords);
+  const bBigrams = bigrams(bWords);
+
+  const isInOther = (word, idx, words, otherNorm, otherBigrams) => {
+    const n = norm(word);
+    if (!n) return true;
+    if (otherNorm.has(n)) return true;
+    if (idx < words.length - 1) {
+      const pair = norm(word + words[idx + 1]);
+      if (pair && (otherBigrams.has(pair) || otherNorm.has(pair))) return true;
+    }
+    if (idx > 0) {
+      const pair = norm(words[idx - 1] + word);
+      if (pair && (otherBigrams.has(pair) || otherNorm.has(pair))) return true;
+    }
+    return false;
+  };
+
+  const gtHtml = aWords.map((w, i) =>
+    !isInOther(w, i, aWords, bNorm, bBigrams)
+      ? `<span class="diff-missing" title="Missing in generated">${esc(w)}</span>`
+      : `<span>${esc(w)}</span>`
+  ).join(' ');
+
+  const genHtml = bWords.map((w, i) =>
+    !isInOther(w, i, bWords, aNorm, aBigrams)
+      ? `<span class="diff-wrong" title="Not in ground truth">${esc(w)}</span>`
+      : `<span>${esc(w)}</span>`
+  ).join(' ');
+
+  return { gtHtml, genHtml };
 }
 
 function showDashboard() {
@@ -958,7 +1080,8 @@ function esc(s) {
 }
 
 window.openTestDetail = openTestDetail;
-window.switchSOAPTab = switchSOAPTab;
+window.toggleReason = toggleReason;
+window.toggleSection = toggleSection;
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initPage);
