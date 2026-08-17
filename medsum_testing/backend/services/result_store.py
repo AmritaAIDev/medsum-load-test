@@ -78,7 +78,7 @@ def _iter_result_files(full: bool = False):
 def find_previous_result(
     language: str, audio_filename: str, exclude_id: str
 ) -> Optional[TestResult]:
-    """Most recent completed result for the same audio file."""
+    """Most recent completed result for the same language and audio file."""
     results_dir = get_results_dir()
     matches: list[tuple[float, TestResult]] = []
     for path in results_dir.glob("*.json"):
@@ -89,6 +89,7 @@ def find_previous_result(
                 data = json.load(f)
             if (
                 data.get("audio_filename") == audio_filename
+                and data.get("language") == language
                 and data.get("status") == "complete"
             ):
                 matches.append((path.stat().st_mtime, TestResult.from_dict(data)))

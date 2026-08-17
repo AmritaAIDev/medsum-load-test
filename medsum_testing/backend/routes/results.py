@@ -8,10 +8,12 @@ import traceback
 import requests
 from flask import Blueprint, jsonify
 
+from medsum_testing.backend.models.test_result import is_passed_final_result
 from medsum_testing.backend.services.config_loader import get_config
 from medsum_testing.backend.services.drive_service import (
     _match_key,
     get_drive_service,
+    list_drive_children,
     list_test_cases,
 )
 from medsum_testing.backend.services.medsum_api import authenticate_doctor, verify_patient
@@ -33,6 +35,8 @@ def _normalize_batch_response(data: dict, source: str = "django") -> dict:
     total = stats.get("total", data.get("total", len(runs)))
     avg_accuracy = stats.get("avg_accuracy", data.get("avg_accuracy"))
     passed = stats.get("passed_output_validation", data.get("passed", 0))
+    if any(r.get("final_result") for r in runs):
+        passed = sum(1 for r in runs if is_passed_final_result(r.get("final_result")))
 
     return {
         "batch_id": data.get("batch_id"),
@@ -65,7 +69,7 @@ def _get_batch_from_local(batch_id: str):
     completed = sum(1 for r in batch_runs if r.get("status") == "complete")
     failed = sum(1 for r in batch_runs if r.get("status") == "failed")
     pending = sum(1 for r in batch_runs if r.get("status") in ("pending", "running"))
-    passed = sum(1 for r in batch_runs if r.get("final_result") == "pass")
+    passed = sum(1 for r in batch_runs if is_passed_final_result(r.get("final_result")))
 
     return jsonify(_normalize_batch_response({
         "batch_id": batch_id,
@@ -288,23 +292,15 @@ def debug_drive_raw():
         service = get_drive_service(config)
         root_id = config["google_drive"]["root_folder_id"]
 
-        folders_resp = service.files().list(
-            q=f"'{root_id}' in parents and trashed = false",
-            fields="files(id, name, mimeType)",
-            pageSize=200,
-        ).execute()
-
-        folders = folders_resp.get("files", [])
+        folders = list_drive_children(service, root_id, fields="files(id, name, mimeType)")
         dump = []
 
         for folder in folders:
-            files_resp = service.files().list(
-                q=f"'{folder['id']}' in parents and trashed = false",
+            files = list_drive_children(
+                service,
+                folder["id"],
                 fields="files(id, name, mimeType, fileExtension, size)",
-                pageSize=200,
-            ).execute()
-
-            files = files_resp.get("files", [])
+            )
             dump.append(
                 {
                     "folder_id": folder["id"],

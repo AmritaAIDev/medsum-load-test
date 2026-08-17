@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -11,9 +12,9 @@ from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from medsum_testing.backend.routes.test_runner import execute_test_run
+from medsum_testing.backend.routes.test_runner import _run_and_store
 from medsum_testing.backend.services import medsum_api
-from medsum_testing.backend.services.config_loader import get_config
+from medsum_testing.backend.services.config_loader import get_config, get_results_dir
 from medsum_testing.backend.services.drive_service import list_test_cases
 from medsum_testing.backend.services.result_store import has_recent_result
 
@@ -21,6 +22,7 @@ logger = logging.getLogger("medsum_scheduler")
 
 _scheduler = BackgroundScheduler()
 _schedule_lock = threading.Lock()
+_run_lock_fh = None
 _schedule_state: dict = {
     "enabled": False,
     "cron": "0 2 * * *",
@@ -29,6 +31,67 @@ _schedule_state: dict = {
     "next_run": None,
     "ai_model": "deepseek",
 }
+
+
+def _acquire_run_lock() -> bool:
+    """Non-blocking exclusive lock so only one WSGI worker executes a scheduled suite."""
+    global _run_lock_fh
+    if _run_lock_fh is not None:
+        return False
+    lock_path = get_results_dir() / ".scheduler.lock"
+    fh = None
+    try:
+        fh = open(lock_path, "a+b")
+        if os.name == "nt":
+            import msvcrt
+
+            fh.seek(0)
+            if fh.read(1) == b"":
+                fh.write(b"\0")
+                fh.flush()
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()).encode())
+        fh.flush()
+        _run_lock_fh = fh
+        return True
+    except OSError:
+        if fh is not None:
+            try:
+                fh.close()
+            except OSError:
+                pass
+        return False
+
+
+def _release_run_lock() -> None:
+    global _run_lock_fh
+    fh = _run_lock_fh
+    _run_lock_fh = None
+    if fh is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        fh.close()
+    except OSError:
+        pass
 
 
 def run_all_tests(ai_model: str, skip_recent: bool = True) -> list[dict]:
@@ -49,6 +112,11 @@ def run_all_tests(ai_model: str, skip_recent: bool = True) -> list[dict]:
             _schedule_state["last_run_status"] = status
         return status
 
+    batch_id = str(uuid.uuid4())
+    medsum_api.create_batch(
+        batch_id, ai_model, config, token, total_files=len(test_cases)
+    )
+
     max_parallel = config.get("scheduler", {}).get("max_parallel_tests", 2)
     results: list[dict] = []
 
@@ -61,8 +129,15 @@ def run_all_tests(ai_model: str, skip_recent: bool = True) -> list[dict]:
                 "reason": "Result already exists from the last 60 seconds",
             }
         test_id = str(uuid.uuid4())
-        result = execute_test_run(
-            tc["language"], audio, ai_model, test_id=test_id, token=token
+        result = _run_and_store(
+            test_id,
+            tc["language"],
+            audio,
+            ai_model,
+            batch_id,
+            tc.get("folder_label", ""),
+            "scheduler",
+            token,
         )
         if result.status == "complete":
             return {"audio": audio, "status": "complete", "test_id": test_id}
@@ -78,6 +153,19 @@ def run_all_tests(ai_model: str, skip_recent: bool = True) -> list[dict]:
         _schedule_state["last_run_status"] = results
     logger.info("Scheduled run complete: %s", results)
     return results
+
+
+def _cron_job(ai_model: str) -> None:
+    """Cron callback: only one WSGI worker actually runs the suite."""
+    if not _acquire_run_lock():
+        logger.info(
+            "Cron run skipped — another worker is already executing the scheduled suite"
+        )
+        return
+    try:
+        run_all_tests(ai_model)
+    finally:
+        _release_run_lock()
 
 
 def start_scheduler(config: dict) -> None:
@@ -97,10 +185,12 @@ def start_scheduler(config: dict) -> None:
         _scheduler = BackgroundScheduler()
 
         _scheduler.add_job(
-            func=lambda: run_all_tests(ai_model),
+            func=lambda: _cron_job(ai_model),
             trigger=CronTrigger.from_crontab(cron),
             id="medsum_scheduled_run",
             replace_existing=True,
+            max_instances=1,
+            coalesce=True,
         )
         _scheduler.start()
 

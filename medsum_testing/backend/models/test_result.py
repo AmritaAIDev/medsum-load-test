@@ -6,6 +6,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
+PASSED_FINAL_RESULTS = frozenset({"pass", "complete_no_accuracy"})
+
+
+def is_passed_final_result(value: str | None) -> bool:
+    """True for successful completions, including runs with no ground-truth scoring."""
+    return (value or "") in PASSED_FINAL_RESULTS
+
 
 @dataclass
 class ComparisonResult:

@@ -63,12 +63,6 @@ def _build_db_payload(result: TestResult) -> dict:
     tr = result.transcription_result or {}
     debug = tr.get("debug") or {}
 
-    final_result = result.final_result
-    if final_result in ("complete_no_accuracy", "review"):
-        final_result = "pass" if final_result == "complete_no_accuracy" else "fail"
-    elif final_result == "failed":
-        final_result = "fail"
-
     return {
         "test_id": result.test_id,
         "batch_id": result.batch_id or None,
@@ -108,6 +102,7 @@ def _build_db_payload(result: TestResult) -> dict:
         "soap_comparison": result.soap_comparison,
 
         "comparison": result.comparison or _comparison_to_dict(result.transcription_comparison),
+        "final_result": result.final_result,
         "ai_model_used": result.ai_model_used or result.ai_model,
 
         "medication_validation": result.medication_validation,
@@ -121,7 +116,6 @@ def _build_db_payload(result: TestResult) -> dict:
         "previous_similarity_score": result.previous_similarity_score,
         "regression_vs_previous": result.regression_vs_previous or "na",
 
-        "final_result": final_result,
         "error_message": " | ".join(
             part for part in (
                 "; ".join(result.errors) if result.errors else "",
@@ -264,24 +258,6 @@ def execute_test_run(
             None,
         )
         if not case:
-            case = next(
-                (
-                    c
-                    for c in cases
-                    if c.get("status") == "ready"
-                    and c["audio_filename"] == audio_filename
-                ),
-                None,
-            )
-            if case:
-                log.warning(
-                    "[%s] Matched by audio filename only (requested=%s, found=%s)",
-                    test_id,
-                    language,
-                    case["language"],
-                )
-
-        if not case:
             available = [
                 (c["language"], c["audio_filename"])
                 for c in cases
@@ -291,6 +267,11 @@ def execute_test_run(
                 f"No test case found for language='{language}', "
                 f"audio_filename='{audio_filename}'. Available: {available}"
             )
+
+        language = case["language"]
+        audio_filename = case["audio_filename"]
+        result.language = language
+        result.audio_filename = audio_filename
 
         log.info("[%s] Test case found: %s", test_id, case.get("folder_label", case["language"]))
         result.folder_label = case.get("folder_label", "")
@@ -794,7 +775,7 @@ def _run_and_store(
     folder_label: str = "",
     initiated_by: str = "manual",
     token: str | None = None,
-) -> None:
+) -> TestResult:
     log.info("[%s] Background thread started", test_id)
     config = get_config()
 
@@ -816,7 +797,7 @@ def _run_and_store(
             )
             result.errors.append(f"Auth failed: {auth_exc}")
             save_result(result)
-            return
+            return result
 
     try:
         medsum_api.save_test_run(
@@ -856,21 +837,22 @@ def _run_and_store(
             )
             _apply_django_refs(result, django_resp)
             save_result(result)
+        return result
     except Exception as exc:
         tb = traceback.format_exc()
         log.error("[%s] Unhandled exception in background thread: %s", test_id, exc)
         log.error("[%s] Traceback:\n%s", test_id, tb)
+        result = TestResult(
+            test_id=test_id,
+            status="failed",
+            language=language,
+            audio_filename=audio_filename,
+            ai_model=ai_model,
+            final_result="failed",
+            batch_id=batch_id or "",
+            folder_label=folder_label,
+        )
         try:
-            result = TestResult(
-                test_id=test_id,
-                status="failed",
-                language=language,
-                audio_filename=audio_filename,
-                ai_model=ai_model,
-                final_result="failed",
-                batch_id=batch_id or "",
-                folder_label=folder_label,
-            )
             _ensure_local_refs(result)
             result.errors.append(str(exc))
             result.errors.append(tb)
@@ -884,6 +866,7 @@ def _run_and_store(
                 save_result(result)
         except Exception as save_exc:
             log.error("[%s] Failed to save result: %s", test_id, save_exc)
+        return result
 
 
 @bp.route("/drive-files", methods=["GET"])

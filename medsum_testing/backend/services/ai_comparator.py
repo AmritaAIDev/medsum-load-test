@@ -66,7 +66,10 @@ def _get_client(model: str, config: dict) -> tuple[OpenAI, str]:
         return client, model_name
 
     client = OpenAI(api_key=(ai_config.get("openai_api_key") or "").strip())
-    model_name = ai_config.get("openai_model", "gpt-4o")
+    if model in ("gpt-4", "gpt-4o-mini", "gpt-4o"):
+        model_name = model
+    else:
+        model_name = ai_config.get("openai_model", "gpt-4o")
     return client, model_name
 
 
@@ -79,6 +82,16 @@ def parse_ai_json(raw: str) -> dict[str, Any]:
         if match:
             return json.loads(match.group())
         raise
+
+
+def _models_to_try(model: str) -> list[str]:
+    """Requested comparison model first; fall back to gpt-4o-mini when it differs."""
+    if model == "deepseek":
+        return ["deepseek", "gpt-4o-mini"]
+    models = [model]
+    if model != "gpt-4o-mini":
+        models.append("gpt-4o-mini")
+    return models
 
 
 def _format_medical_diffs(items: list[Any]) -> list[str]:
@@ -270,7 +283,7 @@ Schema:
         "Compare these SOAP notes and return JSON only."
     )
 
-    models_to_try = ["deepseek", "gpt-4o-mini"] if model == "deepseek" else ["gpt-4o-mini"]
+    models_to_try = _models_to_try(model)
     last_error = None
 
     for attempt_model in models_to_try:
@@ -287,8 +300,7 @@ Schema:
                 temperature=0,
             )
             raw = resp.choices[0].message.content or "{}"
-            clean = re.sub(r"```json|```", "", raw).strip()
-            result = json.loads(clean)
+            result = parse_ai_json(raw)
             log.info(
                 "SOAP_COMPARE ✓ model=%s score=%s",
                 attempt_model,
@@ -409,7 +421,7 @@ Schema:
         "Compare and return JSON only."
     )
 
-    models_to_try = ["deepseek", "gpt-4o-mini"] if model == "deepseek" else ["gpt-4o-mini"]
+    models_to_try = _models_to_try(model)
     last_error = None
 
     for attempt_model in models_to_try:
@@ -426,8 +438,7 @@ Schema:
                 temperature=0,
             )
             raw = resp.choices[0].message.content or "{}"
-            clean = re.sub(r"```json|```", "", raw).strip()
-            result = json.loads(clean)
+            result = parse_ai_json(raw)
             log.info(
                 "TRANS_COMPARE ✓ model=%s score=%s",
                 attempt_model,
@@ -478,7 +489,7 @@ def compare_transcriptions(
         f"GROUND TRUTH:\n{ground_truth}\n\nGENERATED:\n{generated}"
     )
 
-    models_to_try = ["deepseek", "gpt-4o-mini"] if model == "deepseek" else ["gpt-4o-mini"]
+    models_to_try = _models_to_try(model)
     log.info("AI_COMPARE: will try models in order: %s", models_to_try)
 
     last_error = None
@@ -632,9 +643,27 @@ def compare_medication_lists(
         )
 
 
+def _as_med_dict(item: Any) -> dict:
+    if isinstance(item, dict):
+        return item
+    if isinstance(item, str):
+        return {"drug_name": item}
+    return {"drug_name": str(item)}
+
+
+def _med_identity(med: dict) -> str:
+    """Normalized drug identity for matching across reordered lists."""
+    for field in ("matched_drug_name", "generic_name", "drug_name"):
+        val = str(med.get(field) or "").strip().lower()
+        if val and val not in ("na", "n/a", "none"):
+            return val
+    return ""
+
+
 def validate_medications(transcription_result: dict) -> dict:
     """
     Cross-check plan.medications vs debug.raw_soap.plan.medications.
+    Entries are paired by drug identity, not list index.
     """
     final_meds: list = []
     raw_meds: list = []
@@ -656,34 +685,13 @@ def validate_medications(transcription_result: dict) -> dict:
     except Exception:
         pass
 
+    final_meds = [_as_med_dict(m) for m in (final_meds or [])]
+    raw_meds = [_as_med_dict(m) for m in (raw_meds or [])]
+
     differences = []
-    max_len = max(len(final_meds), len(raw_meds))
+    used_final: set[int] = set()
 
-    for i in range(max_len):
-        final = final_meds[i] if i < len(final_meds) else None
-        raw = raw_meds[i] if i < len(raw_meds) else None
-
-        if final is None and raw is not None:
-            differences.append({
-                "type": "removed_in_final",
-                "raw_drug": raw.get("drug_name", ""),
-                "severity": "high",
-                "detail": f"Drug '{raw.get('drug_name')}' present in raw but missing in final output",
-            })
-            continue
-
-        if raw is None and final is not None:
-            differences.append({
-                "type": "added_in_final",
-                "final_drug": final.get("drug_name", ""),
-                "severity": "medium",
-                "detail": f"Drug '{final.get('drug_name')}' added in final but not in raw",
-            })
-            continue
-
-        if final is None or raw is None:
-            continue
-
+    def _compare_fields(raw: dict, final: dict) -> None:
         for field in ("drug_name", "dose", "schedule", "duration", "generic_name", "instructions"):
             raw_val = raw.get(field, "NA")
             final_val = final.get(field, "NA")
@@ -710,6 +718,37 @@ def validate_medications(transcription_result: dict) -> dict:
                         f"→ '{final['matched_drug_name']}'"
                     ),
                 })
+
+    for raw in raw_meds:
+        key = _med_identity(raw)
+        match_idx = None
+        if key:
+            for i, final in enumerate(final_meds):
+                if i in used_final:
+                    continue
+                if _med_identity(final) == key:
+                    match_idx = i
+                    break
+        if match_idx is None:
+            differences.append({
+                "type": "removed_in_final",
+                "raw_drug": raw.get("drug_name", ""),
+                "severity": "high",
+                "detail": f"Drug '{raw.get('drug_name')}' present in raw but missing in final output",
+            })
+            continue
+        used_final.add(match_idx)
+        _compare_fields(raw, final_meds[match_idx])
+
+    for i, final in enumerate(final_meds):
+        if i in used_final:
+            continue
+        differences.append({
+            "type": "added_in_final",
+            "final_drug": final.get("drug_name", ""),
+            "severity": "medium",
+            "detail": f"Drug '{final.get('drug_name')}' added in final but not in raw",
+        })
 
     return {
         "raw_medications": raw_meds,

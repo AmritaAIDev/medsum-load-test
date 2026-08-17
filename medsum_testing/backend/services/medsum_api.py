@@ -309,6 +309,31 @@ def verify_patient(patient_id: str, token: str, config: dict) -> dict:
     return data
 
 
+AUDIO_CONTENT_TYPES = {
+    ".mp3": "audio/mpeg",
+    ".mpeg": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".wave": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".mp4": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".webm": "audio/webm",
+    ".aac": "audio/aac",
+}
+
+
+def _audio_upload_meta(audio_filename: str) -> tuple[str, str]:
+    """Keep the original extension and MIME type; do not force .mp3 / audio/mpeg."""
+    name = audio_filename or "audio.mp3"
+    dot = name.rfind(".")
+    ext = name[dot:].lower() if dot >= 0 else ""
+    if ext in AUDIO_CONTENT_TYPES:
+        return name, AUDIO_CONTENT_TYPES[ext]
+    if ext:
+        return name, "application/octet-stream"
+    return f"{name}.mp3", "audio/mpeg"
+
+
 def upload_audio(
     audio_bytes: bytes,
     audio_filename: str,
@@ -338,9 +363,9 @@ def upload_audio(
         len(audio_bytes),
     )
 
-    upload_name = audio_filename if audio_filename.endswith(".mp3") else f"{audio_filename}.mp3"
+    upload_name, content_type = _audio_upload_meta(audio_filename)
     files = {
-        "audio": (upload_name, audio_bytes, "audio/mpeg"),
+        "audio": (upload_name, audio_bytes, content_type),
     }
     data: dict[str, str] = {
         "patient_id": str(patient_id),

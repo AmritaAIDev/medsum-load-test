@@ -250,7 +250,7 @@ function computeStatsFromResults(results) {
   const scores = completed
     .map(r => r.comparison?.similarity_score ?? r.accuracy_score ?? r.transcription_comparison?.similarity_score)
     .filter(s => s != null);
-  const passed = completed.filter(r => r.final_result === 'pass').length;
+  const passed = completed.filter(r => r.final_result === 'pass' || r.final_result === 'complete_no_accuracy').length;
   return {
     total: driveStats.total || results.length,
     with_transcript: driveStats.with_transcript,

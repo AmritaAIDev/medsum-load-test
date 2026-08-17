@@ -161,6 +161,59 @@ def get_drive_service(config: dict | None = None):
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
+def list_drive_children(
+    service, parent_id: str, fields: str = "files(id, name, mimeType)"
+) -> list[dict]:
+    """Return all non-trashed children of a Drive folder, following pagination."""
+    return _list_drive_files(
+        service,
+        query=f"'{parent_id}' in parents and trashed = false",
+        fields=fields,
+    )
+
+
+def _list_drive_files(service, query: str, fields: str, page_size: int = 200) -> list[dict]:
+    files: list[dict] = []
+    page_token = None
+    if "nextPageToken" not in fields:
+        fields = f"nextPageToken, {fields}"
+    while True:
+        kwargs = {
+            "q": query,
+            "fields": fields,
+            "pageSize": page_size,
+        }
+        if page_token:
+            kwargs["pageToken"] = page_token
+        resp = service.files().list(**kwargs).execute()
+        files.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return files
+
+
+def _set_unique_map_entry(
+    mapping: dict[str, dict],
+    key: str,
+    file: dict,
+    kind: str,
+    folder_name: str,
+) -> None:
+    existing = mapping.get(key)
+    if existing is not None and existing.get("id") != file.get("id"):
+        log.warning(
+            "Duplicate %s match key %r in folder %s: keeping %r, ignoring %r",
+            kind,
+            key,
+            folder_name,
+            existing.get("name"),
+            file.get("name"),
+        )
+        return
+    mapping[key] = file
+
+
 def invalidate_test_cases_cache() -> None:
     """Call when Drive files may have changed."""
     _test_cases_cache["data"] = None
@@ -184,13 +237,7 @@ def list_test_cases(config: dict | None = None) -> list[dict]:
     service = get_drive_service(config)
     root_id = config["google_drive"]["root_folder_id"]
 
-    folders_resp = service.files().list(
-        q=f"'{root_id}' in parents and trashed = false",
-        fields="files(id, name, mimeType)",
-        pageSize=200,
-    ).execute()
-
-    folders = folders_resp.get("files", [])
+    folders = list_drive_children(service, root_id, fields="files(id, name, mimeType)")
     logging.getLogger("medsum_drive").info(
         "Found %d subfolders: %s", len(folders), [f["name"] for f in folders]
     )
@@ -202,13 +249,11 @@ def list_test_cases(config: dict | None = None) -> list[dict]:
 
         language = extract_language(folder["name"])
 
-        files_resp = service.files().list(
-            q=f"'{folder['id']}' in parents and trashed = false",
-            fields="nextPageToken, files(id, name, mimeType, fileExtension)",
-            pageSize=200,
-        ).execute()
-
-        files = files_resp.get("files", [])
+        files = list_drive_children(
+            service,
+            folder["id"],
+            fields="files(id, name, mimeType, fileExtension)",
+        )
         logging.getLogger("medsum_drive").info(
             "Folder %s: %d files — %s",
             folder["name"],
@@ -237,18 +282,25 @@ def list_test_cases(config: dict | None = None) -> list[dict]:
 
         transcript_map: dict[str, dict] = {}
         for tf in transcript_files:
-            key = _match_key(tf["name"])
-            transcript_map[key] = tf
+            _set_unique_map_entry(
+                transcript_map, _match_key(tf["name"]), tf, "transcript", folder["name"]
+            )
 
         soap_map: dict[str, dict] = {}
         for sf in soap_gt_files:
-            key = get_soap_base(sf["name"])
-            soap_map[key] = sf
+            _set_unique_map_entry(
+                soap_map, get_soap_base(sf["name"]), sf, "SOAP GT", folder["name"]
+            )
 
         translation_map: dict[str, dict] = {}
         for tf in translation_gt_files:
-            key = get_translation_base(tf["name"])
-            translation_map[key] = tf
+            _set_unique_map_entry(
+                translation_map,
+                get_translation_base(tf["name"]),
+                tf,
+                "translation GT",
+                folder["name"],
+            )
 
         for af in audio_files:
             audio_key = _match_key(af["name"])
