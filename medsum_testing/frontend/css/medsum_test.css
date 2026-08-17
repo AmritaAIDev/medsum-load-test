@@ -1099,4 +1099,112 @@ body {
 
 @media (max-width: 1100px) {
   .diff-grid { grid-template-columns: 1fr; }
+  .rx-cols { grid-template-columns: 1fr; }
+  .rx-med-field { grid-template-columns: 100px 1fr; }
+  .rx-arrow { display: none; }
+}
+
+/* Prescription Comparison */
+.rx-row {
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.rx-row:last-child { border-bottom: none; }
+.rx-row-diff { background: #FFFDE7; border-radius: 6px; padding: 0.75rem; }
+
+.rx-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  margin-bottom: 0.5rem;
+}
+
+.rx-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.rx-col {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.rx-col.gt  { border-left: 3px solid #A5D6A7; }
+.rx-col.gen { border-left: 3px solid #90CAF9; }
+.rx-col.gen.has-diff { border-left: 3px solid #EF9A9A; background: #FFF5F5; }
+
+.rx-col-header {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  margin-bottom: 0.25rem;
+}
+.rx-value {
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+.rx-meds-list { margin-top: 0.25rem; }
+
+.rx-med-item {
+  margin-bottom: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.rx-med-item.rx-med-diff { border-color: #FFCC80; }
+
+.rx-med-name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border);
+}
+
+.rx-med-field {
+  display: grid;
+  grid-template-columns: 120px 1fr auto 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.75rem;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.rx-med-field:last-child { border-bottom: none; }
+.rx-med-field.rx-field-diff { background: #FFF8E1; }
+
+.rx-med-key {
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: capitalize;
+}
+.rx-med-gt  { color: var(--text-secondary); }
+.rx-arrow   { color: var(--text-muted); font-size: 10px; }
+.rx-med-gen { color: var(--text-primary); }
+.rx-med-gen.diff-val {
+  color: #C62828;
+  font-weight: 600;
+}
+
+em.na { color: var(--text-muted); font-style: italic; }
+
+.rx-meds-heading {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  margin: 1rem 0 0.5rem;
 }

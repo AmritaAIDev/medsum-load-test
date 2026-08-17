@@ -545,6 +545,7 @@ function renderDetailPage(result) {
       renderTranscriptionComparison(result),
       renderTranslationComparison(result),
       renderSOAPComparison(result),
+      renderPrescriptionComparison(result),
       renderMedicationValidation(result),
     ].filter(Boolean).join('');
   }
@@ -900,6 +901,136 @@ function renderSOAPComparison(result) {
     score: soapGenScore,
     scoreReason: comp.gt_vs_generated?.summary,
     scoreLabel: 'SOAP GT→Gen',
+  });
+}
+
+function rxFieldText(val) {
+  if (val == null || val === '') return '';
+  if (Array.isArray(val)) {
+    return val.map(v => (typeof v === 'object' && v ? (v.diagnosis || v.name || JSON.stringify(v)) : String(v))).join(', ');
+  }
+  if (typeof val === 'object') {
+    return val.diagnosis || val.chief_complaint || val.name || '';
+  }
+  return String(val);
+}
+
+function renderPrescriptionComparison(result) {
+  const gtSOAP = result.soap_ground_truth || {};
+  const genSOAP = generatedSOAPFromResult(result);
+
+  const gtComplaint = rxFieldText(gtSOAP.subjective?.chief_complaint);
+  const genComplaint = rxFieldText(genSOAP.subjective?.chief_complaint);
+  const gtDiagnosis = rxFieldText(gtSOAP.assessment?.diagnosis);
+  const genDiagnosis = rxFieldText(genSOAP.assessment?.diagnosis);
+  const gtMeds = gtSOAP.plan?.medications || [];
+  const genMeds = genSOAP.plan?.medications || [];
+
+  if (!gtComplaint && !genComplaint &&
+      !gtDiagnosis && !genDiagnosis &&
+      !gtMeds.length && !genMeds.length) {
+    return '';
+  }
+
+  const norm = s => String(s || '')
+    .toLowerCase()
+    .replace(/[.,\-–—;:!?()[\]{}"“”‘’'`/\\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const rxRow = (label, gtVal, genVal) => {
+    const gtStr = gtVal || '—';
+    const genStr = genVal || '—';
+    const isDiff = norm(gtStr) !== norm(genStr)
+      && gtStr !== '—' && genStr !== '—';
+    return {
+      isDiff,
+      html: `<tr class="${isDiff ? 'soap-diff-row' : ''}">
+                <td class="med-field">${esc(label)}</td>
+                <td class="med-gt-col">${esc(gtStr)}</td>
+                <td class="${isDiff ? 'diff-cell-gen' : ''}">${esc(genStr)}</td>
+            </tr>`,
+    };
+  };
+
+  const complaint = rxRow('Chief complaint', gtComplaint, genComplaint);
+  const diagnosis = rxRow('Diagnosis', gtDiagnosis, genDiagnosis);
+
+  const summaryTable = `
+            <table class="med-compare-table">
+                <thead>
+                    <tr>
+                        <th>Field</th>
+                        <th>Ground Truth</th>
+                        <th>Generated</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${complaint.html}
+                    ${diagnosis.html}
+                </tbody>
+            </table>`;
+
+  const MED_FIELDS = ['drug_name', 'dose', 'schedule', 'duration', 'instructions'];
+  const maxMeds = Math.max(gtMeds.length, genMeds.length);
+
+  let medDiffs = 0;
+  const medsHtml = Array.from({ length: maxMeds }, (_, i) => {
+    const gt = gtMeds[i] || {};
+    const gen = genMeds[i] || {};
+    const name = gt.drug_name || gen.drug_name || `Drug ${i + 1}`;
+
+    let drugDiffs = 0;
+    const rows = MED_FIELDS.map(field => {
+      const gtVal = String(gt[field] ?? '—');
+      const genVal = String(gen[field] ?? '—');
+      const isDiff = norm(gtVal) !== norm(genVal) && gtVal !== '—' && genVal !== '—';
+      if (isDiff) {
+        drugDiffs++;
+        medDiffs++;
+      }
+      return `<tr class="${isDiff ? 'soap-diff-row' : ''}">
+                    <td class="med-field">${esc(field.replace(/_/g, ' '))}</td>
+                    <td class="med-gt-col">${esc(gtVal)}</td>
+                    <td class="${isDiff ? 'diff-cell-gen' : ''}">${esc(genVal)}</td>
+                </tr>`;
+    }).join('');
+
+    const drugBadge = drugDiffs === 0
+      ? '<span class="score-pill high" style="font-size:11px;padding:2px 8px">✓</span>'
+      : `<span class="score-pill ${drugDiffs <= 1 ? 'warn' : 'low'}" style="font-size:11px;padding:2px 8px">${drugDiffs} diff${drugDiffs !== 1 ? 's' : ''}</span>`;
+
+    const table = `
+            <table class="med-compare-table">
+                <thead>
+                    <tr>
+                        <th>Field</th>
+                        <th>Ground Truth</th>
+                        <th>Generated</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>`;
+
+    return makeCollapsible(`rx-med-${i}`, `💊 ${esc(name)}`, table, {
+      defaultOpen: true,
+      headerRight: `<span onclick="event.stopPropagation()">${drugBadge}</span>`,
+    });
+  }).join('');
+
+  const content = summaryTable
+    + (maxMeds
+      ? `<div class="rx-meds-heading">Medications</div>${medsHtml}`
+      : '<p class="na" style="margin-top:0.75rem">No medications</p>');
+
+  const totalDiffs = (complaint.isDiff ? 1 : 0) + (diagnosis.isDiff ? 1 : 0) + medDiffs;
+  const badge = totalDiffs === 0
+    ? '<span class="score-pill high" style="font-size:11px;padding:2px 8px">✓ Match</span>'
+    : `<span class="score-pill ${totalDiffs <= 3 ? 'warn' : 'low'}" style="font-size:11px;padding:2px 8px">${totalDiffs} diff${totalDiffs !== 1 ? 's' : ''}</span>`;
+
+  return makeCollapsible('prescription', '📋 Prescription Comparison', content, {
+    defaultOpen: true,
+    headerRight: `<span onclick="event.stopPropagation()">${badge}</span>`,
   });
 }
 
