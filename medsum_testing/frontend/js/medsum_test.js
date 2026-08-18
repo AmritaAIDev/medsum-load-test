@@ -8,6 +8,13 @@ let distributionChart = null;
 let driveStats = { total: 0, with_transcript: 0 };
 let latestResults = [];
 let currentDetailResult = null;
+let ltRows = [];           // [{phone, password, patientId}]
+let ltRunResults = [];     // timing_data objects per sessi on
+let ltRunId = null;
+let ltMode = 'drive';      // 'drive' | 'manual'
+let ltPerRowFiles = {};    // { rowIndex: { audio: File|null, gt: File|null } }
+let ltBulkFiles = {};      // { patientId: { audio: File|null, gt: File|null } }
+let ltServiceEmail = '';
 
 const STAT_CARDS = [
   { id: 'stat-input', icon: '📤', label: 'Input Upload', sublabel: 'Requests Sent', key: 'total' },
@@ -24,6 +31,8 @@ function initPage() {
   loadRecentResults();
   checkAIConfig();
   bindEvents();
+  ltAddRow();           // start with one blank row
+  ltLoadServiceEmail();
 }
 
 /**
@@ -180,9 +189,23 @@ function bindEvents() {
   document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', e => {
       e.preventDefault();
-      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+      document.querySelectorAll('.nav-item').forEach(n =>
+        n.classList.remove('active'));
       item.classList.add('active');
-      if (item.dataset.nav !== 'dashboard') showDashboard();
+
+      const nav = item.dataset.nav;
+      if (nav === 'load-testing') {
+        showLoadTesting();
+      } else {
+        // Hide load testing view if open
+        const ltView = document.getElementById('load-testing-view');
+        if (ltView) ltView.style.display = 'none';
+        if (nav === 'dashboard') {
+          showDashboard();
+        } else {
+          showDashboard();
+        }
+      }
     });
   });
 
@@ -1213,6 +1236,759 @@ function esc(s) {
 window.openTestDetail = openTestDetail;
 window.toggleReason = toggleReason;
 window.toggleSection = toggleSection;
+
+// ── Load Testing ─────────────────────────────────────────────────────────────
+
+function showLoadTesting() {
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('detail-view').style.display = 'none';
+  document.getElementById('load-testing-view').style.display = '';
+  ltUpdateRowCount();
+}
+
+function showDashboardFromLT() {
+  document.getElementById('load-testing-view').style.display = 'none';
+  showDashboard();
+}
+
+function ltAddRow(phone = '', password = '', patientId = '') {
+  const tbody = document.getElementById('lt-doctor-tbody');
+  const idx = ltRows.length;
+  ltRows.push({ phone, password, patientId });
+
+  const tr = document.createElement('tr');
+  tr.id = `lt-row-${idx}`;
+  tr.innerHTML = `
+    <td>
+      <input type="text" value="${esc(phone)}"
+             placeholder="9876543210"
+             onchange="ltRows[${idx}].phone=this.value"
+             style="width:100%;padding:8px;border:1px solid var(--border);
+                    border-radius:6px;font-size:14px">
+    </td>
+    <td>
+      <div style="display:flex;align-items:center;gap:6px">
+        <input type="password" value="${esc(password)}"
+               placeholder="Password"
+               id="lt-pwd-${idx}"
+               onchange="ltRows[${idx}].password=this.value"
+               style="flex:1;padding:8px;border:1px solid var(--border);
+                      border-radius:6px;font-size:14px">
+        <button type="button"
+                onclick="ltTogglePwd(${idx})"
+                style="background:none;border:none;cursor:pointer;
+                       color:var(--text-secondary);font-size:16px"
+                title="Show/hide password">👁</button>
+      </div>
+    </td>
+    <td>
+      <input type="text" value="${esc(patientId)}"
+             placeholder="101"
+             onchange="ltRows[${idx}].patientId=this.value; if (ltMode === 'manual') ltRenderPerRowUploads();"
+             style="width:100%;padding:8px;border:1px solid var(--border);
+                    border-radius:6px;font-size:14px">
+    </td>
+    <td>
+      <button type="button"
+              onclick="ltRemoveRow(${idx})"
+              style="background:none;border:none;cursor:pointer;
+                     color:var(--danger);font-size:18px"
+              title="Remove row">🗑</button>
+    </td>`;
+  tbody.appendChild(tr);
+  ltUpdateRowCount();
+  if (ltMode === 'manual') ltRenderPerRowUploads();
+}
+
+function ltRemoveRow(idx) {
+  const tr = document.getElementById(`lt-row-${idx}`);
+  if (tr) tr.remove();
+  ltRows[idx] = null;
+  delete ltPerRowFiles[idx];
+  ltUpdateRowCount();
+  if (ltMode === 'manual') ltRenderPerRowUploads();
+}
+
+function ltTogglePwd(idx) {
+  const input = document.getElementById(`lt-pwd-${idx}`);
+  if (!input) return;
+  input.type = input.type === 'password' ? 'text' : 'password';
+}
+
+function ltUpdateRowCount() {
+  const active = ltRows.filter(r => r !== null);
+  const el = document.getElementById('lt-row-count');
+  if (el) el.textContent = `Total Rows: ${active.length}`;
+}
+
+function ltGetActiveRows() {
+  return ltRows.filter(r => r !== null && r.phone && r.patientId);
+}
+
+function ltImportExcel() {
+  document.getElementById('lt-excel-input').click();
+}
+
+async function ltHandleExcel(input) {
+  const file = input.files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const resp = await fetch('/api/load-test/upload-excel', {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+    document.getElementById('lt-doctor-tbody').innerHTML = '';
+    ltRows = [];
+    ltPerRowFiles = {};
+
+    data.rows.forEach(r => ltAddRow(r.phone, r.password, r.patient_id));
+    ltRematchBulkToRows();
+    if (ltMode === 'manual') ltRenderPerRowUploads();
+    showToast(`Imported ${data.rows.length} rows from Excel`);
+  } catch (err) {
+    showToast(`Excel import failed: ${err.message}`);
+  }
+  input.value = '';
+}
+
+function ltExportConfig() {
+  const driveLink = document.getElementById('lt-drive-link').value.trim();
+  const config = {
+    version: 1,
+    saved_at: new Date().toISOString(),
+    mode: ltMode,
+    drive_link: driveLink,
+    rows: ltGetActiveRows().map(r => ({
+      phone: r.phone,
+      password: r.password,
+      patient_id: r.patientId,
+    })),
+    // Uploaded files are not saved (browser security). Filenames only.
+    file_reminders: Object.entries(ltPerRowFiles).reduce(
+      (acc, [idx, files]) => {
+        acc[idx] = {
+          audio: files.audio?.name || null,
+          gt: files.gt?.name || null,
+        };
+        return acc;
+      }, {}
+    ),
+  };
+  const blob = new Blob([JSON.stringify(config, null, 2)],
+                         { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `lt_config_${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function ltImportConfig() {
+  document.getElementById('lt-config-input').click();
+}
+
+function ltHandleConfigImport(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const config = JSON.parse(e.target.result);
+      if (!config.rows) throw new Error('Invalid config file');
+
+      if (config.drive_link) {
+        document.getElementById('lt-drive-link').value = config.drive_link;
+      }
+
+      document.getElementById('lt-doctor-tbody').innerHTML = '';
+      ltRows = [];
+      ltPerRowFiles = {};
+      config.rows.forEach(r =>
+        ltAddRow(r.phone || '', r.password || '', r.patient_id || '')
+      );
+      ltRematchBulkToRows();
+      if (config.mode) ltSetMode(config.mode);
+      else if (ltMode === 'manual') ltRenderPerRowUploads();
+      showToast(`Config imported — ${config.rows.length} rows restored`);
+    } catch (err) {
+      showToast(`Config import failed: ${err.message}`);
+    }
+  };
+  reader.readAsText(file);
+  input.value = '';
+}
+
+function ltDownloadTemplate() {
+  window.location.href = '/api/load-test/excel-template';
+}
+
+function ltSetMode(mode) {
+  ltMode = mode;
+
+  document.getElementById('lt-drive-mode').style.display =
+    mode === 'drive' ? '' : 'none';
+  document.getElementById('lt-manual-mode').style.display =
+    mode === 'manual' ? '' : 'none';
+
+  const driveBtn = document.getElementById('lt-mode-drive');
+  const manualBtn = document.getElementById('lt-mode-manual');
+  driveBtn.style.background =
+    mode === 'drive' ? 'var(--primary)' : 'white';
+  driveBtn.style.color =
+    mode === 'drive' ? 'white' : 'var(--text-secondary)';
+  manualBtn.style.background =
+    mode === 'manual' ? 'var(--primary)' : 'white';
+  manualBtn.style.color =
+    mode === 'manual' ? 'white' : 'var(--text-secondary)';
+
+  if (mode === 'manual') ltRenderPerRowUploads();
+}
+
+function ltLoadServiceEmail() {
+  ltServiceEmail =
+    'medsum-google-drive@ancient-duality-453106-e2.iam.gserviceaccount.com';
+  const el = document.getElementById('lt-service-email');
+  if (el) el.textContent = ltServiceEmail;
+}
+
+function ltCopyServiceEmail() {
+  if (!ltServiceEmail) {
+    showToast('Service email not available');
+    return;
+  }
+  navigator.clipboard.writeText(ltServiceEmail)
+    .then(() => showToast('Service email copied to clipboard'))
+    .catch(() => {
+      const el = document.getElementById('lt-service-email');
+      if (el) {
+        const range = document.createRange();
+        range.selectNode(el);
+        window.getSelection().removeAllRanges();
+        window.getSelection().addRange(range);
+      }
+      showToast('Select and copy the email address');
+    });
+}
+
+async function ltVerifyDriveFolder() {
+  const link = document.getElementById('lt-drive-link').value.trim();
+  const statusEl = document.getElementById('lt-drive-status');
+
+  if (!link) {
+    showToast('Please enter a Drive folder link first.');
+    return;
+  }
+
+  statusEl.style.display = '';
+  statusEl.style.background = 'var(--primary-light)';
+  statusEl.style.color = 'var(--primary)';
+  statusEl.textContent = '⏳ Verifying access...';
+
+  try {
+    const resp = await fetch('/api/load-test/verify-drive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ drive_link: link }),
+    });
+    const data = await resp.json();
+
+    if (!resp.ok || data.error) {
+      statusEl.style.background = '#FEE2E2';
+      statusEl.style.color = 'var(--danger)';
+      statusEl.textContent =
+        `✗ ${data.error || 'Could not access folder'}`;
+    } else {
+      statusEl.style.background = '#D1FAE5';
+      statusEl.style.color = 'var(--success)';
+      statusEl.textContent =
+        `✓ Access confirmed — ${data.file_count} file(s) found`;
+    }
+  } catch (err) {
+    statusEl.style.background = '#FEE2E2';
+    statusEl.style.color = 'var(--danger)';
+    statusEl.textContent = `✗ ${err.message}`;
+  }
+}
+
+function ltRematchBulkToRows() {
+  Object.entries(ltBulkFiles).forEach(([pid, files]) => {
+    const rowIdx = ltRows.findIndex(r => r !== null && r.patientId === pid);
+    if (rowIdx === -1) return;
+    if (!ltPerRowFiles[rowIdx]) ltPerRowFiles[rowIdx] = {};
+    if (files.audio) ltPerRowFiles[rowIdx].audio = files.audio;
+    if (files.gt) ltPerRowFiles[rowIdx].gt = files.gt;
+  });
+}
+
+function ltRenderPerRowUploads() {
+  const container = document.getElementById('lt-per-row-uploads');
+  if (!container) return;
+
+  const activeRows = ltRows
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => r !== null);
+
+  if (!activeRows.length) {
+    container.innerHTML =
+      '<p class="subtitle">No rows added yet. '
+      + 'Add doctor–patient rows above first.</p>';
+    return;
+  }
+
+  container.innerHTML = activeRows.map(({ r, i }) => {
+    const files = ltPerRowFiles[i] || {};
+    const audioName = files.audio?.name || null;
+    const gtName = files.gt?.name || null;
+
+    return `
+      <div style="display:grid;
+                  grid-template-columns:1fr 1fr 1fr 1fr;
+                  gap:12px;align-items:center;
+                  padding:10px 0;
+                  border-bottom:1px solid var(--border)">
+
+        <div style="font-size:13px;color:var(--text-primary)">
+          <span style="font-weight:600">${esc(r.phone || '—')}</span>
+          <br>
+          <span style="font-size:12px;color:var(--text-secondary)">
+            Patient: ${esc(r.patientId || '—')}
+          </span>
+        </div>
+
+        <div>
+          <label style="display:flex;align-items:center;gap:6px;
+                        padding:6px 10px;border:1px solid var(--border);
+                        border-radius:6px;cursor:pointer;
+                        background:white;font-size:12px;
+                        color:var(--text-secondary)">
+            <input type="file" accept="audio/*,.wav,.mp3,.m4a"
+                   style="display:none"
+                   onchange="ltSetRowFile(${i},'audio',this)">
+            🎙 ${audioName
+              ? `<span style="color:var(--success)">${esc(audioName)}</span>`
+              : 'Upload Audio'}
+          </label>
+        </div>
+
+        <div>
+          <label style="display:flex;align-items:center;gap:6px;
+                        padding:6px 10px;border:1px solid var(--border);
+                        border-radius:6px;cursor:pointer;
+                        background:white;font-size:12px;
+                        color:var(--text-secondary)">
+            <input type="file" accept=".txt,.doc,.docx"
+                   style="display:none"
+                   onchange="ltSetRowFile(${i},'gt',this)">
+            📋 ${gtName
+              ? `<span style="color:var(--success)">${esc(gtName)}</span>`
+              : 'Ground Truth'}
+          </label>
+        </div>
+
+        <div style="font-size:11px;color:var(--text-muted)">
+          ${!audioName ? '⚠ No audio — silent WAV fallback' : ''}
+          ${!gtName ? '<br>⚠ No ground truth — skipped' : ''}
+        </div>
+
+      </div>`;
+  }).join('');
+}
+
+function ltSetRowFile(rowIndex, type, input) {
+  const file = input.files[0];
+  if (!file) return;
+  if (!ltPerRowFiles[rowIndex]) ltPerRowFiles[rowIndex] = {};
+  ltPerRowFiles[rowIndex][type] = file;
+  ltRenderPerRowUploads();
+}
+
+function ltHandleBulkUpload(input, type) {
+  const files = Array.from(input.files);
+  if (!files.length) return;
+
+  let matched = 0;
+  const unmatched = [];
+
+  files.forEach(file => {
+    const nameNoExt = file.name.replace(/\.[^.]+$/, '');
+    const numMatch = nameNoExt.match(/\d+/);
+    if (!numMatch) {
+      unmatched.push(file.name);
+      return;
+    }
+    const patientId = numMatch[0];
+
+    if (!ltBulkFiles[patientId]) ltBulkFiles[patientId] = {};
+    ltBulkFiles[patientId][type] = file;
+
+    const rowIdx = ltRows.findIndex(
+      r => r !== null && r.patientId === patientId
+    );
+    if (rowIdx !== -1) {
+      if (!ltPerRowFiles[rowIdx]) ltPerRowFiles[rowIdx] = {};
+      ltPerRowFiles[rowIdx][type] = file;
+      matched++;
+    }
+  });
+
+  const statusEl = document.getElementById('lt-bulk-status');
+  const label = type === 'audio' ? 'audio' : 'ground truth';
+  let msg = `✓ ${files.length} ${label} file(s) uploaded`;
+  if (matched > 0) msg += ` — ${matched} matched to rows`;
+  if (unmatched.length > 0) {
+    msg += ` — ${unmatched.length} unmatched `
+         + `(${unmatched.join(', ')})`;
+  }
+  if (statusEl) statusEl.textContent = msg;
+
+  ltRenderPerRowUploads();
+  showToast(msg);
+}
+
+async function ltStartTest() {
+  const activeWithIdx = ltRows
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => r !== null && r.phone && r.patientId);
+  const rows = activeWithIdx.map(({ r }) => r);
+  if (rows.length === 0) {
+    showToast('Add at least one doctor–patient row before starting.');
+    return;
+  }
+  const driveLink = document.getElementById('lt-drive-link').value.trim();
+  if (ltMode === 'drive' && !driveLink) {
+    showToast('Please provide a Google Drive folder link.');
+    return;
+  }
+
+  ltRunResults = [];
+  ltRunId = null;
+  document.getElementById('lt-results-section').style.display = '';
+  document.getElementById('lt-timing-summary').style.display = 'none';
+  document.getElementById('lt-export-btn').style.display = 'none';
+  document.getElementById('lt-live-tbody').innerHTML = '';
+  document.getElementById('lt-stat-total').textContent = rows.length;
+  document.getElementById('lt-stat-passed').textContent = '0';
+  document.getElementById('lt-stat-failed').textContent = '0';
+  document.getElementById('lt-stat-passrate').textContent = '—';
+
+  rows.forEach((r, i) => {
+    const tr = document.createElement('tr');
+    tr.id = `lt-live-${i}`;
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td>${esc(r.phone)}</td>
+      <td>${esc(r.patientId)}</td>
+      <td id="lt-stage-${i}">
+        <span style="color:var(--text-muted)">Pending</span>
+      </td>
+      <td id="lt-time-${i}">—</td>
+      <td id="lt-status-${i}">
+        <span style="color:var(--text-muted)">⏸</span>
+      </td>`;
+    document.getElementById('lt-live-tbody').appendChild(tr);
+  });
+
+  const btn = document.getElementById('lt-start-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Running...';
+
+  try {
+    const formData = new FormData();
+    formData.append('rows', JSON.stringify(
+      rows.map(r => ({
+        phone: r.phone,
+        password: r.password,
+        patient_id: r.patientId,
+      }))
+    ));
+    formData.append('mode', ltMode);
+    formData.append('drive_link', driveLink);
+
+    if (ltMode === 'manual') {
+      activeWithIdx.forEach(({ r, i }, sendIdx) => {
+        const files = ltPerRowFiles[i] || {};
+        const bulkMatch = ltBulkFiles[r.patientId] || {};
+        const audioFile = files.audio || bulkMatch.audio || null;
+        const gtFile = files.gt || bulkMatch.gt || null;
+        if (audioFile) formData.append(`audio_${sendIdx}`, audioFile);
+        if (gtFile) formData.append(`gt_${sendIdx}`, gtFile);
+      });
+    }
+
+    const resp = await fetch('/api/load-test/run', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${resp.status}`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data:')) continue;
+        try {
+          const evt = JSON.parse(line.slice(5).trim());
+          ltHandleSSE(evt, rows);
+        } catch (_) {}
+      }
+    }
+  } catch (err) {
+    showToast(`Run failed: ${err.message}`);
+  }
+
+  btn.disabled = false;
+  btn.textContent = '▶ Start Load Test';
+}
+
+function ltHandleSSE(evt, rows) {
+  if (evt.type === 'run_id') {
+    ltRunId = evt.run_id;
+    document.getElementById('lt-run-id-label').textContent =
+      `Run ID: ${evt.run_id.slice(0, 8)}…`;
+    return;
+  }
+
+  if (evt.type === 'row_update') {
+    const { row_index, status, stage, elapsed, timing_data, error,
+            transcription, summary } = evt;
+
+    const stageEl = document.getElementById(`lt-stage-${row_index}`);
+    if (stageEl) {
+      if (status === 'running') {
+        stageEl.innerHTML =
+          `<span style="color:var(--primary)">⏳ ${esc(stage || 'Running')}</span>`;
+      } else if (status === 'pass') {
+        stageEl.innerHTML =
+          `<span style="color:var(--success)">✓ Done</span>`;
+      } else if (status === 'fail') {
+        stageEl.innerHTML =
+          `<span style="color:var(--danger)" title="${esc(error||'')}">
+            ✗ Failed
+          </span>`;
+      }
+    }
+
+    const timeEl = document.getElementById(`lt-time-${row_index}`);
+    if (timeEl && elapsed != null) {
+      timeEl.textContent = `${Number(elapsed).toFixed(1)}s`;
+    }
+
+    const statusEl = document.getElementById(`lt-status-${row_index}`);
+    if (statusEl) {
+      if (status === 'running') {
+        statusEl.innerHTML =
+          `<span class="lang-badge" style="background:var(--primary-light);
+                  color:var(--primary)">Running</span>`;
+      } else if (status === 'pass') {
+        statusEl.innerHTML =
+          `<span class="lang-badge" style="background:#D1FAE5;
+                  color:var(--success)">✓ Pass</span>`;
+        if (transcription || summary) {
+          ltAddExpandRow(row_index, transcription, summary);
+        }
+      } else if (status === 'fail') {
+        statusEl.innerHTML =
+          `<span class="lang-badge" style="background:#FEE2E2;
+                  color:var(--danger)">✗ Fail</span>`;
+        if (error) ltAddErrorRow(row_index, error);
+      }
+    }
+
+    if (timing_data) {
+      ltRunResults.push({
+        row_index,
+        phone: rows[row_index]?.phone,
+        patient_id: rows[row_index]?.patientId,
+        ...timing_data,
+      });
+    }
+
+    ltUpdateStats();
+    return;
+  }
+
+  if (evt.type === 'done') {
+    ltUpdateStats();
+    ltShowTimingSummary();
+    document.getElementById('lt-export-btn').style.display = '';
+    showToast(`Done — ${evt.passed}/${evt.total} passed`);
+    return;
+  }
+}
+
+function ltAddExpandRow(rowIndex, transcription, summary) {
+  const tbody = document.getElementById('lt-live-tbody');
+  const refRow = document.getElementById(`lt-live-${rowIndex}`);
+  if (!refRow) return;
+
+  const existingExpand = document.getElementById(`lt-expand-${rowIndex}`);
+  if (existingExpand) existingExpand.remove();
+
+  const summaryText = summary
+    ? esc(typeof summary === 'object' ? JSON.stringify(summary, null, 2) : summary)
+    : '<em>empty</em>';
+
+  const tr = document.createElement('tr');
+  tr.id = `lt-expand-${rowIndex}`;
+  tr.style.background = 'var(--bg)';
+  tr.innerHTML = `
+    <td colspan="6" style="padding:12px 16px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <div style="font-size:11px;font-weight:600;text-transform:uppercase;
+                      color:var(--text-secondary);margin-bottom:6px;
+                      letter-spacing:0.04em">
+            🎙 Transcription
+          </div>
+          <div style="background:white;border:1px solid var(--border);
+                      border-radius:8px;padding:12px;font-size:13px;
+                      font-family:var(--font-mono);white-space:pre-wrap;
+                      max-height:180px;overflow-y:auto">
+            ${transcription ? esc(transcription) : '<em>empty</em>'}
+          </div>
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:600;text-transform:uppercase;
+                      color:var(--text-secondary);margin-bottom:6px;
+                      letter-spacing:0.04em">
+            📋 Summary
+          </div>
+          <div style="background:white;border:1px solid var(--border);
+                      border-radius:8px;padding:12px;font-size:13px;
+                      font-family:var(--font-mono);white-space:pre-wrap;
+                      max-height:180px;overflow-y:auto">
+            ${summaryText}
+          </div>
+        </div>
+      </div>
+    </td>`;
+  refRow.after(tr);
+}
+
+function ltAddErrorRow(rowIndex, error) {
+  const refRow = document.getElementById(`lt-live-${rowIndex}`);
+  if (!refRow) return;
+
+  const existing = document.getElementById(`lt-err-${rowIndex}`);
+  if (existing) existing.remove();
+
+  const tr = document.createElement('tr');
+  tr.id = `lt-err-${rowIndex}`;
+  tr.innerHTML = `
+    <td colspan="6" style="padding:8px 16px;background:#FEE2E2">
+      <span style="font-size:13px;color:var(--danger)">✗ ${esc(error)}</span>
+    </td>`;
+  refRow.after(tr);
+}
+
+function ltUpdateStats() {
+  const total = Number(document.getElementById('lt-stat-total').textContent) || 0;
+  const passed = ltRunResults.filter(r => r.status === 'pass').length;
+  const failed = ltRunResults.filter(r => r.status === 'fail').length;
+  const rate = total > 0 ? Math.round(passed / total * 100) : 0;
+
+  document.getElementById('lt-stat-passed').textContent = passed;
+  document.getElementById('lt-stat-failed').textContent = failed;
+  document.getElementById('lt-stat-passrate').textContent =
+    passed + failed > 0 ? `${rate}%` : '—';
+}
+
+function ltShowTimingSummary() {
+  const passResults = ltRunResults.filter(r => r.status === 'pass');
+  if (!passResults.length) return;
+
+  const avg = key => {
+    const vals = passResults
+      .map(r => r[key])
+      .filter(v => v != null && !isNaN(v));
+    return vals.length
+      ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2)
+      : '—';
+  };
+
+  const metrics = [
+    ['Login', 'step1_time'],
+    ['Doctor Profile', 'step1b_time'],
+    ['Patient Metadata', 'patient_metadata_time'],
+    ['Transcription (STT)', 'transcription_time'],
+    ['Translation', 'translation_time'],
+    ['LLM Summary', 'llm_time'],
+    ['Flask Total', 'flask_total_time'],
+    ['Audio Upload', 'audio_upload_time'],
+    ['Summary Store', 'summary_store_time'],
+    ['User Perceived Latency', 'user_percieved_summary_latency'],
+  ];
+
+  const tbody = document.getElementById('lt-timing-tbody');
+  tbody.innerHTML = metrics.map(([label, key]) => `
+    <tr>
+      <td>${esc(label)}</td>
+      <td>${avg(key)}s</td>
+    </tr>`).join('');
+
+  document.getElementById('lt-timing-summary').style.display = '';
+}
+
+async function ltExportResults() {
+  if (!ltRunResults.length) {
+    showToast('No results to export yet.');
+    return;
+  }
+  try {
+    const resp = await fetch('/api/load-test/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ runs: ltRunResults }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `lt_results_${new Date().toISOString().slice(0,10)}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    showToast(`Export failed: ${err.message}`);
+  }
+}
+
+window.ltAddRow = ltAddRow;
+window.ltRemoveRow = ltRemoveRow;
+window.ltTogglePwd = ltTogglePwd;
+window.ltImportExcel = ltImportExcel;
+window.ltHandleExcel = ltHandleExcel;
+window.ltImportConfig = ltImportConfig;
+window.ltHandleConfigImport = ltHandleConfigImport;
+window.ltExportConfig = ltExportConfig;
+window.ltDownloadTemplate = ltDownloadTemplate;
+window.ltStartTest = ltStartTest;
+window.ltExportResults = ltExportResults;
+window.ltSetMode = ltSetMode;
+window.ltCopyServiceEmail = ltCopyServiceEmail;
+window.ltVerifyDriveFolder = ltVerifyDriveFolder;
+window.ltSetRowFile = ltSetRowFile;
+window.ltHandleBulkUpload = ltHandleBulkUpload;
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initPage);

@@ -16,6 +16,7 @@ from medsum_testing.backend.routes.report import bp as report_bp
 from medsum_testing.backend.routes.results import bp as results_bp
 from medsum_testing.backend.routes.scheduler import bp as scheduler_bp
 from medsum_testing.backend.routes.test_runner import bp as test_runner_bp
+from medsum_testing.backend.routes.load_test import load_test_bp
 from medsum_testing.backend.services.config_loader import get_config, get_repo_root
 from medsum_testing.backend.services.scheduler_service import start_scheduler
 
@@ -58,6 +59,7 @@ def create_app() -> Flask:
     app.register_blueprint(results_bp, url_prefix="/api/medsum-test")
     app.register_blueprint(report_bp, url_prefix="/api/medsum-test")
     app.register_blueprint(scheduler_bp, url_prefix="/api/medsum-test")
+    app.register_blueprint(load_test_bp)
 
     @app.route("/api/medsum-test/health")
     def health():

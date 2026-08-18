@@ -18,6 +18,9 @@
         <a href="#dashboard" class="nav-item active" data-nav="dashboard">
           <span class="nav-icon">📊</span> Dashboard
         </a>
+        <a href="#load-testing" class="nav-item" data-nav="load-testing">
+          <span class="nav-icon">⚡</span> Load Testing
+        </a>
         <a href="#tests" class="nav-item" data-nav="tests">
           <span class="nav-icon">⚡</span> API Tests
         </a>
@@ -132,6 +135,309 @@
           <pre id="errors-box" class="errors-box"></pre>
         </section>
       </div>
+
+      <div id="load-testing-view" style="display:none">
+
+        <!-- Page Header -->
+        <header class="page-header">
+          <div>
+            <h1>Load Testing</h1>
+            <p class="subtitle">
+              Test system performance under load with multiple doctor–patient sessions.
+            </p>
+          </div>
+          <div class="header-actions">
+            <button class="btn-primary" type="button" id="lt-start-btn"
+                    onclick="ltStartTest()">
+              ▶ Start Load Test
+            </button>
+          </div>
+        </header>
+
+        <!-- Section 1: Doctor & Patient Setup -->
+        <div class="card" style="margin-bottom:20px">
+          <div style="display:flex;justify-content:space-between;
+                      align-items:center;margin-bottom:16px">
+            <div>
+              <h3 style="margin-bottom:4px">1. Doctor &amp; Patient Setup
+                <span style="font-size:13px;font-weight:400;color:var(--text-secondary);
+                             margin-left:8px">ⓘ</span>
+              </h3>
+              <p class="subtitle">Each row represents one doctor–patient pair (1 to 1).</p>
+            </div>
+            <div style="display:flex;gap:10px">
+              <button class="btn-outline" type="button"
+                      onclick="ltAddRow()">+ Add Row</button>
+              <button class="btn-outline" type="button"
+                      onclick="ltImportExcel()">⬆ Import from Excel</button>
+              <input type="file" id="lt-excel-input" accept=".xlsx"
+                     style="display:none" onchange="ltHandleExcel(this)">
+            </div>
+          </div>
+
+          <table class="runs-table" id="lt-doctor-table">
+            <thead>
+              <tr>
+                <th>Phone Number</th>
+                <th>Password</th>
+                <th>Patient ID</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="lt-doctor-tbody">
+              <!-- rows injected by JS -->
+            </tbody>
+          </table>
+          <p style="margin-top:12px;font-size:13px;color:var(--text-secondary)"
+             id="lt-row-count">Total Rows: 0</p>
+        </div>
+
+        <!-- Section 2: Audio & Ground Truth -->
+        <div class="card" style="margin-bottom:20px">
+
+          <div style="display:flex;justify-content:space-between;
+                      align-items:center;margin-bottom:16px">
+            <div>
+              <h3 style="margin-bottom:4px">
+                2. Audio &amp; Ground Truth
+              </h3>
+              <p class="subtitle">
+                Provide audio and ground truth files per patient.
+              </p>
+            </div>
+
+            <div style="display:flex;gap:0;border:1px solid var(--border);
+                        border-radius:8px;overflow:hidden">
+              <button type="button" id="lt-mode-drive"
+                      onclick="ltSetMode('drive')"
+                      style="padding:8px 16px;font-size:13px;font-weight:600;
+                             border:none;cursor:pointer;
+                             background:var(--primary);color:white">
+                ☁ Google Drive
+              </button>
+              <button type="button" id="lt-mode-manual"
+                      onclick="ltSetMode('manual')"
+                      style="padding:8px 16px;font-size:13px;font-weight:600;
+                             border:none;cursor:pointer;
+                             background:white;color:var(--text-secondary)">
+                ⬆ Manual Upload
+              </button>
+            </div>
+          </div>
+
+          <div id="lt-drive-mode">
+
+            <div style="display:flex;align-items:center;gap:10px;
+                        padding:10px 14px;background:var(--primary-light);
+                        border-radius:8px;margin-bottom:14px;
+                        border:1px solid #D0C9F5">
+              <span style="font-size:16px">🔑</span>
+              <div style="flex:1">
+                <div style="font-size:11px;font-weight:600;
+                            text-transform:uppercase;letter-spacing:0.04em;
+                            color:var(--text-secondary);margin-bottom:2px">
+                  Share your Drive folder with this service account
+                </div>
+                <div style="font-size:13px;font-family:var(--font-mono);
+                            color:var(--primary)" id="lt-service-email">
+                  Loading...
+                </div>
+              </div>
+              <button type="button" onclick="ltCopyServiceEmail()"
+                      class="btn-outline"
+                      style="font-size:12px;padding:6px 12px;white-space:nowrap">
+                📋 Copy Email
+              </button>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:10px;
+                        border:1px solid var(--border);border-radius:8px;
+                        padding:10px 14px;background:white;margin-bottom:10px">
+              <span style="font-size:18px">🔷</span>
+              <input type="text" id="lt-drive-link"
+                     placeholder="https://drive.google.com/drive/folders/xxxxx"
+                     style="flex:1;border:none;outline:none;font-size:14px;
+                            color:var(--text-primary);background:transparent">
+              <button type="button" onclick="ltVerifyDriveFolder()"
+                      class="btn-outline"
+                      style="font-size:12px;padding:6px 12px;white-space:nowrap">
+                Verify
+              </button>
+            </div>
+
+            <div id="lt-drive-status" style="display:none;font-size:13px;
+                 padding:8px 12px;border-radius:6px;margin-bottom:10px"></div>
+
+            <div style="padding:10px 14px;background:var(--bg);
+                        border-radius:8px;font-size:13px;
+                        color:var(--text-secondary);
+                        display:flex;gap:8px;align-items:flex-start;
+                        border:1px solid var(--border)">
+              <span>ℹ</span>
+              <span>
+                Files in the folder should be named by patient ID.<br>
+                <code style="font-family:var(--font-mono)">
+                  e.g. 101_audio.wav / 101_ground_truth.txt
+                </code><br>
+                If a patient ID has no matching file, a silent WAV
+                fallback will be used for audio and ground truth
+                will be skipped.
+              </span>
+            </div>
+
+          </div>
+
+          <div id="lt-manual-mode" style="display:none">
+
+            <p class="subtitle" style="margin-bottom:14px">
+              Upload audio and ground truth files per patient row.
+              Files are matched to rows by position.
+            </p>
+
+            <div id="lt-per-row-uploads">
+            </div>
+
+            <div style="margin-top:20px;padding:16px;background:var(--bg);
+                        border:1px dashed var(--border);border-radius:10px">
+              <div style="font-size:13px;font-weight:600;
+                          margin-bottom:10px;color:var(--text-primary)">
+                Bulk Upload (optional)
+              </div>
+              <p class="subtitle" style="margin-bottom:12px">
+                Upload multiple audio or ground truth files at once.
+                Files named <code style="font-family:var(--font-mono)">
+                {patient_id}_audio.*</code> and
+                <code style="font-family:var(--font-mono)">
+                {patient_id}_ground_truth.*</code> will be
+                auto-matched to rows by patient ID.
+              </p>
+              <div style="display:flex;gap:10px;flex-wrap:wrap">
+                <label style="display:flex;align-items:center;gap:8px;
+                              padding:8px 16px;border:1px solid var(--border);
+                              border-radius:8px;cursor:pointer;
+                              background:white;font-size:13px">
+                  <input type="file" id="lt-bulk-audio"
+                         accept="audio/*,.wav,.mp3,.m4a" multiple
+                         style="display:none"
+                         onchange="ltHandleBulkUpload(this,'audio')">
+                  🎙 Upload Audio Files
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;
+                              padding:8px 16px;border:1px solid var(--border);
+                              border-radius:8px;cursor:pointer;
+                              background:white;font-size:13px">
+                  <input type="file" id="lt-bulk-gt"
+                         accept=".txt,.doc,.docx" multiple
+                         style="display:none"
+                         onchange="ltHandleBulkUpload(this,'gt')">
+                  📋 Upload Ground Truth Files
+                </label>
+              </div>
+              <div id="lt-bulk-status"
+                   style="margin-top:10px;font-size:13px;
+                          color:var(--text-secondary)"></div>
+            </div>
+
+          </div>
+
+        </div>
+
+        <!-- Section 3: Config -->
+        <div class="card" style="margin-bottom:20px">
+          <h3 style="margin-bottom:12px">3. Config (Optional)</h3>
+          <p class="subtitle" style="margin-bottom:14px">
+            Import or export your test configuration.
+          </p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn-outline" type="button"
+                    onclick="ltImportExcel()">⬆ Import from Excel</button>
+            <button class="btn-outline" type="button"
+                    onclick="ltExportConfig()">⬇ Export Config (JSON)</button>
+            <button class="btn-outline" type="button"
+                    onclick="ltImportConfig()">⬆ Import Config (JSON)</button>
+            <input type="file" id="lt-config-input" accept=".json"
+                   style="display:none" onchange="ltHandleConfigImport(this)">
+          </div>
+        </div>
+
+        <!-- Live Results (hidden until run starts) -->
+        <div id="lt-results-section" style="display:none">
+
+          <!-- Stats bar -->
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:20px">
+            <div class="card" style="flex:1;min-width:120px;padding:16px;
+                                      margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700" id="lt-stat-total">0</div>
+              <div style="font-size:12px;color:var(--text-secondary)">Total Sessions</div>
+            </div>
+            <div class="card" style="flex:1;min-width:120px;padding:16px;
+                                      margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700;color:var(--success)"
+                   id="lt-stat-passed">0</div>
+              <div style="font-size:12px;color:var(--text-secondary)">Passed</div>
+            </div>
+            <div class="card" style="flex:1;min-width:120px;padding:16px;
+                                      margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700;color:var(--danger)"
+                   id="lt-stat-failed">0</div>
+              <div style="font-size:12px;color:var(--text-secondary)">Failed</div>
+            </div>
+            <div class="card" style="flex:1;min-width:120px;padding:16px;
+                                      margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700" id="lt-stat-passrate">—</div>
+              <div style="font-size:12px;color:var(--text-secondary)">Pass Rate</div>
+            </div>
+          </div>
+
+          <!-- Live table -->
+          <div class="card" style="margin-bottom:20px">
+            <div style="display:flex;justify-content:space-between;
+                        align-items:center;margin-bottom:16px">
+              <h3 id="lt-run-id-label" style="font-size:14px;
+                                               color:var(--text-secondary);
+                                               font-weight:400">
+                Run ID: —
+              </h3>
+              <button class="btn-outline" type="button"
+                      id="lt-export-btn" style="display:none"
+                      onclick="ltExportResults()">
+                ⬇ Download Results (Excel)
+              </button>
+            </div>
+            <div class="table-wrap">
+              <table class="runs-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Phone</th>
+                    <th>Patient ID</th>
+                    <th>Stage</th>
+                    <th>Time</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="lt-live-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Timing summary (shown after all done) -->
+          <div class="card" id="lt-timing-summary" style="display:none">
+            <h3 style="margin-bottom:16px">Results Summary</h3>
+            <table class="runs-table" id="lt-timing-table">
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Avg (s)</th>
+                </tr>
+              </thead>
+              <tbody id="lt-timing-tbody"></tbody>
+            </table>
+          </div>
+
+        </div><!-- end lt-results-section -->
+
+      </div><!-- end load-testing-view -->
     </main>
   </div>
 
