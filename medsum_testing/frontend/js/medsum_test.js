@@ -34,9 +34,20 @@ function initPage() {
   loadRecentResults();
   checkAIConfig();
   bindEvents();
+  restorePatientId();
   ltAddRow();           // start with one blank row
   ltLoadServiceEmail();
   accAddDoctor();       // start with one blank doctor row
+}
+
+function restorePatientId() {
+  const input = document.getElementById('patient-id-input');
+  if (!input) return;
+  const savedPatientId = localStorage.getItem('medsum_patient_id');
+  if (savedPatientId) input.value = savedPatientId;
+  input.addEventListener('change', function () {
+    localStorage.setItem('medsum_patient_id', this.value.trim());
+  });
 }
 
 /**
@@ -533,18 +544,23 @@ function accGetActiveDoctors() {
 }
 
 async function runAllTests() {
-  const doctors = accGetActiveDoctors();
+  const btn = document.getElementById('run-all-btn');
+  const model = document.getElementById('ai-model-select')?.value || 'gpt-4o-mini';
+  const patientId = document.getElementById('patient-id-input')?.value?.trim();
+
+  if (!patientId) {
+    showToast('⚠ Please enter a Patient ID before running tests', 'warning');
+    document.getElementById('patient-id-input')?.focus();
+    return;
+  }
+  localStorage.setItem('medsum_patient_id', patientId);
+
+  const doctors = accDoctors.filter(d => d !== null && d.phone && d.password);
   if (doctors.length === 0) {
-    showToast(
-      'Add at least one doctor with phone, password '
-      + 'and at least one patient ID first.'
-    );
+    showToast('Add at least one doctor with phone and password first.');
     if (!accSetupOpen) accToggleSetup();
     return;
   }
-
-  const btn = document.getElementById('run-all-btn');
-  const model = document.getElementById('ai-model-select').value;
 
   btn.disabled = true;
   btn.textContent = '⏳ Running...';
@@ -570,10 +586,11 @@ async function runAllTests() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ai_model: model,
+        patient_id: patientId,
         doctors: doctors.map(d => ({
           phone: d.phone,
           password: d.password,
-          patients: d.patients,
+          patients: d.patients.length ? d.patients : [patientId],
         })),
       }),
     });
@@ -1626,11 +1643,40 @@ function formatDuration(seconds) {
   return `${m}m ${rem}s`;
 }
 
-function showToast(msg) {
+function showToast(msg, type) {
   const toast = document.getElementById('toast');
   toast.textContent = msg;
+  toast.className = 'toast' + (type ? ` toast-${type}` : '');
   toast.style.display = '';
   setTimeout(() => { toast.style.display = 'none'; }, 4000);
+}
+
+async function runSingleTest(language, audioFilename) {
+  const patientId = document.getElementById('patient-id-input')?.value?.trim();
+  if (!patientId) {
+    showToast('⚠ Please enter a Patient ID', 'warning');
+    document.getElementById('patient-id-input')?.focus();
+    return;
+  }
+  localStorage.setItem('medsum_patient_id', patientId);
+
+  const res = await fetch(`${API}/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      language,
+      audio_filename: audioFilename,
+      ai_model: document.getElementById('ai-model-select')?.value || 'gpt-4o-mini',
+      patient_id: patientId,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    showToast(`Run failed: ${data.error || res.status}`);
+    return;
+  }
+  showToast(`Test started: ${(data.test_id || '').slice(0, 8)}…`);
+  return data;
 }
 
 function esc(s) {
@@ -2395,6 +2441,8 @@ window.accExportConfig = accExportConfig;
 window.accImportConfig = accImportConfig;
 window.accHandleConfigImport = accHandleConfigImport;
 window.showTestRuns = showTestRuns;
+window.runAllTests = runAllTests;
+window.runSingleTest = runSingleTest;
 window.ltAddRow = ltAddRow;
 window.ltRemoveRow = ltRemoveRow;
 window.ltTogglePwd = ltTogglePwd;

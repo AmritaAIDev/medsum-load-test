@@ -23,9 +23,10 @@ log = logging.getLogger("medsum_test_runner")
 VALID_MODELS = ("gpt-4o-mini", "gpt-4", "deepseek")
 
 
-def _parse_doctors(raw) -> list[dict]:
+def _parse_doctors(raw, fallback_patient_id: str = "") -> list[dict]:
     """Normalize request doctors into {phone, password, patients: [str, ...]}."""
     doctors = []
+    fallback = str(fallback_patient_id or "").strip()
     for item in raw or []:
         if not isinstance(item, dict):
             continue
@@ -36,6 +37,8 @@ def _parse_doctors(raw) -> list[dict]:
             patients = [p.strip() for p in patients.split(",") if p.strip()]
         else:
             patients = [str(p).strip() for p in patients if str(p).strip()]
+        if not patients and fallback:
+            patients = [fallback]
         if not phone or not password or not patients:
             continue
         doctors.append({
@@ -44,6 +47,15 @@ def _parse_doctors(raw) -> list[dict]:
             "patients": patients,
         })
     return doctors
+
+
+def _resolve_patient_id(requested: str | None, config: dict | None = None) -> str:
+    """Prefer request-body patient_id; fall back to config patient.id."""
+    pid = str(requested or "").strip()
+    if pid:
+        return pid
+    cfg = config if config is not None else get_config()
+    return str((cfg.get("patient") or {}).get("id") or "").strip()
 
 
 def _update_step(result: TestResult, step: str, status: str) -> None:
@@ -410,9 +422,7 @@ def execute_test_run(
         log.info("[%s] Using existing token, doctor_id=%s", test_id, resolved_doctor_id)
         result.doctor_id = resolved_doctor_id
 
-        resolved_patient_id = str(
-            patient_id or (config.get("patient") or {}).get("id") or ""
-        ).strip()
+        resolved_patient_id = _resolve_patient_id(patient_id, config)
         if not resolved_patient_id:
             raise RuntimeError("No patient_id provided")
         log.info("[%s] STEP 6: Verifying patient %s...", test_id, resolved_patient_id)
@@ -818,6 +828,23 @@ def _run_and_store(
     log.info("[%s] Background thread started", test_id)
     config = get_config()
 
+    resolved_patient_id = _resolve_patient_id(patient_id, config)
+    if not resolved_patient_id:
+        log.error("[%s] No patient_id available", test_id)
+        result = TestResult(
+            test_id=test_id,
+            status="failed",
+            language=language,
+            audio_filename=audio_filename,
+            ai_model=ai_model,
+            final_result="failed",
+            batch_id=batch_id or "",
+            folder_label=folder_label,
+        )
+        result.errors.append("No patient_id provided")
+        save_result(result)
+        return result
+
     if not token:
         try:
             token, doctor_id = medsum_api.authenticate_doctor(config)
@@ -867,7 +894,7 @@ def _run_and_store(
             folder_label=folder_label,
             initiated_by=initiated_by,
             token=token,
-            patient_id=patient_id,
+            patient_id=resolved_patient_id,
             doctor_id=doctor_id,
             phone=phone,
         )
@@ -926,6 +953,7 @@ def run_test():
     language = body.get("language", "").strip()
     audio_filename = body.get("audio_filename", "").strip()
     ai_model = body.get("ai_model", "gpt-4o-mini").strip()
+    patient_id = str(body.get("patient_id") or "").strip()
 
     if not language or not audio_filename:
         return jsonify({"error": "language and audio_filename are required"}), 400
@@ -933,13 +961,19 @@ def run_test():
     if ai_model not in VALID_MODELS:
         return jsonify({"error": f"ai_model must be one of {VALID_MODELS}"}), 400
 
+    if not patient_id:
+        patient_id = _resolve_patient_id("", get_config())
+    if not patient_id:
+        return jsonify({"error": "patient_id is required"}), 400
+
     test_id = str(uuid.uuid4())
     log.info(
-        "[%s] Starting test run: language=%s, audio=%s, model=%s",
+        "[%s] Starting test run: language=%s, audio=%s, model=%s, patient_id=%s",
         test_id,
         language,
         audio_filename,
         ai_model,
+        patient_id,
     )
     config = get_config()
     try:
@@ -949,7 +983,17 @@ def run_test():
 
     thread = threading.Thread(
         target=_run_and_store,
-        args=(test_id, language, audio_filename, ai_model, "", "", "manual", token),
+        args=(
+            test_id,
+            language,
+            audio_filename,
+            ai_model,
+            "",
+            "",
+            "manual",
+            token,
+            patient_id,
+        ),
         daemon=True,
     )
     thread.start()
@@ -967,9 +1011,21 @@ def run_all_tests():
     if ai_model not in VALID_MODELS:
         return jsonify({"error": f"ai_model must be one of {VALID_MODELS}"}), 400
 
-    doctors = _parse_doctors(body.get("doctors"))
+    patient_id = str(body.get("patient_id") or "").strip()
+    if not patient_id:
+        patient_id = _resolve_patient_id("", config)
+
+    doctors = _parse_doctors(body.get("doctors"), fallback_patient_id=patient_id)
     if not doctors:
         return jsonify({"error": "No doctors provided"}), 400
+
+    if not patient_id and not any(d["patients"] for d in doctors):
+        return jsonify({
+            "error": "patient_id is required. "
+                     "Provide it in the request body or set patient.id in medsum_config.yaml"
+        }), 400
+
+    log.info("run_all_tests: patient_id=%s ai_model=%s", patient_id, ai_model)
 
     batch_id = str(uuid.uuid4())
 

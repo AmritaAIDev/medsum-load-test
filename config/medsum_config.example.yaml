@@ -24,7 +24,8 @@ doctor:
   hospital_name: "Test Hospital"
 
 patient:
-  id: "PAT_001"
+  id: ""    # leave blank — patient ID is entered from the frontend UI
+            # set a default here only if you always use the same patient
 
 google_drive:
   service_account_json: "credentials/service_account.json"

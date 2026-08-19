@@ -169,6 +169,18 @@
 
         <div class="card" style="margin-bottom:20px">
           <h3 style="margin-bottom:16px">2. Run</h3>
+          <div class="config-row">
+            <label class="config-label" for="patient-id-input">Patient ID</label>
+            <input
+                type="text"
+                id="patient-id-input"
+                class="config-input"
+                placeholder="e.g. 219"
+                value=""
+                style="width: 120px;"
+            />
+            <span class="config-hint">From test-medsum.amritaai.org patient list</span>
+          </div>
           <div style="display:flex;gap:12px;align-items:center;
                       flex-wrap:wrap">
             <select id="ai-model-select" class="select-input">

@@ -102,10 +102,8 @@ def _flask_transcribe_url(config: dict) -> str:
 
 
 def _auth_headers(token: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
+    """JWT Bearer only — do not set Content-Type (GET has no body; POST json= sets it)."""
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _extract_summary(body: dict) -> str:
@@ -283,10 +281,29 @@ def fetch_doctor_profile(doctor_id: str, token: str, config: dict) -> dict[str, 
         return fallback
 
 
+def _format_patient_age(age) -> str:
+    """API returns age as a float (e.g. 30.0); pass a clean string downstream."""
+    if age is None or age == "":
+        return ""
+    try:
+        n = float(age)
+        return str(int(n)) if n.is_integer() else str(n)
+    except (TypeError, ValueError):
+        return str(age)
+
+
 def verify_patient(patient_id: str, token: str, config: dict) -> dict:
-    base_url = config["backends"]["django_base_url"].rstrip("/")
-    patient_path = config["backends"].get("patient_path", "/api/patient-data/")
-    url = f"{base_url}{patient_path}{patient_id}/"
+    """
+    GET /api/patient-data/<patient_id>/
+    Auth: JWT Bearer (doctor). No request body — path param only.
+    """
+    pid = str(patient_id or "").strip().strip("/")
+    if not pid:
+        raise PatientNotFoundError("PATIENT_ERROR: patient_id is required")
+
+    patient_path = (config.get("backends") or {}).get("patient_path") or "/api/patient-data/"
+    path = "/" + str(patient_path).strip("/") + "/"
+    url = f"{_django_base(config)}{path}{pid}/"
 
     log.info("PATIENT → GET %s", url)
 
@@ -297,15 +314,22 @@ def verify_patient(patient_id: str, token: str, config: dict) -> dict:
 
     if resp.status_code == 404:
         raise PatientNotFoundError(
-            f"PATIENT_NOT_FOUND: Patient ID '{patient_id}' not found.\n"
+            f"PATIENT_NOT_FOUND: Patient ID '{pid}' not found.\n"
             f"URL tried: {url}\n"
-            f"Check patient.id in medsum_config.yaml"
+            f"Check the Patient ID entered in the UI "
+            f"(or patient.id in medsum_config.yaml)"
         )
     if resp.status_code == 401:
-        raise PatientNotFoundError(
-            f"PATIENT_UNAUTHORIZED: Token rejected for patient lookup.\n"
+        raise AuthError(
+            f"PATIENT_UNAUTHORIZED: Doctor JWT rejected for patient lookup.\n"
             f"URL: {url}\n"
             f"Check that Bearer token is being sent correctly."
+        )
+    if resp.status_code == 403:
+        raise PatientNotFoundError(
+            f"PATIENT_FORBIDDEN: Doctor is not allowed to access patient '{pid}'.\n"
+            f"URL: {url}\n"
+            f"Response: {resp.text[:200]}"
         )
     if resp.status_code != 200:
         raise PatientNotFoundError(
@@ -313,12 +337,26 @@ def verify_patient(patient_id: str, token: str, config: dict) -> dict:
             f"Response: {resp.text[:200]}"
         )
 
-    data = resp.json()
+    data = resp.json() if resp.content else {}
+    if not isinstance(data, dict):
+        raise PatientNotFoundError(
+            f"PATIENT_ERROR: expected JSON object from {url}, got {type(data).__name__}"
+        )
+
+    canonical_id = data.get("patient_id")
+    if canonical_id is None or str(canonical_id).strip() == "":
+        raise PatientNotFoundError(
+            f"PATIENT_ERROR: response missing patient_id from {url}\n"
+            f"Keys: {list(data.keys())}"
+        )
+
     log.info(
-        "PATIENT ✓ found — patient_id=%s, name=%s, hospital_id=%s",
-        data.get("patient_id"),
+        "PATIENT ✓ found — patient_id=%s, name=%s, hospital_id=%s, age=%s, gender=%s",
+        canonical_id,
         data.get("patient_name"),
         data.get("hospital_id"),
+        data.get("age"),
+        data.get("gender"),
     )
     return data
 
@@ -438,9 +476,9 @@ def transcribe_audio(
         "doctor_department": doctor_data.get("department", ""),
         "hospital_name": doctor_data.get("hospital_name", ""),
         "patient_id": str(patient_data.get("patient_id", "")),
-        "patient_name": patient_data.get("patient_name", ""),
-        "age": str(patient_data.get("age", "")),
-        "gender": patient_data.get("gender", ""),
+        "patient_name": patient_data.get("patient_name") or "",
+        "age": _format_patient_age(patient_data.get("age")),
+        "gender": patient_data.get("gender") or "",
         "template": copy.deepcopy(SOAP_CONSULT_TEMPLATE),
         "template_id": int(llm_settings.get("template_id", 4)),
         "audio_base64": audio_b64,
