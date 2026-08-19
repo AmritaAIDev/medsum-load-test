@@ -21,11 +21,11 @@
         <a href="#load-testing" class="nav-item" data-nav="load-testing">
           <span class="nav-icon">⚡</span> Load Testing
         </a>
-        <a href="#tests" class="nav-item" data-nav="tests">
-          <span class="nav-icon">⚡</span> API Tests
-        </a>
         <a href="#runs" class="nav-item" data-nav="runs">
           <span class="nav-icon">📋</span> Test Runs
+        </a>
+        <a href="#tests" class="nav-item" data-nav="tests">
+          <span class="nav-icon">⚡</span> API Tests
         </a>
         <a href="#reports" class="nav-item" data-nav="reports">
           <span class="nav-icon">📄</span> Reports
@@ -48,14 +48,9 @@
         <header class="page-header">
           <div>
             <h1>API Testing Dashboard</h1>
-            <p class="subtitle">Monitor and evaluate your backend API performance</p>
-          </div>
-          <div class="header-actions">
-            <select id="ai-model-select" class="select-input">
-              <option value="gpt-4o-mini" selected>gpt-4o-mini</option>
-              <option value="deepseek">DeepSeek</option>
-            </select>
-            <button id="run-all-btn" class="btn-primary" type="button">▶ Run All Tests</button>
+            <p class="subtitle">
+              Monitor and evaluate your backend API performance
+            </p>
           </div>
         </header>
 
@@ -80,7 +75,6 @@
         <section class="card table-card">
           <div class="table-header">
             <h3>Recent Test Runs</h3>
-            <span id="batch-status" class="batch-status"></span>
           </div>
           <div class="table-wrap">
             <table class="runs-table">
@@ -100,6 +94,200 @@
             </table>
           </div>
         </section>
+      </div>
+
+      <div id="runs-view" style="display:none">
+
+        <header class="page-header">
+          <div>
+            <h1>Test Runs</h1>
+            <p class="subtitle">
+              Configure doctors and patients, then run tests.
+            </p>
+          </div>
+        </header>
+
+        <div class="card" style="margin-bottom:20px">
+
+          <div style="display:flex;justify-content:space-between;
+                      align-items:center;cursor:pointer;
+                      padding-bottom:0"
+               onclick="accToggleSetup()">
+            <div>
+              <h3 style="margin-bottom:2px">
+                1. Doctor &amp; Patient Setup
+              </h3>
+              <p class="subtitle">
+                Each doctor can have multiple patients.
+              </p>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <span id="acc-setup-summary"
+                    style="font-size:13px;
+                           color:var(--text-secondary)">
+                Not configured
+              </span>
+              <span id="acc-setup-arrow"
+                    style="font-size:12px;
+                           color:var(--text-muted)">▼</span>
+            </div>
+          </div>
+
+          <div id="acc-setup-body" style="margin-top:20px">
+            <table class="runs-table" id="acc-doctor-table">
+              <thead>
+                <tr>
+                  <th>Phone Number</th>
+                  <th>Password</th>
+                  <th>Patient IDs</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="acc-doctor-tbody"></tbody>
+            </table>
+
+            <div style="display:flex;gap:10px;
+                        margin-top:14px;flex-wrap:wrap">
+              <button class="btn-outline" type="button"
+                      onclick="accAddDoctor()">
+                + Add Doctor
+              </button>
+              <button class="btn-outline" type="button"
+                      onclick="accExportConfig()">
+                ⬇ Export Config (JSON)
+              </button>
+              <button class="btn-outline" type="button"
+                      onclick="accImportConfig()">
+                ⬆ Import Config (JSON)
+              </button>
+              <input type="file" id="acc-config-input"
+                     accept=".json" style="display:none"
+                     onchange="accHandleConfigImport(this)">
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:20px">
+          <h3 style="margin-bottom:16px">2. Run</h3>
+          <div style="display:flex;gap:12px;align-items:center;
+                      flex-wrap:wrap">
+            <select id="ai-model-select" class="select-input">
+              <option value="gpt-4o-mini" selected>gpt-4o-mini</option>
+              <option value="deepseek">DeepSeek</option>
+            </select>
+            <button id="run-all-btn" class="btn-primary" type="button"
+                    onclick="runAllTests()">
+              ▶ Run All Tests
+            </button>
+            <span id="batch-status"
+                  style="font-size:13px;
+                         color:var(--text-secondary)"></span>
+          </div>
+        </div>
+
+        <div id="acc-live-section" style="display:none">
+
+          <div style="display:flex;gap:16px;flex-wrap:wrap;
+                      margin-bottom:20px">
+            <div class="card"
+                 style="flex:1;min-width:100px;padding:16px;
+                        margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700"
+                   id="acc-stat-total">0</div>
+              <div style="font-size:12px;
+                          color:var(--text-secondary)">Total</div>
+            </div>
+            <div class="card"
+                 style="flex:1;min-width:100px;padding:16px;
+                        margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700;
+                          color:var(--success)"
+                   id="acc-stat-passed">0</div>
+              <div style="font-size:12px;
+                          color:var(--text-secondary)">Passed</div>
+            </div>
+            <div class="card"
+                 style="flex:1;min-width:100px;padding:16px;
+                        margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700;
+                          color:var(--danger)"
+                   id="acc-stat-failed">0</div>
+              <div style="font-size:12px;
+                          color:var(--text-secondary)">Failed</div>
+            </div>
+            <div class="card"
+                 style="flex:1;min-width:100px;padding:16px;
+                        margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700"
+                   id="acc-stat-rate">—</div>
+              <div style="font-size:12px;
+                          color:var(--text-secondary)">Pass Rate</div>
+            </div>
+            <div class="card"
+                 style="flex:1;min-width:100px;padding:16px;
+                        margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700"
+                   id="acc-stat-accuracy">—</div>
+              <div style="font-size:12px;
+                          color:var(--text-secondary)">
+                Avg Accuracy
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-bottom:20px">
+            <h3 style="margin-bottom:16px">Session Summary</h3>
+            <div class="table-wrap">
+              <table class="runs-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Doctor</th>
+                    <th>Patient ID</th>
+                    <th>Audio File</th>
+                    <th>Status</th>
+                    <th>Time</th>
+                    <th>Accuracy</th>
+                  </tr>
+                </thead>
+                <tbody id="acc-summary-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;
+                        align-items:center;margin-bottom:16px">
+              <h3>Detailed Results</h3>
+              <span id="acc-detail-batch-status"
+                    style="font-size:13px;
+                           color:var(--text-secondary)"></span>
+            </div>
+            <div class="table-wrap">
+              <table class="runs-table">
+                <thead>
+                  <tr>
+                    <th>Test Case ID</th>
+                    <th>Audio File</th>
+                    <th>Language</th>
+                    <th>Accuracy</th>
+                    <th>Time</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="acc-detail-tbody">
+                  <tr>
+                    <td colspan="6" class="empty-row">
+                      Results will appear here as tests complete…
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+
       </div>
 
       <!-- Detail View -->

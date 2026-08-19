@@ -91,6 +91,7 @@ class TestResult:
     test_case_id: str = ""
     patient_id: str = ""
     doctor_id: str = ""
+    phone: str = ""
     session_id: str = ""
     session_datetime: str = ""
     audio_duration_seconds: int = 0

@@ -23,6 +23,29 @@ log = logging.getLogger("medsum_test_runner")
 VALID_MODELS = ("gpt-4o-mini", "gpt-4", "deepseek")
 
 
+def _parse_doctors(raw) -> list[dict]:
+    """Normalize request doctors into {phone, password, patients: [str, ...]}."""
+    doctors = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        phone = str(item.get("phone") or "").strip()
+        password = str(item.get("password") or "")
+        patients = item.get("patients") or []
+        if isinstance(patients, str):
+            patients = [p.strip() for p in patients.split(",") if p.strip()]
+        else:
+            patients = [str(p).strip() for p in patients if str(p).strip()]
+        if not phone or not password or not patients:
+            continue
+        doctors.append({
+            "phone": phone,
+            "password": password,
+            "patients": patients,
+        })
+    return doctors
+
+
 def _update_step(result: TestResult, step: str, status: str) -> None:
     for item in result.progress_steps:
         if item["step"] == step:
@@ -191,6 +214,9 @@ def execute_test_run(
     folder_label: str = "",
     initiated_by: str | None = None,
     token: str | None = None,
+    patient_id: str | None = None,
+    doctor_id: str | None = None,
+    phone: str | None = None,
 ) -> TestResult:
     """
     Core test execution — used by HTTP route and scheduler.
@@ -207,6 +233,7 @@ def execute_test_run(
         ai_model=ai_model,
         batch_id=batch_id or "",
         folder_label=folder_label,
+        phone=phone or "",
     )
     _ensure_local_refs(result)
     result.progress_steps = [
@@ -371,17 +398,26 @@ def execute_test_run(
             raise RuntimeError("No token provided to execute_test_run")
 
         runtime = medsum_api.get_runtime_state()
-        doctor_id = runtime.get("doctor_id") or str(config["doctor"].get("id", ""))
+        resolved_doctor_id = str(
+            doctor_id
+            or runtime.get("doctor_id")
+            or (config.get("doctor") or {}).get("id", "")
+            or ""
+        )
         runtime["access_token"] = token
-        if doctor_id:
-            runtime["doctor_id"] = doctor_id
-        log.info("[%s] Using existing token, doctor_id=%s", test_id, doctor_id)
-        result.doctor_id = str(doctor_id)
+        if resolved_doctor_id:
+            runtime["doctor_id"] = resolved_doctor_id
+        log.info("[%s] Using existing token, doctor_id=%s", test_id, resolved_doctor_id)
+        result.doctor_id = resolved_doctor_id
 
-        patient_id = str(config["patient"]["id"])
-        log.info("[%s] STEP 6: Verifying patient %s...", test_id, patient_id)
-        patient_data = medsum_api.verify_patient(patient_id, token, config)
-        resolved_patient_id = str(patient_data.get("patient_id") or patient_id)
+        resolved_patient_id = str(
+            patient_id or (config.get("patient") or {}).get("id") or ""
+        ).strip()
+        if not resolved_patient_id:
+            raise RuntimeError("No patient_id provided")
+        log.info("[%s] STEP 6: Verifying patient %s...", test_id, resolved_patient_id)
+        patient_data = medsum_api.verify_patient(resolved_patient_id, token, config)
+        resolved_patient_id = str(patient_data.get("patient_id") or resolved_patient_id)
         result.patient_id = resolved_patient_id
         log.info("[%s] Patient OK: %s", test_id, patient_data.get("patient_name"))
 
@@ -394,7 +430,7 @@ def execute_test_run(
             language=language,
             token=token,
             config=config,
-            user_id=doctor_id,
+            user_id=resolved_doctor_id,
             file_duration=str(duration_seconds) if duration_seconds else None,
         )
         timings["audio_upload_time_seconds"] = round(time.time() - t0, 3)
@@ -409,7 +445,7 @@ def execute_test_run(
         save_result(result)
 
         log.info("[%s] STEP 8: Transcribing via Flask (may take 1-5 min)...", test_id)
-        doctor_data = medsum_api.fetch_doctor_profile(doctor_id, token, config)
+        doctor_data = medsum_api.fetch_doctor_profile(resolved_doctor_id, token, config)
         transcription_result = medsum_api.transcribe_audio(
             audio_bytes=audio_bytes,
             patient_data=patient_data,
@@ -464,7 +500,7 @@ def execute_test_run(
             session_id=session_id,
             audio_id=audio_id,
             patient_id=resolved_patient_id,
-            user_id=doctor_id,
+            user_id=resolved_doctor_id,
             transcription_result=transcription_result,
             token=token,
             config=config,
@@ -775,6 +811,9 @@ def _run_and_store(
     folder_label: str = "",
     initiated_by: str = "manual",
     token: str | None = None,
+    patient_id: str | None = None,
+    doctor_id: str | None = None,
+    phone: str | None = None,
 ) -> TestResult:
     log.info("[%s] Background thread started", test_id)
     config = get_config()
@@ -828,6 +867,9 @@ def _run_and_store(
             folder_label=folder_label,
             initiated_by=initiated_by,
             token=token,
+            patient_id=patient_id,
+            doctor_id=doctor_id,
+            phone=phone,
         )
         log.info("[%s] Background thread finished — status=%s", test_id, result.status)
 
@@ -917,7 +959,7 @@ def run_test():
 
 @bp.route("/run-all", methods=["POST"])
 def run_all_tests():
-    """Run every ready audio file from Drive."""
+    """Run every ready audio file from Drive for each doctor × patient."""
     body = request.get_json(silent=True) or {}
     config = get_config()
     default_model = config.get("ai_comparison", {}).get("default_model", "gpt-4o-mini")
@@ -925,31 +967,52 @@ def run_all_tests():
     if ai_model not in VALID_MODELS:
         return jsonify({"error": f"ai_model must be one of {VALID_MODELS}"}), 400
 
+    doctors = _parse_doctors(body.get("doctors"))
+    if not doctors:
+        return jsonify({"error": "No doctors provided"}), 400
+
     batch_id = str(uuid.uuid4())
 
-    try:
-        token, _ = medsum_api.authenticate_doctor(config)
-    except Exception as exc:
-        return jsonify({"error": f"Auth failed: {exc}"}), 500
+    authed = []
+    for doctor in doctors:
+        try:
+            token, doctor_id = medsum_api.authenticate_doctor(
+                config,
+                phone=doctor["phone"],
+                password=doctor["password"],
+            )
+            authed.append({**doctor, "token": token, "doctor_id": str(doctor_id)})
+        except Exception as exc:
+            return jsonify({
+                "error": f"Auth failed for {doctor['phone']}: {exc}"
+            }), 500
 
     test_cases = [
         tc for tc in drive_service.list_test_cases(config) if tc.get("status") == "ready"
     ]
 
+    jobs = []
+    for doctor in authed:
+        for patient_id in doctor["patients"]:
+            for tc in test_cases:
+                jobs.append((doctor, patient_id, tc))
+
     batch_ref = medsum_api.create_batch(
-        batch_id, ai_model, config, token, total_files=len(test_cases)
+        batch_id, ai_model, config, authed[0]["token"], total_files=len(jobs)
     )
     log.info("Batch created: batch_id=%s batch_ref=%s", batch_id, batch_ref)
 
     stagger = config.get("test_settings", {}).get("run_all_stagger_seconds", 3)
     test_ids = []
-    for i, tc in enumerate(test_cases):
+    for i, (doctor, patient_id, tc) in enumerate(jobs):
         test_id = str(uuid.uuid4())
         test_ids.append({
             "test_id": test_id,
             "language": tc["language"],
             "audio_filename": tc["audio_filename"],
             "folder_label": tc.get("folder_label", ""),
+            "patient_id": patient_id,
+            "doctor_id": doctor["doctor_id"],
         })
         pending = TestResult(
             test_id=test_id,
@@ -959,6 +1022,9 @@ def run_all_tests():
             folder_label=tc.get("folder_label", ""),
             ai_model=ai_model,
             batch_id=batch_id,
+            patient_id=str(patient_id),
+            doctor_id=str(doctor["doctor_id"]),
+            phone=doctor["phone"],
         )
         _ensure_local_refs(pending)
         save_result(pending)
@@ -974,7 +1040,10 @@ def run_all_tests():
                 batch_id,
                 tc.get("folder_label", ""),
                 "scheduler",
-                token,
+                doctor["token"],
+                str(patient_id),
+                str(doctor["doctor_id"]),
+                doctor["phone"],
             ),
         ).start()
 

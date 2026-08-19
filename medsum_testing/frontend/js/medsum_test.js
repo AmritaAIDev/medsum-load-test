@@ -15,6 +15,9 @@ let ltMode = 'drive';      // 'drive' | 'manual'
 let ltPerRowFiles = {};    // { rowIndex: { audio: File|null, gt: File|null } }
 let ltBulkFiles = {};      // { patientId: { audio: File|null, gt: File|null } }
 let ltServiceEmail = '';
+let accDoctors = [];       // [{phone, password, patients: [id, ...]}, ...]
+let accSetupOpen = true;
+let lastListView = 'dashboard';
 
 const STAT_CARDS = [
   { id: 'stat-input', icon: '📤', label: 'Input Upload', sublabel: 'Requests Sent', key: 'total' },
@@ -33,6 +36,7 @@ function initPage() {
   bindEvents();
   ltAddRow();           // start with one blank row
   ltLoadServiceEmail();
+  accAddDoctor();       // start with one blank doctor row
 }
 
 /**
@@ -181,30 +185,38 @@ async function checkAIConfig() {
 }
 
 function bindEvents() {
-  document.getElementById('run-all-btn').addEventListener('click', runAllTests);
-  document.getElementById('back-btn').addEventListener('click', showDashboard);
+  document.getElementById('back-btn').addEventListener('click', () => {
+    if (lastListView === 'runs') showTestRuns();
+    else if (lastListView === 'load-testing') showLoadTesting();
+    else showDashboard();
+  });
   document.getElementById('pdf-btn').addEventListener('click', () => downloadReport('pdf'));
   document.getElementById('excel-btn').addEventListener('click', () => downloadReport('excel'));
 
   document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', e => {
       e.preventDefault();
-      document.querySelectorAll('.nav-item').forEach(n =>
-        n.classList.remove('active'));
+      document.querySelectorAll('.nav-item')
+        .forEach(n => n.classList.remove('active'));
       item.classList.add('active');
 
       const nav = item.dataset.nav;
-      if (nav === 'load-testing') {
+
+      document.getElementById('dashboard-view').style.display = 'none';
+      document.getElementById('detail-view').style.display = 'none';
+      document.getElementById('runs-view').style.display = 'none';
+      document.getElementById('load-testing-view').style.display = 'none';
+
+      if (nav === 'dashboard') {
+        document.getElementById('dashboard-view').style.display = '';
+        lastListView = 'dashboard';
+      } else if (nav === 'runs') {
+        showTestRuns();
+      } else if (nav === 'load-testing') {
         showLoadTesting();
       } else {
-        // Hide load testing view if open
-        const ltView = document.getElementById('load-testing-view');
-        if (ltView) ltView.style.display = 'none';
-        if (nav === 'dashboard') {
-          showDashboard();
-        } else {
-          showDashboard();
-        }
+        document.getElementById('dashboard-view').style.display = '';
+        lastListView = 'dashboard';
       }
     });
   });
@@ -310,30 +322,284 @@ function renderStatCards(data) {
   }).join('');
 }
 
+function accToggleSetup() {
+  accSetupOpen = !accSetupOpen;
+  document.getElementById('acc-setup-body').style.display =
+    accSetupOpen ? '' : 'none';
+  document.getElementById('acc-setup-arrow').textContent =
+    accSetupOpen ? '▼' : '▶';
+}
+
+function accAddDoctor(phone = '', password = '', patients = []) {
+  const idx = accDoctors.length;
+  accDoctors.push({ phone, password, patients: [...patients] });
+
+  const tr = document.createElement('tr');
+  tr.id = `acc-doc-row-${idx}`;
+  tr.innerHTML = `
+    <td>
+      <input type="text" value="${esc(phone)}"
+             placeholder="9876543210"
+             onchange="accDoctors[${idx}].phone=this.value;
+                       accUpdateSummary()"
+             style="width:100%;padding:8px;
+                    border:1px solid var(--border);
+                    border-radius:6px;font-size:14px">
+    </td>
+    <td>
+      <div style="display:flex;align-items:center;gap:6px">
+        <input type="password" value="${esc(password)}"
+               id="acc-pwd-${idx}"
+               placeholder="Password"
+               onchange="accDoctors[${idx}].password=this.value"
+               style="flex:1;padding:8px;
+                      border:1px solid var(--border);
+                      border-radius:6px;font-size:14px">
+        <button type="button"
+                onclick="accTogglePwd(${idx})"
+                style="background:none;border:none;
+                       cursor:pointer;font-size:16px;
+                       color:var(--text-secondary)">👁</button>
+      </div>
+    </td>
+    <td>
+      <div id="acc-patients-${idx}"
+           style="display:flex;flex-wrap:wrap;
+                  gap:4px;margin-bottom:6px">
+      </div>
+      <div style="display:flex;gap:6px">
+        <input type="text"
+               id="acc-patient-input-${idx}"
+               placeholder="Patient ID + Enter"
+               style="flex:1;padding:6px 8px;
+                      border:1px solid var(--border);
+                      border-radius:6px;font-size:13px"
+               onkeydown="accPatientKeydown(event,${idx})">
+        <button type="button"
+                onclick="accAddPatient(${idx})"
+                class="btn-outline"
+                style="padding:6px 10px;font-size:12px">+
+        </button>
+      </div>
+    </td>
+    <td>
+      <button type="button"
+              onclick="accRemoveDoctor(${idx})"
+              style="background:none;border:none;
+                     cursor:pointer;color:var(--danger);
+                     font-size:18px">🗑</button>
+    </td>`;
+
+  document.getElementById('acc-doctor-tbody').appendChild(tr);
+  accRefreshPatientTags(idx);
+  accUpdateSummary();
+}
+
+function accPatientKeydown(e, idx) {
+  if (e.key === 'Enter' || e.key === ',') {
+    e.preventDefault();
+    accAddPatient(idx);
+  }
+}
+
+function accAddPatient(idx) {
+  const input = document.getElementById(`acc-patient-input-${idx}`);
+  if (!input) return;
+  const val = input.value.trim().replace(/,/g, '');
+  if (!val || isNaN(val)) {
+    showToast('Patient ID must be numeric');
+    return;
+  }
+  if (accDoctors[idx].patients.includes(val)) {
+    showToast('Patient ID already added');
+    input.value = '';
+    return;
+  }
+  accDoctors[idx].patients.push(val);
+  input.value = '';
+  accRefreshPatientTags(idx);
+  accUpdateSummary();
+}
+
+function accRemovePatient(idx, patientId) {
+  accDoctors[idx].patients =
+    accDoctors[idx].patients.filter(p => p !== String(patientId));
+  accRefreshPatientTags(idx);
+  accUpdateSummary();
+}
+
+function accRefreshPatientTags(idx) {
+  const container = document.getElementById(`acc-patients-${idx}`);
+  if (!container) return;
+  container.innerHTML = accDoctors[idx].patients.map(p =>
+    `<span style="display:inline-flex;align-items:center;gap:4px;
+                  padding:2px 8px;background:var(--primary-light);
+                  color:var(--primary);border-radius:4px;
+                  font-size:12px;font-weight:600;margin:2px">
+      ${esc(String(p))}
+      <span onclick="accRemovePatient(${idx},${JSON.stringify(String(p))})"
+            style="cursor:pointer;margin-left:2px;
+                   color:var(--danger)">×</span>
+    </span>`
+  ).join('');
+}
+
+function accRemoveDoctor(idx) {
+  const tr = document.getElementById(`acc-doc-row-${idx}`);
+  if (tr) tr.remove();
+  accDoctors[idx] = null;
+  accUpdateSummary();
+}
+
+function accTogglePwd(idx) {
+  const input = document.getElementById(`acc-pwd-${idx}`);
+  if (!input) return;
+  input.type = input.type === 'password' ? 'text' : 'password';
+}
+
+function accUpdateSummary() {
+  const active = accDoctors.filter(d => d !== null);
+  const totalPatients = active.reduce(
+    (sum, d) => sum + d.patients.length, 0
+  );
+  const el = document.getElementById('acc-setup-summary');
+  if (el) {
+    el.textContent = active.length > 0
+      ? `${active.length} doctor${active.length !== 1 ? 's' : ''} · ${totalPatients} patient${totalPatients !== 1 ? 's' : ''}`
+      : 'Not configured';
+  }
+}
+
+function accExportConfig() {
+  const active = accGetActiveDoctors();
+  const config = {
+    version: 1,
+    saved_at: new Date().toISOString(),
+    doctors: active.map(d => ({
+      phone: d.phone,
+      password: d.password,
+      patients: d.patients,
+    })),
+  };
+  const blob = new Blob(
+    [JSON.stringify(config, null, 2)],
+    { type: 'application/json' }
+  );
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download =
+    `acc_config_${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function accImportConfig() {
+  document.getElementById('acc-config-input').click();
+}
+
+function accHandleConfigImport(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const config = JSON.parse(e.target.result);
+      if (!config.doctors) throw new Error('Invalid config');
+      document.getElementById('acc-doctor-tbody').innerHTML = '';
+      accDoctors = [];
+      config.doctors.forEach(d =>
+        accAddDoctor(
+          d.phone || '',
+          d.password || '',
+          d.patients || []
+        )
+      );
+      showToast(
+        `Imported — ${config.doctors.length} doctor(s) restored`
+      );
+    } catch (err) {
+      showToast(`Import failed: ${err.message}`);
+    }
+  };
+  reader.readAsText(file);
+  input.value = '';
+}
+
+function accGetActiveDoctors() {
+  return accDoctors.filter(
+    d => d !== null && d.phone && d.password && d.patients.length > 0
+  );
+}
+
 async function runAllTests() {
+  const doctors = accGetActiveDoctors();
+  if (doctors.length === 0) {
+    showToast(
+      'Add at least one doctor with phone, password '
+      + 'and at least one patient ID first.'
+    );
+    if (!accSetupOpen) accToggleSetup();
+    return;
+  }
+
   const btn = document.getElementById('run-all-btn');
   const model = document.getElementById('ai-model-select').value;
 
   btn.disabled = true;
   btn.textContent = '⏳ Running...';
 
+  document.getElementById('acc-live-section').style.display = '';
+  document.getElementById('acc-stat-total').textContent = '—';
+  document.getElementById('acc-stat-passed').textContent = '0';
+  document.getElementById('acc-stat-failed').textContent = '0';
+  document.getElementById('acc-stat-rate').textContent = '—';
+  document.getElementById('acc-stat-accuracy').textContent = '—';
+  document.getElementById('acc-summary-tbody').innerHTML = `
+    <tr><td colspan="7" class="empty-row">
+      Starting…
+    </td></tr>`;
+  document.getElementById('acc-detail-tbody').innerHTML = `
+    <tr><td colspan="6" class="empty-row">
+      Results will appear here as tests complete…
+    </td></tr>`;
+
   try {
     const resp = await fetch(`${API}/run-all`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ai_model: model }),
+      body: JSON.stringify({
+        ai_model: model,
+        doctors: doctors.map(d => ({
+          phone: d.phone,
+          password: d.password,
+          patients: d.patients,
+        })),
+      }),
     });
     const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    if (!resp.ok)
+      throw new Error(data.error || `HTTP ${resp.status}`);
 
-    showToast(`Batch ${data.batch_ref || data.batch_id.slice(0, 8)} — ${data.total} tests started`);
+    showToast(
+      `Batch ${data.batch_ref || data.batch_id.slice(0, 8)}`
+      + ` — ${data.total} tests started`
+    );
     currentBatchId = data.batch_id;
-    document.getElementById('batch-status').textContent =
+
+    const statusText =
       `Batch running: 0 / ${data.total} complete`;
+    document.getElementById('batch-status').textContent =
+      statusText;
+    document.getElementById('acc-detail-batch-status')
+      .textContent = statusText;
 
     if (batchPollInterval) clearInterval(batchPollInterval);
-    batchPollInterval = setInterval(() => pollBatch(data.batch_id), 5000);
+    batchPollInterval = setInterval(
+      () => pollBatch(data.batch_id), 5000
+    );
     pollBatch(data.batch_id);
+
   } catch (err) {
     showToast(`Run failed: ${err.message}`);
     btn.disabled = false;
@@ -358,8 +624,30 @@ async function pollBatch(batchId) {
     renderAccuracyChart(data.results);
     renderDistributionChart(data.results);
 
-    document.getElementById('batch-status').textContent =
-      `Batch: ${data.completed} complete, ${data.failed} failed, ${data.pending} pending`;
+    const accTotal = document.getElementById('acc-stat-total');
+    if (accTotal) {
+      accTotal.textContent = data.total;
+      document.getElementById('acc-stat-passed').textContent = data.passed;
+      document.getElementById('acc-stat-failed').textContent = data.failed;
+      const rate = data.total > 0
+        ? Math.round(data.passed / data.total * 100) : 0;
+      document.getElementById('acc-stat-rate').textContent =
+        data.pending === 0 ? `${rate}%` : '—';
+      document.getElementById('acc-stat-accuracy').textContent =
+        data.avg_accuracy != null ? `${data.avg_accuracy}%` : '—';
+    }
+
+    accRenderDetailTable(data.results);
+
+    const statusText =
+      `Batch: ${data.completed} complete, `
+      + `${data.failed} failed, ${data.pending} pending`;
+    const batchStatus = document.getElementById('batch-status');
+    if (batchStatus) batchStatus.textContent = statusText;
+    const detailStatus = document.getElementById('acc-detail-batch-status');
+    if (detailStatus) detailStatus.textContent = statusText;
+
+    accRenderSummaryTable(data.results);
 
     if (data.pending === 0) {
       clearInterval(batchPollInterval);
@@ -391,6 +679,109 @@ function renderTestRunsTable(results) {
       || aiSummary(r.transcription_comparison)
       || '';
     const pillId = `table-${String(r.test_id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`;
+
+    const timeDisplay = r.total_test_time_seconds != null
+      ? formatDuration(r.total_test_time_seconds)
+      : '—';
+
+    const statusBadge = r.status === 'complete' ? '✅ Completed' :
+      r.status === 'failed' ? '❌ Failed' :
+      r.status === 'running' ? '⏳ Running' : '⏸ Pending';
+
+    const displayId = r.tc_ref
+      || r.run_ref
+      || `${(r.test_id || '').slice(0, 8)}…`;
+
+    const langClass = (r.language || '').toLowerCase().replace(/\s+/g, '-');
+
+    return `<tr onclick="openTestDetail('${esc(r.test_id)}')"
+                style="cursor:pointer"
+                title="${esc(r.run_ref || r.test_id || '')}">
+      <td class="run-id-cell">
+        <span class="tc-ref">${esc(displayId)}</span>
+      </td>
+      <td>${esc(r.audio_filename || '—')}</td>
+      <td>
+        <span class="lang-badge lang-${esc(langClass)}">
+          ${esc(r.language || '—')}
+        </span>
+      </td>
+      <td onclick="event.stopPropagation()">
+        ${scorePill(score, reason, 'Accuracy', pillId)}
+      </td>
+      <td>${esc(timeDisplay)}</td>
+      <td>${statusBadge}</td>
+    </tr>`;
+  }).join('');
+}
+
+function accRenderSummaryTable(results) {
+  const tbody = document.getElementById('acc-summary-tbody');
+  if (!tbody) return;
+  if (!results || !results.length) {
+    tbody.innerHTML =
+      '<tr><td colspan="7" class="empty-row">'
+      + 'No results yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = results.map((r, i) => {
+    const score =
+      r.comparison?.similarity_score
+      ?? r.similarity_score
+      ?? r.accuracy_score;
+    const scoreCls =
+      score == null ? 'muted'
+      : score >= 90 ? 'high'
+      : score >= 75 ? 'med'
+      : score >= 60 ? 'warn' : 'low';
+    const statusBadge =
+      r.status === 'complete'
+        ? `<span style="color:var(--success)">✓ Done</span>`
+      : r.status === 'failed'
+        ? `<span style="color:var(--danger)">✗ Failed</span>`
+      : r.status === 'running'
+        ? `<span style="color:var(--primary)">⏳ Running</span>`
+      : `<span style="color:var(--text-muted)">⏸ Pending</span>`;
+    const timeDisplay = r.total_test_time_seconds != null
+      ? formatDuration(r.total_test_time_seconds) : '—';
+    return `
+      <tr>
+        <td>${i + 1}</td>
+        <td style="font-family:var(--font-mono);font-size:13px">
+          ${esc(r.phone || '—')}
+        </td>
+        <td>${esc(String(r.patient_id || '—'))}</td>
+        <td>${esc(r.audio_filename || '—')}</td>
+        <td>${statusBadge}</td>
+        <td>${esc(timeDisplay)}</td>
+        <td>
+          <span class="accuracy-badge ${scoreCls}">
+            ${score != null ? `${score}%` : '—'}
+          </span>
+        </td>
+      </tr>`;
+  }).join('');
+}
+
+function accRenderDetailTable(results) {
+  const tbody = document.getElementById('acc-detail-tbody');
+  if (!tbody) return;
+  if (!results || !results.length) {
+    tbody.innerHTML =
+      '<tr><td colspan="6" class="empty-row">'
+      + 'No results yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = results.slice(0, 50).map(r => {
+    const score = r.comparison?.similarity_score
+      ?? r.similarity_score
+      ?? r.transcription_comparison?.similarity_score
+      ?? r.accuracy_score;
+    const reason = aiSummary(r.comparison)
+      || r.comparison_summary
+      || aiSummary(r.transcription_comparison)
+      || '';
+    const pillId = `detail-${String(r.test_id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`;
 
     const timeDisplay = r.total_test_time_seconds != null
       ? formatDuration(r.total_test_time_seconds)
@@ -530,6 +921,10 @@ async function openTestDetail(testId) {
 
 function renderDetailPage(result) {
   document.getElementById('dashboard-view').style.display = 'none';
+  const runsView = document.getElementById('runs-view');
+  if (runsView) runsView.style.display = 'none';
+  const ltView = document.getElementById('load-testing-view');
+  if (ltView) ltView.style.display = 'none';
   document.getElementById('detail-view').style.display = 'block';
 
   document.getElementById('detail-tc-ref').textContent = result.tc_ref || '—';
@@ -1197,10 +1592,23 @@ function computeWordDiff(a, b) {
 }
 
 function showDashboard() {
+  lastListView = 'dashboard';
   document.getElementById('dashboard-view').style.display = '';
   document.getElementById('detail-view').style.display = 'none';
+  const runsView = document.getElementById('runs-view');
+  if (runsView) runsView.style.display = 'none';
+  const ltView = document.getElementById('load-testing-view');
+  if (ltView) ltView.style.display = 'none';
   currentTestId = null;
   currentDetailResult = null;
+}
+
+function showTestRuns() {
+  lastListView = 'runs';
+  document.getElementById('dashboard-view').style.display = 'none';
+  document.getElementById('detail-view').style.display = 'none';
+  document.getElementById('load-testing-view').style.display = 'none';
+  document.getElementById('runs-view').style.display = '';
 }
 
 function downloadReport(format) {
@@ -1240,8 +1648,11 @@ window.toggleSection = toggleSection;
 // ── Load Testing ─────────────────────────────────────────────────────────────
 
 function showLoadTesting() {
+  lastListView = 'load-testing';
   document.getElementById('dashboard-view').style.display = 'none';
   document.getElementById('detail-view').style.display = 'none';
+  const runsView = document.getElementById('runs-view');
+  if (runsView) runsView.style.display = 'none';
   document.getElementById('load-testing-view').style.display = '';
   ltUpdateRowCount();
 }
@@ -1973,6 +2384,17 @@ async function ltExportResults() {
   }
 }
 
+window.accToggleSetup = accToggleSetup;
+window.accAddDoctor = accAddDoctor;
+window.accRemoveDoctor = accRemoveDoctor;
+window.accAddPatient = accAddPatient;
+window.accRemovePatient = accRemovePatient;
+window.accPatientKeydown = accPatientKeydown;
+window.accTogglePwd = accTogglePwd;
+window.accExportConfig = accExportConfig;
+window.accImportConfig = accImportConfig;
+window.accHandleConfigImport = accHandleConfigImport;
+window.showTestRuns = showTestRuns;
 window.ltAddRow = ltAddRow;
 window.ltRemoveRow = ltRemoveRow;
 window.ltTogglePwd = ltTogglePwd;

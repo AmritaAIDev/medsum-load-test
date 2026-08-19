@@ -128,16 +128,26 @@ def _extract_summary(body: dict) -> str:
     return text
 
 
-def authenticate_doctor(config: dict, *, force: bool = False) -> tuple[str, str]:
+def authenticate_doctor(
+    config: dict,
+    *,
+    force: bool = False,
+    phone: str | None = None,
+    password: str | None = None,
+) -> tuple[str, str]:
     """
     POST /api/login/
     Request:  { "phone_number": "...", "password": "..." }
     Response: { "access": "...", "refresh": "...", "user": {...} }
     Returns:  (access_token, doctor_id)
+
+    If phone/password are provided they override YAML doctor credentials
+    and the cached token is not reused.
     """
     runtime = get_runtime()
-    if not force and runtime.get("access_token"):
-        doctor_id = runtime.get("doctor_id") or str(config["doctor"].get("id", ""))
+    override = phone is not None or password is not None
+    if not force and not override and runtime.get("access_token"):
+        doctor_id = runtime.get("doctor_id") or str((config.get("doctor") or {}).get("id", ""))
         log.info("AUTH ✓ using cached token — doctor_id: %s", doctor_id)
         return runtime["access_token"], str(doctor_id)
 
@@ -149,16 +159,20 @@ def authenticate_doctor(config: dict, *, force: bool = False) -> tuple[str, str]
     login_path = config["backends"].get("login_path", "/api/login/")
     url = f"{base_url}{login_path}"
 
-    doctor = config["doctor"]
-    phone_number = doctor.get("phone_number") or doctor.get("username", "")
-    password = doctor["password"]
+    doctor = config.get("doctor") or {}
+    phone_number = phone if phone is not None else (
+        doctor.get("phone_number") or doctor.get("username", "")
+    )
+    login_password = password if password is not None else doctor.get("password", "")
+    if not phone_number or not login_password:
+        raise AuthError("AUTH_FAILED: phone_number and password are required")
 
     log.info("AUTH → POST %s", url)
     log.info("AUTH   phone_number: %s", phone_number)
 
     payload = {
         "phone_number": phone_number,
-        "password": password,
+        "password": login_password,
     }
 
     try:
@@ -582,6 +596,28 @@ def get_runtime_state() -> dict:
     return get_runtime()
 
 
+# Caller-supplied ids (often UUIDs) → Django batch_id strings like BATCH-20260818-001
+_BATCH_ID_MAP: dict[str, str] = {}
+
+_NON_TERMINAL_STATUSES = frozenset({"running", "pending"})
+_TERMINAL_STATUSES = frozenset({"finished", "failed", "skipped"})
+
+
+def _django_batch_id(value: Any) -> str | None:
+    """Resolve a caller batch_id to the Django BATCH-YYYYMMDD-001 string."""
+    if value is None:
+        return None
+    key = str(value).strip()
+    if not key:
+        return None
+    mapped = _BATCH_ID_MAP.get(key)
+    if mapped:
+        return mapped
+    if key.upper().startswith("BATCH-"):
+        return key
+    return None
+
+
 def create_batch(
     batch_id: str,
     ai_model: str,
@@ -591,7 +627,8 @@ def create_batch(
 ) -> str:
     """
     POST /api/accuracy-testing/batches/create/
-    Returns batch_ref (e.g. BATCH-20260813-00001)
+    Django generates batch_id (BATCH-YYYYMMDD-001). That string is returned
+    and used for later run payloads / GET URLs.
     """
     base_url = config["backends"]["django_base_url"].rstrip("/")
     path = config["backends"].get(
@@ -600,12 +637,11 @@ def create_batch(
     url = f"{base_url}{path}"
 
     payload = {
-        "batch_id": batch_id,
         "ai_model": ai_model,
         "total_files": total_files,
     }
 
-    log.info("CREATE_BATCH → POST %s batch_id=%s", url, batch_id)
+    log.info("CREATE_BATCH → POST %s", url)
     try:
         resp = requests.post(
             url,
@@ -616,8 +652,13 @@ def create_batch(
         log.info("CREATE_BATCH ← %s", resp.status_code)
         if resp.status_code in (200, 201):
             data = resp.json()
-            log.info("CREATE_BATCH ✓ batch_ref=%s", data.get("batch_ref"))
-            return data.get("batch_ref", "")
+            django_batch_id = str(data.get("batch_id") or "").strip()
+            if not django_batch_id:
+                django_batch_id = str(data.get("batch_ref") or "").strip()
+            if batch_id and django_batch_id:
+                _BATCH_ID_MAP[str(batch_id)] = django_batch_id
+            log.info("CREATE_BATCH ✓ batch_id=%s", django_batch_id)
+            return django_batch_id
         log.warning(
             "CREATE_BATCH failed %s: %s",
             resp.status_code,
@@ -631,12 +672,36 @@ def create_batch(
 def save_test_run(payload: dict, token: str, config: dict) -> dict:
     """
     POST /api/accuracy-testing/runs/create/
-    Upsert test run in Django DB.
+    Rows are created only at a terminal status: finished, failed, or skipped.
     Non-fatal — logs warning on failure, never raises.
     """
     if not config.get("features", {}).get("save_to_django_db", True):
         log.info("SAVE_TEST_RUN: skipped (save_to_django_db=false in config)")
         return payload
+
+    outgoing = dict(payload)
+    raw_status = outgoing.get("status")
+    status = str(raw_status or "").strip().lower()
+
+    if status in _NON_TERMINAL_STATUSES:
+        log.info(
+            "SAVE_TEST_RUN: skipped (status=%s — Django rows are created only at terminal state)",
+            status,
+        )
+        return payload
+
+    if status == "complete":
+        outgoing["status"] = "finished"
+        status = "finished"
+    elif status and status not in _TERMINAL_STATUSES:
+        outgoing["status"] = "skipped"
+        status = "skipped"
+
+    resolved_batch = _django_batch_id(outgoing.get("batch_id"))
+    if resolved_batch:
+        outgoing["batch_id"] = resolved_batch
+    elif "batch_id" in outgoing:
+        outgoing["batch_id"] = None
 
     base_url = config["backends"]["django_base_url"].rstrip("/")
     run_path = config["backends"].get(
@@ -645,16 +710,17 @@ def save_test_run(payload: dict, token: str, config: dict) -> dict:
     url = f"{base_url}{run_path}"
 
     log.info(
-        "SAVE_TEST_RUN → POST %s status=%s test_id=%s",
+        "SAVE_TEST_RUN → POST %s status=%s test_id=%s batch_id=%s",
         url,
-        payload.get("status"),
-        payload.get("test_id"),
+        outgoing.get("status"),
+        outgoing.get("test_id"),
+        outgoing.get("batch_id"),
     )
 
     try:
         resp = requests.post(
             url,
-            json=payload,
+            json=outgoing,
             headers=_auth_headers(token),
             timeout=30,
         )
@@ -670,4 +736,4 @@ def save_test_run(payload: dict, token: str, config: dict) -> dict:
     except Exception as exc:
         log.warning("SAVE_TEST_RUN error (non-fatal): %s", exc)
 
-    return payload
+    return outgoing
