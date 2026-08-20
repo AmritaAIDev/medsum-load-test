@@ -142,18 +142,36 @@ function makeCollapsible(id, title, contentHtml, {
   scoreReason = null,
   scoreLabel = '',
   headerRight = '',
+  timeSeconds = null,
+  timeLabel = '',
 } = {}) {
   const arrow = defaultOpen ? '▼' : '▶';
   const scoreBadge = score != null
     ? scorePill(score, scoreReason, scoreLabel, `${id}-header`)
     : '';
 
+  let timeChipHtml = '';
+  if (timeSeconds != null && parseFloat(timeSeconds) > 0) {
+    const t = parseFloat(timeSeconds);
+    const display = t >= 60
+      ? `${Math.floor(t / 60)}m ${Math.round(t % 60)}s`
+      : `${t.toFixed(1)}s`;
+    const label = timeLabel ? esc(timeLabel) : 'processing';
+    timeChipHtml = `
+            <span class="header-time-chip" title="${label} processing time">
+                ⏱ ${display}
+            </span>`;
+  }
+
   return `
         <div class="collapsible-section" id="section-${id}">
             <div class="collapsible-header" onclick="toggleSection('${id}')">
                 <span class="collapsible-arrow" id="arrow-${id}">${arrow}</span>
                 <span class="collapsible-title">${title}</span>
-                <span onclick="event.stopPropagation()">${scoreBadge}</span>
+                <span class="collapsible-header-right" onclick="event.stopPropagation()">
+                    ${timeChipHtml}
+                    ${scoreBadge}
+                </span>
                 ${headerRight}
             </div>
             <div class="collapsible-body" id="body-${id}"
@@ -1081,6 +1099,8 @@ function renderTranscriptionComparison(result) {
 
   const comp = result.comparison || result.transcription_comparison || {};
   const score = comp.similarity_score;
+  const tr = result.transcription_result || {};
+  const sttTime = tr['transcription-time'] ?? tr?.time?.ASR;
 
   const { gtHtml, genHtml } = computeWordDiff(gt, gen);
 
@@ -1126,6 +1146,8 @@ function renderTranscriptionComparison(result) {
     score,
     scoreReason: comp.summary,
     scoreLabel: 'Transcription',
+    timeSeconds: sttTime,
+    timeLabel: 'STT',
   });
 }
 
@@ -1143,6 +1165,8 @@ function renderTranslationComparison(result) {
 
   const comp = result.translation_comparison || {};
   const score = comp.similarity_score;
+  const tr = result.transcription_result || {};
+  const translationTime = tr['translation-time'] ?? tr?.time?.Translation;
 
   const { gtHtml, genHtml } = computeWordDiff(gtTrans, genTrans);
 
@@ -1178,6 +1202,8 @@ function renderTranslationComparison(result) {
     score,
     scoreReason: comp.summary,
     scoreLabel: 'Translation',
+    timeSeconds: translationTime,
+    timeLabel: 'Translation',
   });
 }
 
@@ -1330,12 +1356,16 @@ function renderSOAPComparison(result) {
         </div>`;
 
   const content = scoreRow + sectionsHtml;
+  const tr = result.transcription_result || {};
+  const llmTime = tr['llm-time'] ?? tr?.time?.llm;
 
   return makeCollapsible('soap', '📋 SOAP Comparison', content, {
     defaultOpen: true,
     score: soapGenScore,
     scoreReason: comp.gt_vs_generated?.summary,
     scoreLabel: 'SOAP GT→Gen',
+    timeSeconds: llmTime,
+    timeLabel: 'LLM',
   });
 }
 

@@ -932,6 +932,28 @@ body {
 }
 .collapsible-title { flex: 1; }
 
+.collapsible-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.header-time-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  background: #E8EAF6;
+  color: #3949AB;
+  border: 1px solid #C5CAE9;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: default;
+}
+
 .soap-three-scores {
   display: flex;
   gap: 1.5rem;
