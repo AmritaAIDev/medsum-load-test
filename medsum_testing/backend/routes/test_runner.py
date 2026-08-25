@@ -114,6 +114,8 @@ def _build_db_payload(result: TestResult) -> dict:
         "audio_id": str(result.job_id or ""),
         "summary_id": str((result.saved_summary or {}).get("summary_id", "")),
         "doctor_id": str(result.doctor_id or ""),
+        "doctor_name": result.doctor_name or "",
+        "phone": result.phone or "",
         "patient_id": str(result.patient_id or ""),
 
         "ground_truth": result.ground_truth_transcription,
@@ -456,6 +458,7 @@ def execute_test_run(
 
         log.info("[%s] STEP 8: Transcribing via Flask (may take 1-5 min)...", test_id)
         doctor_data = medsum_api.fetch_doctor_profile(resolved_doctor_id, token, config)
+        result.doctor_name = (doctor_data.get("name") or "").strip()
         transcription_result = medsum_api.transcribe_audio(
             audio_bytes=audio_bytes,
             patient_data=patient_data,

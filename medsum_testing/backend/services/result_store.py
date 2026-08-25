@@ -26,6 +26,34 @@ def load_result(test_id: str) -> Optional[TestResult]:
         return TestResult.from_dict(json.load(f))
 
 
+def _identity_fields(data: dict) -> dict:
+    """Doctor / patient fields for list views — including nested transcribe payload."""
+    tr = data.get("transcription_result")
+    details = tr.get("doctor_details") if isinstance(tr, dict) else None
+    demo = tr.get("patient_demographics") if isinstance(tr, dict) else None
+    if not isinstance(details, dict):
+        details = {}
+    if not isinstance(demo, dict):
+        demo = {}
+    doctor_name = (
+        data.get("doctor_name")
+        or details.get("doctor_name")
+        or ""
+    )
+    patient_id = (
+        data.get("patient_id")
+        or demo.get("abha_id")
+        or demo.get("patient_id")
+        or ""
+    )
+    return {
+        "patient_id": str(patient_id or ""),
+        "phone": data.get("phone") or "",
+        "doctor_id": str(data.get("doctor_id") or ""),
+        "doctor_name": str(doctor_name or "").strip(),
+    }
+
+
 def list_results() -> list[dict]:
     return [summary for _, summary in _iter_result_files()]
 
@@ -68,6 +96,7 @@ def _iter_result_files(full: bool = False):
                 ),
                 "status": data.get("status", ""),
                 "batch_id": data.get("batch_id", ""),
+                **_identity_fields(data),
                 "total_test_time_seconds": data.get("total_test_time_seconds"),
                 "comparison": data.get("comparison") or data.get("transcription_comparison"),
                 "has_ground_truth": data.get("has_ground_truth", True),

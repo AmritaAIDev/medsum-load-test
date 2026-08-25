@@ -34,20 +34,9 @@ function initPage() {
   loadRecentResults();
   checkAIConfig();
   bindEvents();
-  restorePatientId();
   ltAddRow();           // start with one blank row
   ltLoadServiceEmail();
   accAddDoctor();       // start with one blank doctor row
-}
-
-function restorePatientId() {
-  const input = document.getElementById('patient-id-input');
-  if (!input) return;
-  const savedPatientId = localStorage.getItem('medsum_patient_id');
-  if (savedPatientId) input.value = savedPatientId;
-  input.addEventListener('change', function () {
-    localStorage.setItem('medsum_patient_id', this.value.trim());
-  });
 }
 
 /**
@@ -267,7 +256,7 @@ async function loadDriveStats() {
     const files = data.files || [];
     driveStats.total = files.length;
     driveStats.with_transcript = files.filter(f => f.has_transcript).length;
-    renderStatCards({ total: driveStats.total, with_transcript: driveStats.with_transcript });
+    refreshDashboard(latestResults);
   } catch (err) {
     console.warn('Drive stats failed:', err);
   }
@@ -280,11 +269,84 @@ async function loadRecentResults() {
     const items = await resp.json();
     latestResults = items;
     renderTestRunsTable(items.map(normalizeResultSummary));
-    renderStatCards(computeStatsFromResults(items));
+    refreshDashboard(items);
+    fillRunsHistory(items);
   } catch (err) {
     document.getElementById('test-runs-tbody').innerHTML =
       `<tr><td colspan="6" class="empty-row">Error: ${esc(err.message)}</td></tr>`;
   }
+}
+
+function isExecutionFailed(r) {
+  return r?.status === 'failed' || r?.final_result === 'failed';
+}
+
+function computeAccRunStats(items) {
+  const rows = items || [];
+  const failed = rows.filter(isExecutionFailed).length;
+  const passed = rows.filter(
+    r => r.status === 'complete' && !isExecutionFailed(r)
+  ).length;
+  const scores = rows
+    .filter(r => r.status === 'complete')
+    .map(resultScore)
+    .filter(s => s != null);
+  const avg = scores.length
+    ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 10) / 10
+    : null;
+  const settled = passed + failed;
+  return {
+    total: rows.length,
+    passed,
+    failed,
+    avg,
+    rate: settled ? Math.round(passed / settled * 100) : 0,
+  };
+}
+
+function applyAccRunStats(stats, rateReady = true) {
+  const totalEl = document.getElementById('acc-stat-total');
+  if (!totalEl) return;
+  totalEl.textContent = String(stats.total);
+  document.getElementById('acc-stat-passed').textContent = String(stats.passed);
+  document.getElementById('acc-stat-failed').textContent = String(stats.failed);
+  document.getElementById('acc-stat-rate').textContent =
+    rateReady && stats.total ? `${stats.rate}%` : '—';
+  document.getElementById('acc-stat-accuracy').textContent =
+    stats.avg != null ? `${stats.avg}%` : '—';
+}
+
+function fillRunsHistory(results) {
+  if (batchPollInterval) return;
+  const items = results || latestResults || [];
+  const section = document.getElementById('acc-live-section');
+  if (!section) return;
+  section.style.display = '';
+
+  applyAccRunStats(computeAccRunStats(items));
+  accRenderSummaryTable(items);
+
+  const status = document.getElementById('acc-detail-batch-status');
+  if (status) {
+    status.textContent = items.length
+      ? `${items.length} previous run${items.length === 1 ? '' : 's'}`
+      : '';
+  }
+}
+
+function resultScore(r) {
+  return r?.comparison?.similarity_score
+    ?? r?.transcription_comparison?.similarity_score
+    ?? r?.accuracy_score
+    ?? r?.similarity_score
+    ?? null;
+}
+
+function refreshDashboard(results) {
+  const items = results || latestResults || [];
+  renderStatCards(computeStatsFromResults(items));
+  renderAccuracyChart(items);
+  renderDistributionChart(items);
 }
 
 function normalizeResultSummary(r) {
@@ -306,21 +368,34 @@ function normalizeResultSummary(r) {
     comparison_summary: comp.summary || '',
     total_test_time_seconds: r.total_test_time_seconds,
     transcription_result: r.transcription_result,
+    patient_id: r.patient_id || r.patientId || '',
+    phone: r.phone || '',
+    doctor_id: r.doctor_id || '',
+    doctor_name: r.doctor_name
+      || r.transcription_result?.doctor_details?.doctor_name
+      || '',
   };
 }
 
 function computeStatsFromResults(results) {
-  const completed = results.filter(r => r.status === 'complete' || r.final_result);
-  const scores = completed
-    .map(r => r.comparison?.similarity_score ?? r.accuracy_score ?? r.transcription_comparison?.similarity_score)
-    .filter(s => s != null);
-  const passed = completed.filter(r => r.final_result === 'pass' || r.final_result === 'complete_no_accuracy').length;
+  const rows = results || [];
+  const completed = rows.filter(r => r.status === 'complete' || r.final_result);
+  const scores = completed.map(resultScore).filter(s => s != null);
+  const passed = completed.filter(
+    r => r.final_result === 'pass' || r.final_result === 'complete_no_accuracy'
+  ).length;
+  const totalSeconds = completed.reduce((sum, r) => {
+    const t = Number(r.total_test_time_seconds);
+    return Number.isFinite(t) && t > 0 ? sum + t : sum;
+  }, 0);
   return {
-    total: driveStats.total || results.length,
+    total: driveStats.total || rows.length,
     with_transcript: driveStats.with_transcript,
     passed,
-    avg_accuracy: scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 10) / 10 : 0,
-    total_time: '--',
+    avg_accuracy: scores.length
+      ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 10) / 10
+      : 0,
+    total_time: totalSeconds > 0 ? formatDuration(totalSeconds) : '--',
     report_count: completed.length,
   };
 }
@@ -562,23 +637,19 @@ function accGetActiveDoctors() {
 }
 
 async function runAllTests() {
-  const btn = document.getElementById('run-all-btn');
-  const model = document.getElementById('ai-model-select')?.value || 'gpt-4o-mini';
-  const patientId = document.getElementById('patient-id-input')?.value?.trim();
-
-  if (!patientId) {
-    showToast('⚠ Please enter a Patient ID before running tests', 'warning');
-    document.getElementById('patient-id-input')?.focus();
-    return;
-  }
-  localStorage.setItem('medsum_patient_id', patientId);
-
-  const doctors = accDoctors.filter(d => d !== null && d.phone && d.password);
+  const doctors = accGetActiveDoctors();
   if (doctors.length === 0) {
-    showToast('Add at least one doctor with phone and password first.');
+    showToast(
+      'Add at least one doctor with phone, password, '
+      + 'and at least one Patient ID in Doctor & Patient Setup.',
+      'warning'
+    );
     if (!accSetupOpen) accToggleSetup();
     return;
   }
+
+  const btn = document.getElementById('run-all-btn');
+  const model = document.getElementById('ai-model-select')?.value || 'gpt-4o-mini';
 
   btn.disabled = true;
   btn.textContent = '⏳ Running...';
@@ -590,12 +661,8 @@ async function runAllTests() {
   document.getElementById('acc-stat-rate').textContent = '—';
   document.getElementById('acc-stat-accuracy').textContent = '—';
   document.getElementById('acc-summary-tbody').innerHTML = `
-    <tr><td colspan="7" class="empty-row">
+    <tr><td colspan="8" class="empty-row">
       Starting…
-    </td></tr>`;
-  document.getElementById('acc-detail-tbody').innerHTML = `
-    <tr><td colspan="6" class="empty-row">
-      Results will appear here as tests complete…
     </td></tr>`;
 
   try {
@@ -604,11 +671,10 @@ async function runAllTests() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ai_model: model,
-        patient_id: patientId,
         doctors: doctors.map(d => ({
           phone: d.phone,
           password: d.password,
-          patients: d.patients.length ? d.patients : [patientId],
+          patients: d.patients,
         })),
       }),
     });
@@ -639,6 +705,7 @@ async function runAllTests() {
     showToast(`Run failed: ${err.message}`);
     btn.disabled = false;
     btn.textContent = '▶ Run All Tests';
+    fillRunsHistory(latestResults);
   }
 }
 
@@ -648,41 +715,31 @@ async function pollBatch(batchId) {
     if (!resp.ok) return;
     const data = await resp.json();
 
+    const batchResults = data.results || [];
+    const computed = computeStatsFromResults(batchResults);
     renderStatCards({
-      total: data.total,
-      with_transcript: driveStats.with_transcript,
-      passed: data.passed,
-      avg_accuracy: data.avg_accuracy,
-      report_count: data.completed,
+      ...computed,
+      total: data.total ?? computed.total,
+      passed: data.passed ?? computed.passed,
+      avg_accuracy: data.avg_accuracy ?? computed.avg_accuracy,
+      report_count: data.completed ?? computed.report_count,
     });
-    renderTestRunsTable(data.results);
-    renderAccuracyChart(data.results);
-    renderDistributionChart(data.results);
+    renderTestRunsTable(batchResults);
+    renderAccuracyChart(batchResults);
+    renderDistributionChart(batchResults);
 
-    const accTotal = document.getElementById('acc-stat-total');
-    if (accTotal) {
-      accTotal.textContent = data.total;
-      document.getElementById('acc-stat-passed').textContent = data.passed;
-      document.getElementById('acc-stat-failed').textContent = data.failed;
-      const rate = data.total > 0
-        ? Math.round(data.passed / data.total * 100) : 0;
-      document.getElementById('acc-stat-rate').textContent =
-        data.pending === 0 ? `${rate}%` : '—';
-      document.getElementById('acc-stat-accuracy').textContent =
-        data.avg_accuracy != null ? `${data.avg_accuracy}%` : '—';
-    }
+    const accStats = computeAccRunStats(batchResults);
+    applyAccRunStats(accStats, data.pending === 0);
 
-    accRenderDetailTable(data.results);
+    accRenderSummaryTable(data.results);
 
     const statusText =
-      `Batch: ${data.completed} complete, `
-      + `${data.failed} failed, ${data.pending} pending`;
+      `Batch: ${accStats.passed} complete, `
+      + `${accStats.failed} failed, ${data.pending} pending`;
     const batchStatus = document.getElementById('batch-status');
     if (batchStatus) batchStatus.textContent = statusText;
     const detailStatus = document.getElementById('acc-detail-batch-status');
     if (detailStatus) detailStatus.textContent = statusText;
-
-    accRenderSummaryTable(data.results);
 
     if (data.pending === 0) {
       clearInterval(batchPollInterval);
@@ -691,6 +748,7 @@ async function pollBatch(batchId) {
       btn.disabled = false;
       btn.textContent = '▶ Run All Tests';
       showToast(`All ${data.total} tests complete — avg accuracy: ${data.avg_accuracy}%`);
+      loadRecentResults();
     }
   } catch (err) {
     console.warn('Batch poll failed:', err);
@@ -750,61 +808,31 @@ function renderTestRunsTable(results) {
   }).join('');
 }
 
+function resultDoctorName(r) {
+  const name = r?.doctor_name
+    || r?.transcription_result?.doctor_details?.doctor_name
+    || '';
+  const phone = r?.phone || '';
+  return String(name || phone || '—');
+}
+
+function resultPatientId(r) {
+  const v = r?.patient_id
+    || r?.patientId
+    || r?.transcription_result?.patient_demographics?.abha_id
+    || r?.transcription_result?.patient_demographics?.patient_id
+    || '';
+  if (v === null || v === undefined || v === '') return '—';
+  return String(v);
+}
+
 function accRenderSummaryTable(results) {
   const tbody = document.getElementById('acc-summary-tbody');
   if (!tbody) return;
   if (!results || !results.length) {
     tbody.innerHTML =
-      '<tr><td colspan="7" class="empty-row">'
-      + 'No results yet</td></tr>';
-    return;
-  }
-  tbody.innerHTML = results.map((r, i) => {
-    const score =
-      r.comparison?.similarity_score
-      ?? r.similarity_score
-      ?? r.accuracy_score;
-    const scoreCls =
-      score == null ? 'muted'
-      : score >= 90 ? 'high'
-      : score >= 75 ? 'med'
-      : score >= 60 ? 'warn' : 'low';
-    const statusBadge =
-      r.status === 'complete'
-        ? `<span style="color:var(--success)">✓ Done</span>`
-      : r.status === 'failed'
-        ? `<span style="color:var(--danger)">✗ Failed</span>`
-      : r.status === 'running'
-        ? `<span style="color:var(--primary)">⏳ Running</span>`
-      : `<span style="color:var(--text-muted)">⏸ Pending</span>`;
-    const timeDisplay = r.total_test_time_seconds != null
-      ? formatDuration(r.total_test_time_seconds) : '—';
-    return `
-      <tr>
-        <td>${i + 1}</td>
-        <td style="font-family:var(--font-mono);font-size:13px">
-          ${esc(r.phone || '—')}
-        </td>
-        <td>${esc(String(r.patient_id || '—'))}</td>
-        <td>${esc(r.audio_filename || '—')}</td>
-        <td>${statusBadge}</td>
-        <td>${esc(timeDisplay)}</td>
-        <td>
-          <span class="accuracy-badge ${scoreCls}">
-            ${score != null ? `${score}%` : '—'}
-          </span>
-        </td>
-      </tr>`;
-  }).join('');
-}
-
-function accRenderDetailTable(results) {
-  const tbody = document.getElementById('acc-detail-tbody');
-  if (!tbody) return;
-  if (!results || !results.length) {
-    tbody.innerHTML =
-      '<tr><td colspan="6" class="empty-row">'
-      + 'No results yet</td></tr>';
+      '<tr><td colspan="8" class="empty-row">'
+      + 'No previous test cases yet</td></tr>';
     return;
   }
   tbody.innerHTML = results.slice(0, 50).map(r => {
@@ -816,65 +844,68 @@ function accRenderDetailTable(results) {
       || r.comparison_summary
       || aiSummary(r.transcription_comparison)
       || '';
-    const pillId = `detail-${String(r.test_id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`;
-
+    const pillId = `hist-${String(r.test_id || r.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24)}`;
     const timeDisplay = r.total_test_time_seconds != null
-      ? formatDuration(r.total_test_time_seconds)
-      : '—';
-
+      ? formatDuration(r.total_test_time_seconds) : '—';
     const statusBadge = r.status === 'complete' ? '✅ Completed' :
       r.status === 'failed' ? '❌ Failed' :
       r.status === 'running' ? '⏳ Running' : '⏸ Pending';
-
+    const testId = r.test_id || r.id || '';
     const displayId = r.tc_ref
       || r.run_ref
-      || `${(r.test_id || '').slice(0, 8)}…`;
-
+      || (testId ? `${String(testId).slice(0, 8)}…` : '—');
     const langClass = (r.language || '').toLowerCase().replace(/\s+/g, '-');
 
-    return `<tr onclick="openTestDetail('${esc(r.test_id)}')"
-                style="cursor:pointer"
-                title="${esc(r.run_ref || r.test_id || '')}">
-      <td class="run-id-cell">
-        <span class="tc-ref">${esc(displayId)}</span>
-      </td>
-      <td>${esc(r.audio_filename || '—')}</td>
-      <td>
-        <span class="lang-badge lang-${esc(langClass)}">
-          ${esc(r.language || '—')}
-        </span>
-      </td>
-      <td onclick="event.stopPropagation()">
-        ${scorePill(score, reason, 'Accuracy', pillId)}
-      </td>
-      <td>${esc(timeDisplay)}</td>
-      <td>${statusBadge}</td>
-    </tr>`;
+    return `
+      <tr onclick="openTestDetail('${esc(testId)}')"
+          style="cursor:pointer"
+          title="${esc(r.run_ref || testId)}">
+        <td class="run-id-cell">
+          <span class="tc-ref">${esc(displayId)}</span>
+        </td>
+        <td>${esc(resultDoctorName(r))}</td>
+        <td>${esc(resultPatientId(r))}</td>
+        <td>${esc(r.audio_filename || '—')}</td>
+        <td>
+          <span class="lang-badge lang-${esc(langClass)}">
+            ${esc(r.language || '—')}
+          </span>
+        </td>
+        <td onclick="event.stopPropagation()">
+          ${scorePill(score, reason, 'Accuracy', pillId)}
+        </td>
+        <td>${esc(timeDisplay)}</td>
+        <td>${statusBadge}</td>
+      </tr>`;
   }).join('');
 }
 
 function renderAccuracyChart(results) {
   const canvas = document.getElementById('accuracy-chart');
-  if (!canvas) return;
+  if (!canvas || typeof Chart === 'undefined') return;
 
   const completed = (results || [])
-    .filter(r => r.status === 'complete')
+    .filter(r => r.status === 'complete' || r.final_result === 'pass'
+      || r.final_result === 'complete_no_accuracy')
     .map(r => ({
-      name: r.audio_filename,
-      score: (r.comparison || r.transcription_comparison || {}).similarity_score
-        ?? r.accuracy_score
-        ?? r.similarity_score,
+      name: r.audio_filename || r.filename || r.tc_ref || '',
+      timestamp: r.timestamp || '',
+      score: resultScore(r),
     }))
     .filter(r => r.score != null)
+    .sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
     .slice(-10);
 
-  if (accuracyChart) accuracyChart.destroy();
+  if (accuracyChart) {
+    accuracyChart.destroy();
+    accuracyChart = null;
+  }
   if (!completed.length) return;
 
   accuracyChart = new Chart(canvas.getContext('2d'), {
     type: 'line',
     data: {
-      labels: completed.map(r => (r.name || '').slice(0, 12)),
+      labels: completed.map(r => (r.name || '').slice(0, 12) || 'run'),
       datasets: [{
         data: completed.map(r => r.score),
         borderColor: '#6C5CE7',
@@ -895,11 +926,9 @@ function renderAccuracyChart(results) {
 function renderDistributionChart(results) {
   const canvas = document.getElementById('distribution-chart');
   const legend = document.getElementById('distribution-legend');
-  if (!canvas) return;
+  if (!canvas || typeof Chart === 'undefined') return;
 
-  const scores = (results || [])
-    .map(r => (r.comparison || r.transcription_comparison || {}).similarity_score ?? r.accuracy_score ?? r.similarity_score)
-    .filter(s => s != null);
+  const scores = (results || []).map(resultScore).filter(s => s != null);
 
   const high = scores.filter(s => s >= 95).length;
   const med = scores.filter(s => s >= 80 && s < 95).length;
@@ -1656,6 +1685,7 @@ function showTestRuns() {
   document.getElementById('detail-view').style.display = 'none';
   document.getElementById('load-testing-view').style.display = 'none';
   document.getElementById('runs-view').style.display = '';
+  fillRunsHistory(latestResults);
 }
 
 function downloadReport(format) {
@@ -1682,13 +1712,16 @@ function showToast(msg, type) {
 }
 
 async function runSingleTest(language, audioFilename) {
-  const patientId = document.getElementById('patient-id-input')?.value?.trim();
+  const doctors = accGetActiveDoctors();
+  const patientId = doctors[0]?.patients?.[0];
   if (!patientId) {
-    showToast('⚠ Please enter a Patient ID', 'warning');
-    document.getElementById('patient-id-input')?.focus();
+    showToast(
+      'Add a Patient ID in Doctor & Patient Setup first.',
+      'warning'
+    );
+    if (!accSetupOpen) accToggleSetup();
     return;
   }
-  localStorage.setItem('medsum_patient_id', patientId);
 
   const res = await fetch(`${API}/run`, {
     method: 'POST',

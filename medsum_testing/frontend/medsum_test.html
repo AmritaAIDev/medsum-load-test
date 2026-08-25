@@ -169,18 +169,6 @@
 
         <div class="card" style="margin-bottom:20px">
           <h3 style="margin-bottom:16px">2. Run</h3>
-          <div class="config-row">
-            <label class="config-label" for="patient-id-input">Patient ID</label>
-            <input
-                type="text"
-                id="patient-id-input"
-                class="config-input"
-                placeholder="e.g. 219"
-                value=""
-                style="width: 120px;"
-            />
-            <span class="config-hint">From test-medsum.amritaai.org patient list</span>
-          </div>
           <div style="display:flex;gap:12px;align-items:center;
                       flex-wrap:wrap">
             <select id="ai-model-select" class="select-input">
@@ -197,7 +185,7 @@
           </div>
         </div>
 
-        <div id="acc-live-section" style="display:none">
+        <div id="acc-live-section">
 
           <div style="display:flex;gap:16px;flex-wrap:wrap;
                       margin-bottom:20px">
@@ -247,30 +235,10 @@
             </div>
           </div>
 
-          <div class="card" style="margin-bottom:20px">
-            <h3 style="margin-bottom:16px">Session Summary</h3>
-            <div class="table-wrap">
-              <table class="runs-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Doctor</th>
-                    <th>Patient ID</th>
-                    <th>Audio File</th>
-                    <th>Status</th>
-                    <th>Time</th>
-                    <th>Accuracy</th>
-                  </tr>
-                </thead>
-                <tbody id="acc-summary-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-
           <div class="card">
             <div style="display:flex;justify-content:space-between;
                         align-items:center;margin-bottom:16px">
-              <h3>Detailed Results</h3>
+              <h3 style="margin:0">Run History</h3>
               <span id="acc-detail-batch-status"
                     style="font-size:13px;
                            color:var(--text-secondary)"></span>
@@ -280,6 +248,8 @@
                 <thead>
                   <tr>
                     <th>Test Case ID</th>
+                    <th>Doctor Name</th>
+                    <th>Patient ID</th>
                     <th>Audio File</th>
                     <th>Language</th>
                     <th>Accuracy</th>
@@ -287,10 +257,10 @@
                     <th>Status</th>
                   </tr>
                 </thead>
-                <tbody id="acc-detail-tbody">
+                <tbody id="acc-summary-tbody">
                   <tr>
-                    <td colspan="6" class="empty-row">
-                      Results will appear here as tests complete…
+                    <td colspan="8" class="empty-row">
+                      No previous test cases yet
                     </td>
                   </tr>
                 </tbody>
