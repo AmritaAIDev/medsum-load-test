@@ -440,9 +440,10 @@ function accAddDoctor(phone = '', password = '', patients = []) {
 
   const tr = document.createElement('tr');
   tr.id = `acc-doc-row-${idx}`;
+  tr.className = 'doctor-row';
   tr.innerHTML = `
     <td>
-      <input type="text" value="${esc(phone)}"
+      <input type="text" data-field="phone" value="${esc(phone)}"
              placeholder="9876543210"
              onchange="accDoctors[${idx}].phone=this.value;
                        accUpdateSummary()"
@@ -452,7 +453,7 @@ function accAddDoctor(phone = '', password = '', patients = []) {
     </td>
     <td>
       <div style="display:flex;align-items:center;gap:6px">
-        <input type="password" value="${esc(password)}"
+        <input type="password" data-field="password" value="${esc(password)}"
                id="acc-pwd-${idx}"
                placeholder="Password"
                onchange="accDoctors[${idx}].password=this.value"
@@ -473,6 +474,8 @@ function accAddDoctor(phone = '', password = '', patients = []) {
       </div>
       <div style="display:flex;gap:6px">
         <input type="text"
+               data-field="patient"
+               class="patient-id-input"
                id="acc-patient-input-${idx}"
                placeholder="Patient ID + Enter"
                style="flex:1;padding:6px 8px;
@@ -636,12 +639,64 @@ function accGetActiveDoctors() {
   );
 }
 
+// Read directly from DOM — works whether or not tags were committed via + / Enter
+function getConfiguredDoctors() {
+  const doctors = [];
+  const rows = document.querySelectorAll(
+    '.doctor-row, #acc-doctor-tbody tr, [data-doctor-row]'
+  );
+
+  if (rows.length === 0) {
+    const phone = document.querySelector(
+      "input[data-field='phone'], #doctor-phone"
+    )?.value?.trim();
+    const password = document.querySelector(
+      "input[data-field='password'], #doctor-password, input[type='password']"
+    )?.value?.trim();
+    const patientIds = [...document.querySelectorAll(
+      "input[data-field='patient'], .patient-id-input"
+    )]
+      .map(el => el.value.trim().replace(/,/g, ''))
+      .filter(Boolean);
+    if (phone && password && patientIds.length > 0) {
+      doctors.push({ phone, password, patients: patientIds });
+    }
+    return doctors;
+  }
+
+  rows.forEach(row => {
+    const phone = (
+      row.querySelector("input[data-field='phone']")
+      || row.querySelector('input[type="text"]:not([data-field="patient"])')
+    )?.value?.trim();
+    const password = (
+      row.querySelector("input[data-field='password']")
+      || row.querySelector('input[type="password"]')
+    )?.value?.trim();
+
+    const tagged = [...row.querySelectorAll('[id^="acc-patients-"] > span')]
+      .map(el => (el.childNodes[0]?.textContent || '').trim())
+      .filter(Boolean);
+    const pending = [...row.querySelectorAll(
+      "input[data-field='patient'], .patient-id-input"
+    )]
+      .map(el => el.value.trim().replace(/,/g, ''))
+      .filter(Boolean);
+    const patients = [...new Set([...tagged, ...pending])];
+
+    if (phone && password && patients.length > 0) {
+      doctors.push({ phone, password, patients });
+    }
+  });
+
+  return doctors;
+}
+
 async function runAllTests() {
-  const doctors = accGetActiveDoctors();
+  const doctors = getConfiguredDoctors();
   if (doctors.length === 0) {
     showToast(
-      'Add at least one doctor with phone, password, '
-      + 'and at least one Patient ID in Doctor & Patient Setup.',
+      'Add at least one doctor with phone, password, and at least one Patient ID',
       'warning'
     );
     if (!accSetupOpen) accToggleSetup();
@@ -1121,8 +1176,31 @@ function formatDiffItem(d, { showType = true } = {}) {
             </div>`;
 }
 
+function stripCaseHeader(text) {
+  if (!text) return text;
+  const lines = String(text).split('\n');
+  const cleaned = [];
+  let skipNextBlank = false;
+  for (const line of lines) {
+    const stripped = line.trim();
+    if (/^[Cc]ase\s*\d*\s*:/.test(stripped)) {
+      skipNextBlank = true;
+      continue;
+    }
+    if (skipNextBlank && stripped === '') {
+      skipNextBlank = false;
+      continue;
+    }
+    skipNextBlank = false;
+    cleaned.push(line);
+  }
+  return cleaned.join('\n').trim();
+}
+
 function renderTranscriptionComparison(result) {
-  const gt = result.ground_truth || result.ground_truth_transcription || '';
+  const gt = stripCaseHeader(
+    result.ground_truth || result.ground_truth_transcription || ''
+  );
   const gen = result.transcription || result.generated_transcription || '';
   if (!gt && !gen) return '';
 
@@ -1182,9 +1260,11 @@ function renderTranscriptionComparison(result) {
 
 function renderTranslationComparison(result) {
   const lang = (result.language || '').toLowerCase();
-  const gtTrans = result.ground_truth_translation
+  const gtTrans = stripCaseHeader(
+    result.ground_truth_translation
     || result.translation_ground_truth
-    || (lang === 'english' ? (result.ground_truth || result.ground_truth_transcription || '') : '');
+    || (lang === 'english' ? (result.ground_truth || result.ground_truth_transcription || '') : '')
+  );
   const genTrans = result.generated_translation
     || result.translation
     || result.text_translation
@@ -1265,11 +1345,11 @@ function soapFieldTable(gtSection, genSection, sectionKey) {
           const label = (i > 0 && mf === 'drug_name')
             ? `Drug ${i + 1}: ${mf.replace(/_/g, ' ')}`
             : mf.replace(/_/g, ' ');
-          return `<tr class="${diff ? 'soap-diff-row' : ''}">
+          return `<tr>
                         <td class="soap-field-name" style="padding-left:1.5rem">${esc(label)}</td>
-                        <td class="${diff ? 'diff-cell' : ''}">${esc(gv)}</td>
-                        <td class="${diff ? 'diff-cell diff-cell-gen' : ''}">${esc(nv)}</td>
-                        <td class="diff-flag">${diff ? '⚠' : ''}</td>
+                        <td class="${diff ? 'cell-gt-correct' : ''}">${esc(gv)}</td>
+                        <td class="${diff ? 'cell-gen-wrong' : ''}">${esc(nv)}</td>
+                        <td class="diff-flag-cell">${diff ? '⚠' : ''}</td>
                     </tr>`;
         }).join('');
       }).join('');
@@ -1288,11 +1368,11 @@ function soapFieldTable(gtSection, genSection, sectionKey) {
       && gtStr !== 'NA' && genStr !== 'NA'
       && gtStr !== '—' && genStr !== '—';
 
-    return `<tr class="${isDiff ? 'soap-diff-row' : ''}">
+    return `<tr>
             <td class="soap-field-name">${esc(field.replace(/_/g, ' '))}</td>
-            <td class="${isDiff ? 'diff-cell' : ''}">${esc(gtStr)}</td>
-            <td class="${isDiff ? 'diff-cell diff-cell-gen' : ''}">${esc(genStr)}</td>
-            <td class="diff-flag">${isDiff ? '⚠' : ''}</td>
+            <td class="${isDiff ? 'cell-gt-correct' : ''}">${esc(gtStr)}</td>
+            <td class="${isDiff ? 'cell-gen-wrong' : ''}">${esc(genStr)}</td>
+            <td class="diff-flag-cell">${isDiff ? '⚠' : ''}</td>
         </tr>`;
   }).join('');
 
@@ -1343,13 +1423,13 @@ function renderSOAPComparison(result) {
       const isDiff = norm(gtSec) !== norm(genSec);
       content = `
                 <div class="diff-grid">
-                    <div class="diff-col">
+                    <div class="diff-col ${isDiff ? 'col-gt-correct' : ''}">
                         <div class="diff-col-header">Ground Truth</div>
-                        <div class="diff-text ${isDiff ? 'diff-text-warn' : ''}">${esc(gtSec || '—')}</div>
+                        <div class="diff-text">${esc(gtSec || '—')}</div>
                     </div>
-                    <div class="diff-col">
+                    <div class="diff-col ${isDiff ? 'col-gen-wrong' : ''}">
                         <div class="diff-col-header">Generated</div>
-                        <div class="diff-text ${isDiff ? 'diff-text-warn' : ''}">${esc(genSec || '—')}</div>
+                        <div class="diff-text">${esc(genSec || '—')}</div>
                     </div>
                 </div>`;
     } else {
@@ -1432,38 +1512,44 @@ function renderPrescriptionComparison(result) {
     .replace(/\s+/g, ' ')
     .trim();
 
-  const rxRow = (label, gtVal, genVal) => {
-    const gtStr = gtVal || '—';
-    const genStr = genVal || '—';
-    const isDiff = norm(gtStr) !== norm(genStr)
-      && gtStr !== '—' && genStr !== '—';
-    return {
-      isDiff,
-      html: `<tr class="${isDiff ? 'soap-diff-row' : ''}">
-                <td class="med-field">${esc(label)}</td>
-                <td class="med-gt-col">${esc(gtStr)}</td>
-                <td class="${isDiff ? 'diff-cell-gen' : ''}">${esc(genStr)}</td>
-            </tr>`,
-    };
-  };
+  const complaintDiff = norm(gtComplaint) !== norm(genComplaint)
+    && gtComplaint && genComplaint;
+  const diagnosisDiff = norm(gtDiagnosis) !== norm(genDiagnosis)
+    && gtDiagnosis && genDiagnosis;
 
-  const complaint = rxRow('Chief complaint', gtComplaint, genComplaint);
-  const diagnosis = rxRow('Diagnosis', gtDiagnosis, genDiagnosis);
+  const complaintHtml = `
+    <div class="rx-row">
+        <div class="rx-label">Chief Complaint</div>
+        <div class="rx-cols">
+            <div class="rx-col ${complaintDiff ? 'col-gt-correct' : ''}">
+                <div class="rx-col-header">Ground Truth</div>
+                <div class="rx-value">${esc(gtComplaint) || '<em class="na">—</em>'}</div>
+            </div>
+            <div class="rx-col ${complaintDiff ? 'col-gen-wrong' : ''}">
+                <div class="rx-col-header">Generated</div>
+                <div class="rx-value">${esc(genComplaint) || '<em class="na">—</em>'}
+                    ${complaintDiff ? '<span class="diff-flag-cell">⚠</span>' : ''}
+                </div>
+            </div>
+        </div>
+    </div>`;
 
-  const summaryTable = `
-            <table class="med-compare-table">
-                <thead>
-                    <tr>
-                        <th>Field</th>
-                        <th>Ground Truth</th>
-                        <th>Generated</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${complaint.html}
-                    ${diagnosis.html}
-                </tbody>
-            </table>`;
+  const diagnosisHtml = `
+    <div class="rx-row">
+        <div class="rx-label">Diagnosis</div>
+        <div class="rx-cols">
+            <div class="rx-col ${diagnosisDiff ? 'col-gt-correct' : ''}">
+                <div class="rx-col-header">Ground Truth</div>
+                <div class="rx-value">${esc(gtDiagnosis) || '<em class="na">—</em>'}</div>
+            </div>
+            <div class="rx-col ${diagnosisDiff ? 'col-gen-wrong' : ''}">
+                <div class="rx-col-header">Generated</div>
+                <div class="rx-value">${esc(genDiagnosis) || '<em class="na">—</em>'}
+                    ${diagnosisDiff ? '<span class="diff-flag-cell">⚠</span>' : ''}
+                </div>
+            </div>
+        </div>
+    </div>`;
 
   const MED_FIELDS = ['drug_name', 'dose', 'schedule', 'duration', 'instructions'];
   const maxMeds = Math.max(gtMeds.length, genMeds.length);
@@ -1475,49 +1561,41 @@ function renderPrescriptionComparison(result) {
     const name = gt.drug_name || gen.drug_name || `Drug ${i + 1}`;
 
     let drugDiffs = 0;
-    const rows = MED_FIELDS.map(field => {
-      const gtVal = String(gt[field] ?? '—');
-      const genVal = String(gen[field] ?? '—');
-      const isDiff = norm(gtVal) !== norm(genVal) && gtVal !== '—' && genVal !== '—';
+    const fields = MED_FIELDS.map(f => {
+      const gtVal = String(gt[f] || '—');
+      const genVal = String(gen[f] || '—');
+      const isDiff = norm(gtVal) !== norm(genVal)
+        && gtVal !== '—' && genVal !== '—';
       if (isDiff) {
         drugDiffs++;
         medDiffs++;
       }
-      return `<tr class="${isDiff ? 'soap-diff-row' : ''}">
-                    <td class="med-field">${esc(field.replace(/_/g, ' '))}</td>
-                    <td class="med-gt-col">${esc(gtVal)}</td>
-                    <td class="${isDiff ? 'diff-cell-gen' : ''}">${esc(genVal)}</td>
-                </tr>`;
+      return `
+        <div class="rx-med-field">
+            <span class="rx-med-key">${esc(f.replace(/_/g, ' '))}</span>
+            <span class="rx-med-gt ${isDiff ? 'cell-gt-correct' : ''}">${esc(gtVal)}</span>
+            <span class="rx-arrow">→</span>
+            <span class="rx-med-gen ${isDiff ? 'cell-gen-wrong' : ''}">${esc(genVal)}</span>
+            <span class="diff-flag-cell">${isDiff ? '⚠' : ''}</span>
+        </div>`;
     }).join('');
 
     const drugBadge = drugDiffs === 0
       ? '<span class="score-pill high" style="font-size:11px;padding:2px 8px">✓</span>'
       : `<span class="score-pill ${drugDiffs <= 1 ? 'warn' : 'low'}" style="font-size:11px;padding:2px 8px">${drugDiffs} diff${drugDiffs !== 1 ? 's' : ''}</span>`;
 
-    const table = `
-            <table class="med-compare-table">
-                <thead>
-                    <tr>
-                        <th>Field</th>
-                        <th>Ground Truth</th>
-                        <th>Generated</th>
-                    </tr>
-                </thead>
-                <tbody>${rows}</tbody>
-            </table>`;
-
-    return makeCollapsible(`rx-med-${i}`, `💊 ${esc(name)}`, table, {
+    return makeCollapsible(`rx-med-${i}`, `💊 ${esc(name)}`, fields, {
       defaultOpen: true,
       headerRight: `<span onclick="event.stopPropagation()">${drugBadge}</span>`,
     });
   }).join('');
 
-  const content = summaryTable
+  const content = complaintHtml + diagnosisHtml
     + (maxMeds
       ? `<div class="rx-meds-heading">Medications</div>${medsHtml}`
       : '<p class="na" style="margin-top:0.75rem">No medications</p>');
 
-  const totalDiffs = (complaint.isDiff ? 1 : 0) + (diagnosis.isDiff ? 1 : 0) + medDiffs;
+  const totalDiffs = (complaintDiff ? 1 : 0) + (diagnosisDiff ? 1 : 0) + medDiffs;
   const badge = totalDiffs === 0
     ? '<span class="score-pill high" style="font-size:11px;padding:2px 8px">✓ Match</span>'
     : `<span class="score-pill ${totalDiffs <= 3 ? 'warn' : 'low'}" style="font-size:11px;padding:2px 8px">${totalDiffs} diff${totalDiffs !== 1 ? 's' : ''}</span>`;
@@ -1545,7 +1623,7 @@ function renderMedicationValidation(result) {
   const maxLen = Math.max(finalMeds.length, rawMeds.length, gtMeds.length);
   const hasGT = gtMeds.length > 0;
   const colHeaders = hasGT
-    ? '<th>Field</th><th>Raw LLM</th><th>Ground Truth</th><th>Final Generated</th>'
+    ? '<th>Field</th><th>Ground Truth</th><th>Raw LLM</th><th>Final Generated</th>'
     : '<th>Field</th><th>Raw LLM</th><th>Final Generated</th>';
 
   const medsHtml = Array.from({ length: maxLen }, (_, i) => {
@@ -1566,18 +1644,20 @@ function renderMedicationValidation(result) {
 
       if (rawDiffFinal || gtDiffFinal) drugDiffs++;
 
+      const anyDiff = gtDiffRaw || gtDiffFinal || rawDiffFinal;
+
       if (hasGT) {
         return `<tr>
                     <td class="med-field">${esc(field.replace(/_/g, ' '))}</td>
-                    <td class="${gtDiffRaw ? 'diff-cell-raw' : ''}">${esc(rawVal)}</td>
-                    <td class="med-gt-col">${esc(gtVal)}</td>
-                    <td class="${gtDiffFinal ? 'diff-cell-gen' : rawDiffFinal ? 'diff-cell-raw' : ''}">${esc(finalVal)}</td>
+                    <td class="${anyDiff ? 'cell-gt-correct' : ''}">${esc(gtVal)}</td>
+                    <td class="${gtDiffRaw ? 'cell-gen-wrong' : ''}">${esc(rawVal)}</td>
+                    <td class="${gtDiffFinal ? 'cell-gen-wrong' : rawDiffFinal ? 'cell-warn' : ''}">${esc(finalVal)}</td>
                 </tr>`;
       }
       return `<tr>
                     <td class="med-field">${esc(field.replace(/_/g, ' '))}</td>
-                    <td class="${rawDiffFinal ? 'diff-cell-raw' : ''}">${esc(rawVal)}</td>
-                    <td class="${rawDiffFinal ? 'diff-cell-gen' : ''}">${esc(finalVal)}</td>
+                    <td class="${rawDiffFinal ? 'cell-gt-correct' : ''}">${esc(rawVal)}</td>
+                    <td class="${rawDiffFinal ? 'cell-gen-wrong' : ''}">${esc(finalVal)}</td>
                 </tr>`;
     }).join('');
 

@@ -340,10 +340,13 @@ def execute_test_run(
 
         if case.get("has_transcript") and case.get("transcript_file_id"):
             log.info("[%s] Downloading transcript...", test_id)
-            ground_truth = drive_service.download_transcript(
-                case["transcript_file_id"],
-                mime_type=case.get("transcript_mime_type"),
-                service=drive_svc,
+            ground_truth = drive_service.strip_case_header(
+                drive_service.download_transcript(
+                    case["transcript_file_id"],
+                    mime_type=case.get("transcript_mime_type"),
+                    service=drive_svc,
+                )
+                or ""
             )
             log.info("[%s] Transcript: %d chars", test_id, len(ground_truth))
         elif not case.get("has_transcript"):
@@ -364,6 +367,9 @@ def execute_test_run(
                 drive_svc,
             )
             if translation_ground_truth:
+                translation_ground_truth = drive_service.strip_case_header(
+                    translation_ground_truth
+                )
                 log.info(
                     "[%s] Translation GT: %d chars",
                     test_id,
@@ -388,6 +394,11 @@ def execute_test_run(
 
         timings["drive_download_time_seconds"] = round(time.time() - t0, 3)
         log.info("[%s] drive_download_time_seconds=%s", test_id, timings["drive_download_time_seconds"])
+
+        ground_truth = drive_service.strip_case_header(ground_truth or "")
+        translation_ground_truth = drive_service.strip_case_header(
+            translation_ground_truth or ""
+        ) or None
 
         result.ground_truth_transcription = ground_truth
         result.ground_truth = ground_truth

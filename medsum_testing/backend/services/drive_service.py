@@ -33,6 +33,8 @@ AUDIO_MIME_TYPES = {
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
+_CASE_HEADER_RE = re.compile(r"^[Cc]ase\s*\d*\s*:")
+
 TRANSCRIPT_MIME_TYPES = {
     GOOGLE_DOC_MIME,
     DOCX_MIME,
@@ -387,6 +389,35 @@ def _extract_docx_text(raw_bytes: bytes) -> str:
     return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
 
+def strip_case_header(text: str) -> str:
+    """
+    Remove case metadata lines from ground truth files.
+    Handles patterns like:
+      "Case: Urinary Tract Infection (UTI) (Urologist / General Physician)"
+      "Case 1: Diabetes (Endocrinologist)"
+      "Case:UTI"
+    """
+    if not text:
+        return text
+
+    lines = text.strip().splitlines()
+    cleaned: list[str] = []
+    skip_next_blank = False
+
+    for line in lines:
+        stripped = line.strip()
+        if _CASE_HEADER_RE.match(stripped):
+            skip_next_blank = True
+            continue
+        if skip_next_blank and stripped == "":
+            skip_next_blank = False
+            continue
+        skip_next_blank = False
+        cleaned.append(line)
+
+    return "\n".join(cleaned).strip()
+
+
 def download_transcript(
     file_id: str, mime_type: str | None = None, service=None
 ) -> str:
@@ -396,14 +427,16 @@ def download_transcript(
     if mime_type == GOOGLE_DOC_MIME:
         content = service.files().export(fileId=file_id, mimeType="text/plain").execute()
         if isinstance(content, bytes):
-            return content.decode("utf-8", errors="replace")
-        return str(content)
+            text = content.decode("utf-8", errors="replace")
+        else:
+            text = str(content)
+        return strip_case_header(text)
 
     if mime_type == DOCX_MIME:
-        return _extract_docx_text(_download_raw(file_id, service))
+        return strip_case_header(_extract_docx_text(_download_raw(file_id, service)))
 
     raw_bytes = _download_raw(file_id, service)
-    return raw_bytes.decode("utf-8", errors="replace")
+    return strip_case_header(raw_bytes.decode("utf-8", errors="replace"))
 
 
 def download_file(file_id: str, service=None) -> bytes:
@@ -452,7 +485,7 @@ def download_translation_ground_truth(
     log = logging.getLogger("medsum_drive")
     service = service or get_drive_service()
     try:
-        text = download_transcript(file_id, mime_type, service)
+        text = strip_case_header(download_transcript(file_id, mime_type, service))
         clean = text.strip()
         if clean:
             log.info("TRANSLATION_GT: downloaded %d chars", len(clean))
