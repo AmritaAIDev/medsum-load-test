@@ -222,36 +222,33 @@ def extract_soap_from_result(tr: dict, allow_raw_fallback: bool = True) -> dict 
     return None
 
 
-def compare_soap(
-    soap_ground_truth: dict,
-    soap_generated: dict,
-    model: str,
-    config: dict | None = None,
-) -> dict[str, Any]:
-    """
-    Compare ground truth SOAP with generated SOAP section by section.
-    Returns similarity score, per-section differences, and severity.
-    Falls back to GPT-4 if DeepSeek fails.
-    """
-    config = config or get_config()
-    if not soap_ground_truth or not soap_generated:
-        return {
-            "similarity_score": None,
-            "overall_severity": "unknown",
-            "section_details": {},
-            "error": "Missing ground truth or generated SOAP",
-        }
-
-    system_prompt = """You are a medical AI evaluator comparing two SOAP notes.
+SOAP_COMPARE_PROMPT = """You are a medical AI evaluator comparing two SOAP notes.
 Return ONLY valid JSON. No markdown, no preamble.
 
-Compare section by section. For each section identify:
-- Missing information (in ground truth but not in generated)
-- Incorrect information (different values for same field)
-- Extra information (in generated but not in ground truth)
+Compare each clinical fact. Do not use SOAP section weights.
 
-IGNORE: punctuation differences, em-dashes, number format (150 vs one-fifty),
-        capitalisation of non-medical terms, "NA" vs blank.
+NA vs Missing — these are different; never treat them as the same:
+- NA: Ground Truth has no applicable/established information for this fact
+  (omitted section, empty value, "NA", "N/A", "not applicable"). Empty or NA
+  generated output on an NA fact stays NA. Do not list NA facts as Missing.
+- Missing: Ground Truth establishes the fact — including an explicit negative
+  such as "No known allergies" — but Generated failed to capture it.
+- Do NOT treat NA and blank as equivalent when Ground Truth is established.
+
+Per-fact type (exactly one; do not emit "extra"):
+- Correct: generated matches Ground Truth
+- Incorrect: generated is present but does not match, including contradictory values
+- Missing: see above
+- Hallucination: generated contains information not supported by Ground Truth
+
+Objective vitals field names (use these in differences[].field):
+Blood pressure, Pulse (also heart_rate), Respiratory rate, Temperature, SpO2,
+Heart exam, Height, Weight.
+
+IGNORE: punctuation, em-dashes, capitalisation of non-medical terms, and
+digit-vs-words of the SAME number (150 vs one hundred fifty).
+DO FLAG a different number (101 vs 100.4) as Incorrect. There is no numeric
+tolerance unless stated.
 
 Schema:
 {
@@ -266,7 +263,7 @@ Schema:
           "field": "chief_complaint",
           "ground_truth": "<value>",
           "generated": "<value>",
-          "type": "missing|incorrect|extra",
+          "type": "Correct|Incorrect|Missing|Hallucination|NA",
           "severity": "low|medium|high|critical"
         }
       ]
@@ -277,15 +274,27 @@ Schema:
   }
 }"""
 
+
+def _looks_nested_soap(payload: Any) -> bool:
+    if not isinstance(payload, dict) or isinstance(payload.get("facts"), list):
+        return False
+    return any(key in payload for key in SOAP_KEYS)
+
+
+def _llm_compare_soap(
+    soap_ground_truth: dict,
+    soap_generated: dict,
+    model: str,
+    config: dict,
+) -> dict[str, Any]:
+    """LLM section_details pass. Fact-level score is applied afterwards."""
     user_prompt = (
         f"Ground Truth SOAP:\n{json.dumps(soap_ground_truth, indent=2)[:3000]}\n\n"
         f"Generated SOAP:\n{json.dumps(soap_generated, indent=2)[:3000]}\n\n"
         "Compare these SOAP notes and return JSON only."
     )
-
     models_to_try = _models_to_try(model)
     last_error = None
-
     for attempt_model in models_to_try:
         try:
             log.info("SOAP_COMPARE: trying model=%s", attempt_model)
@@ -293,7 +302,7 @@ Schema:
             resp = client.chat.completions.create(
                 model=model_name,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": SOAP_COMPARE_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
                 max_tokens=2000,
@@ -311,13 +320,43 @@ Schema:
             log.warning("SOAP_COMPARE failed with %s: %s", attempt_model, exc)
             last_error = exc
             continue
-
     return {
-        "similarity_score": None,
-        "overall_severity": "unknown",
         "section_details": {},
-        "error": str(last_error),
+        "error": str(last_error) if last_error else "SOAP LLM comparison failed",
     }
+
+
+def compare_soap(
+    soap_ground_truth: dict,
+    soap_generated: dict,
+    model: str,
+    config: dict | None = None,
+) -> dict[str, Any]:
+    """Fact-level weighted SOAP score. Reuses gt_vs_generated, not a fourth comparator.
+
+    Nested SOAP may call the LLM for section_details (NA vs Missing prompt).
+    Flat {facts: [...]} skips the LLM so fixture tests stay deterministic.
+    The weighted score always comes from soap_fact_scorer, not the LLM percent.
+    """
+    from medsum_testing.backend.services.soap_fact_scorer import score_soap
+
+    config = config or get_config()
+    section_details = None
+    llm_error = ""
+    if _looks_nested_soap(soap_ground_truth) or _looks_nested_soap(soap_generated):
+        llm = _llm_compare_soap(
+            soap_ground_truth or {}, soap_generated or {}, model, config
+        )
+        section_details = llm.get("section_details") or None
+        llm_error = llm.get("error") or ""
+    scored = score_soap(
+        soap_ground_truth,
+        soap_generated,
+        section_details=section_details,
+    )
+    if llm_error and not scored.get("facts"):
+        scored["error"] = llm_error
+    return scored
 
 
 def compare_soap_three_way(
@@ -328,10 +367,11 @@ def compare_soap_three_way(
     config: dict,
 ) -> dict:
     """
-    Three-way SOAP comparison:
-      gt_vs_generated  — GT vs final Flask output  (main accuracy)
-      gt_vs_raw        — GT vs raw LLM output      (raw accuracy)
-      raw_vs_generated — raw vs final              (post-processing delta)
+    Three-way SOAP comparison (each pair uses the fact-level weighted scorer):
+      gt_vs_generated  — GT vs final Flask output  (main SOAP accuracy)
+      gt_vs_raw        — GT vs raw LLM output
+      raw_vs_generated — raw vs final
+    Transcription/translation scores are not mixed in.
     """
     results = {
         "gt_vs_generated":  None,

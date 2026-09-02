@@ -1,0 +1,320 @@
+# SOAP fact-level scoring — criticality weights and field catalog.
+# Tune this file; do not hardcode weights or fact lists in the scorer.
+#
+# 4-level LLM severity (section_details[].differences[].severity)
+# → 3-level MOM criticality / weight:
+#   critical → Critical (5)
+#   high     → High (3)
+#   medium   → Normal (1)  MOM has no Medium; medium folds into Normal
+#   low      → Normal (1)
+# Known catalog fields use `fields.*.criticality` first. LLM severity is the
+# fallback for unmapped fields — not a second parallel taxonomy.
+#
+# Nested SOAP empty/omitted keys cannot distinguish NA vs "author forgot the
+# field". Empty GT is not-established (NA), not Missing.
+#
+# Vitals: MOM item-3 examples list vital signs as High, but both worked
+# examples assign Blood pressure and Temperature weight 5. Catalog follows
+# the fixtures (Critical) so Example 1 incorrect-weight 5 holds.
+#
+# Instructions: item 3 “less critical / education” → Normal (1). That is what
+# makes Example 1 applicable weight 50 (45/50 = 90%) instead of 54.
+#
+# Numeric tolerance is unset (null). Any numeric mismatch is Incorrect.
+# 101°F vs 100.4°F is Incorrect. Digit vs words of the SAME number is not.
+
+criticality_weights:
+  Critical: 5
+  High: 3
+  Normal: 1
+
+unmapped_field_criticality: Normal
+
+severity_to_criticality:
+  critical: Critical
+  high: High
+  medium: Normal
+  low: Normal
+
+# Accuracy pass / review / fail bars live in medsum_config.yaml
+# test_settings (accuracy_pass_score, accuracy_review_score). Do not
+# re-add a pass_score here — that would be a second, stale threshold.
+
+# Critical-Fact Accuracy / Critical Error Count (MOM Ex1 6/7 = 85.7%, Ex2 2/8 = 25%).
+# Duration is Temporal Accuracy; Instructions is Normal counseling.
+# Hallucination facts (any field) join the Critical-Fact Accuracy denominator
+# so Example 2’s extra Cough makes 8, not 7.
+critical_fact_metric_fields:
+  - Allergy
+  - Blood pressure
+  - Temperature
+  - Diagnosis
+  - Drug name
+  - Dose
+  - Schedule
+
+# null = no tolerance; any extracted-number mismatch is Incorrect.
+numeric_tolerance: null
+
+na_markers:
+  - "NA"
+  - "N/A"
+  - "n/a"
+  - "na"
+  - "Not applicable"
+  - "not applicable"
+  - "Nothing to report"
+  - "not applicable/established"
+
+# Symptom/finding absent — Generated claiming it is present is Hallucination.
+absence_markers:
+  - "not present"
+  - "absent"
+  - "denies"
+  - "not reported"
+  - "no cough"
+  - "none present"
+
+# Established negative VALUES (still applicable facts). A different generated
+# value is Incorrect, not NA. Empty generated is Missing.
+established_negative_markers:
+  - "no known allergies"
+  - "nka"
+  - "nkda"
+  - "no known drug allergies"
+
+section_labels:
+  subjective: Subjective
+  objective: Objective
+  assessment: Assessment
+  plan: Plan
+
+# Lookup keyed by fact type / field name. `paths` flatten nested MedSum SOAP.
+fields:
+  chief_complaint:
+    field: Chief complaint
+    section: Subjective
+    criticality: High
+    categories: []
+    paths:
+      - subjective.chief_complaint
+
+  history_of_present_illness:
+    field: History of present illness
+    section: Subjective
+    criticality: High
+    categories: []
+    paths:
+      - subjective.history_of_present_illness
+
+  past_medical_history:
+    field: Past medical history
+    section: Subjective
+    criticality: Normal
+    categories: []
+    paths:
+      - subjective.past_medical_history
+
+  subjective_medications:
+    field: Current medications
+    section: Subjective
+    criticality: High
+    categories: [medication]
+    paths:
+      - subjective.medications
+
+  allergy:
+    field: Allergy
+    section: Subjective
+    criticality: Critical
+    categories: []
+    paths:
+      - subjective.allergies
+      - subjective.allergy
+
+  social_history:
+    field: Social history
+    section: Subjective
+    criticality: Normal
+    categories: []
+    paths:
+      - subjective.social_history
+
+  family_history:
+    field: Family history
+    section: Subjective
+    criticality: Normal
+    categories: []
+    paths:
+      - subjective.family_history
+
+  blood_pressure:
+    field: Blood pressure
+    section: Objective
+    criticality: Critical
+    categories: [numerical]
+    aliases:
+      - BP
+      - bp
+    paths:
+      - objective.vitals.blood_pressure
+      - objective.vitals.bp
+
+  # Pipeline extracts heart_rate; GT notes often say Pulse. Same High vital.
+  heart_rate:
+    field: Pulse
+    section: Objective
+    criticality: High
+    categories: [numerical]
+    aliases:
+      - Heart rate
+      - HR
+      - heart_rate
+      - pulse
+    paths:
+      - objective.vitals.heart_rate
+      - objective.vitals.pulse
+
+  respiratory_rate:
+    field: Respiratory rate
+    section: Objective
+    criticality: High
+    categories: [numerical]
+    aliases:
+      - RR
+      - resp_rate
+    paths:
+      - objective.vitals.respiratory_rate
+      - objective.vitals.resp_rate
+
+  temperature:
+    field: Temperature
+    section: Objective
+    criticality: Critical
+    categories: [numerical]
+    aliases:
+      - temp
+    paths:
+      - objective.vitals.temperature
+      - objective.vitals.temp
+
+  heart_exam:
+    field: Heart exam
+    section: Objective
+    criticality: High
+    categories: []
+    paths:
+      - objective.physical_exam.heart
+
+  diagnosis:
+    field: Diagnosis
+    section: Assessment
+    criticality: Critical
+    categories: [diagnosis]
+    paths:
+      - assessment.diagnosis
+
+  diagnosis_type:
+    field: Diagnosis type
+    section: Assessment
+    criticality: Normal
+    categories: [diagnosis]
+    paths:
+      - assessment.type
+
+  diagnosis_status:
+    field: Diagnosis status
+    section: Assessment
+    criticality: Normal
+    categories: [diagnosis]
+    paths:
+      - assessment.status
+
+  assessment_reasoning:
+    field: Assessment reasoning
+    section: Assessment
+    criticality: Normal
+    categories: []
+    paths:
+      - assessment.reasoning
+
+  drug_name:
+    field: Drug name
+    section: Plan
+    criticality: Critical
+    categories: [medication]
+    paths:
+      - plan.medications.*.drug_name
+
+  dose:
+    field: Dose
+    section: Plan
+    criticality: Critical
+    categories: [medication]
+    paths:
+      - plan.medications.*.dose
+
+  schedule:
+    field: Schedule
+    section: Plan
+    criticality: Critical
+    categories: [medication]
+    paths:
+      - plan.medications.*.schedule
+
+  duration:
+    field: Duration
+    section: Plan
+    criticality: Critical
+    categories: [medication, temporal]
+    paths:
+      - plan.medications.*.duration
+
+  instructions:
+    field: Instructions
+    section: Plan
+    criticality: Normal
+    categories: [medication]
+    paths:
+      - plan.medications.*.instructions
+      - plan.instructions
+
+  activity:
+    field: Activity
+    section: Plan
+    criticality: Normal
+    categories: []
+    paths:
+      - plan.activity
+
+  investigations:
+    field: Investigations
+    section: Plan
+    criticality: High
+    categories: []
+    paths:
+      - plan.investigations
+
+  education:
+    field: Education
+    section: Plan
+    criticality: Normal
+    categories: []
+    paths:
+      - plan.education
+
+  follow_up:
+    field: Follow-up
+    section: Plan
+    criticality: High
+    categories: [temporal]
+    paths:
+      - plan.follow_up
+
+  soap_summary:
+    field: Summary
+    section: Plan
+    criticality: Normal
+    categories: []
+    paths:
+      - summary

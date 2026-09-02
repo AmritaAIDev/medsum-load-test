@@ -75,6 +75,10 @@ def create_app() -> Flask:
     def index():
         return send_from_directory(FRONTEND_DIR, "medsum_test.html")
 
+    @app.route("/favicon.ico")
+    def favicon():
+        return ("", 204)
+
     @app.route("/css/<path:filename>")
     def css(filename: str):
         return send_from_directory(FRONTEND_DIR / "css", filename)

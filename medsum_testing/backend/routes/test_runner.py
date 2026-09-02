@@ -9,22 +9,63 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 
+from pathlib import Path
+
 from flask import Blueprint, jsonify, request
 
-from medsum_testing.backend.models.test_result import TestResult
+from medsum_testing.backend.models.test_result import ComparisonResult, TestResult
 from medsum_testing.backend.services import ai_comparator, audio_utils, drive_service, medsum_api
+from medsum_testing.backend.services.batch_identity import allocate_batch_identity
 from medsum_testing.backend.services.config_loader import get_config
+from medsum_testing.backend.services.accuracy_thresholds import get_accuracy_thresholds
+from medsum_testing.backend.services.audio_selection import (
+    AUDIO_EXTENSIONS,
+    MISSING_LANGUAGE_RUN_MESSAGE,
+    apply_gt_override_to_loaded,
+    attach_selection_overrides,
+    filter_cases_for_run,
+    missing_language_uploads,
+)
+from medsum_testing.backend.services.uploaded_audio_store import (
+    acquire as acquire_uploaded_audio,
+    case_from_record,
+    cases_for_selection,
+    find_upload,
+    get_upload,
+    read_bytes as read_uploaded_bytes,
+    release as release_uploaded_audio,
+    store_upload,
+)
+from medsum_testing.backend.services.doctor_patient import (
+    DoctorPatientError,
+    normalize_patient_ids,
+    validate_doctors_one_patient,
+)
 from medsum_testing.backend.services.result_store import find_previous_result, save_result
 from medsum_testing.backend.services.ref_generator import generate_tc_ref
+from medsum_testing.backend.services.skip_reasons import (
+    MISSING_GROUND_TRUTH,
+    MISSING_TRANSCRIPT,
+    SOAP_PARSE_FAILED,
+    TRANSLATION_GT_UNAVAILABLE,
+    collect_gt_skip_reasons,
+    drive_auth_message,
+    skipped_comparison,
+)
+from medsum_testing.backend.services.soap_fact_scorer import classify_final_result
 
 bp = Blueprint("medsum_test_runner", __name__)
 log = logging.getLogger("medsum_test_runner")
 
-VALID_MODELS = ("gpt-4o-mini", "gpt-4", "deepseek")
+VALID_MODELS = ("gpt-4o-mini", "gpt-4o", "gpt-4", "deepseek")
 
 
 def _parse_doctors(raw, fallback_patient_id: str = "") -> list[dict]:
-    """Normalize request doctors into {phone, password, patients: [str, ...]}."""
+    """Normalize request doctors into {phone, password, patients: [str, ...]}.
+
+    Raises DoctorPatientError if any doctor has more than one patient.
+    Extra IDs are not dropped.
+    """
     doctors = []
     fallback = str(fallback_patient_id or "").strip()
     for item in raw or []:
@@ -32,11 +73,7 @@ def _parse_doctors(raw, fallback_patient_id: str = "") -> list[dict]:
             continue
         phone = str(item.get("phone") or "").strip()
         password = str(item.get("password") or "")
-        patients = item.get("patients") or []
-        if isinstance(patients, str):
-            patients = [p.strip() for p in patients.split(",") if p.strip()]
-        else:
-            patients = [str(p).strip() for p in patients if str(p).strip()]
+        patients = normalize_patient_ids(item.get("patients") or [])
         if not patients and fallback:
             patients = [fallback]
         if not phone or not password or not patients:
@@ -46,6 +83,7 @@ def _parse_doctors(raw, fallback_patient_id: str = "") -> list[dict]:
             "password": password,
             "patients": patients,
         })
+    validate_doctors_one_patient(doctors)
     return doctors
 
 
@@ -203,6 +241,73 @@ def _ensure_local_refs(result: TestResult) -> None:
         result.tc_ref = generate_tc_ref(result.language)
 
 
+def _is_upload_case(case: dict | None, upload_id: str | None = None) -> bool:
+    data = case or {}
+    if str(upload_id or "").strip() or str(data.get("upload_id") or "").strip():
+        return True
+    return str(data.get("source") or "drive") == "upload"
+
+
+def _lookup_run_case(
+    language: str,
+    audio_filename: str,
+    config: dict,
+    upload_id: str | None = None,
+) -> tuple[dict | None, list]:
+    """Resolve a runnable case from the session upload store or Drive.
+
+    drive_service.list_test_cases() is unchanged. An upload_id (or a store
+    hit when Drive has no matching ready case) uses locally stored bytes.
+    """
+    rec = None
+    if upload_id:
+        rec = get_upload(upload_id)
+    if rec is None:
+        rec = find_upload(
+            language=language,
+            audio_filename=audio_filename,
+            upload_id=upload_id,
+        )
+
+    drive_cases: list[dict] = []
+    available: list = []
+    try:
+        drive_cases = drive_service.list_test_cases(config)
+        available = [
+            (c.get("language"), c.get("audio_filename"))
+            for c in drive_cases
+            if c.get("status") == "ready"
+        ]
+    except Exception as exc:
+        if rec is not None:
+            log.warning("[%s] Drive list failed; using uploaded audio: %s", audio_filename, exc)
+            return case_from_record(rec, language=language), available
+        raise
+
+    drive_hit = any(
+        c.get("status") == "ready"
+        and c.get("language") == language
+        and c.get("audio_filename") == audio_filename
+        for c in drive_cases
+    )
+    if rec is not None and (upload_id or not drive_hit):
+        case = case_from_record(rec, language=language)
+        available.append((case.get("language"), case.get("audio_filename")))
+        return case, available
+
+    case = next(
+        (
+            c
+            for c in drive_cases
+            if c.get("status") == "ready"
+            and c["language"] == language
+            and c["audio_filename"] == audio_filename
+        ),
+        None,
+    )
+    return case, available
+
+
 def _classify_regression(previous: TestResult | None, result: TestResult) -> str:
     """better / worse / same from accuracy-score delta; na if either score is missing."""
     if previous is None:
@@ -231,6 +336,8 @@ def execute_test_run(
     patient_id: str | None = None,
     doctor_id: str | None = None,
     phone: str | None = None,
+    gt_override: dict | None = None,
+    upload_id: str | None = None,
 ) -> TestResult:
     """
     Core test execution — used by HTTP route and scheduler.
@@ -258,6 +365,7 @@ def execute_test_run(
     ]
     save_result(result)
 
+    held_upload_id = ""
     try:
         config = get_config()
         log.info("[%s] Config loaded", test_id)
@@ -287,23 +395,10 @@ def execute_test_run(
         timings: dict[str, float] = {}
 
         log.info("[%s] STEP 1: Looking up test case...", test_id)
-        cases = drive_service.list_test_cases(config)
-        case = next(
-            (
-                c
-                for c in cases
-                if c.get("status") == "ready"
-                and c["language"] == language
-                and c["audio_filename"] == audio_filename
-            ),
-            None,
+        case, available = _lookup_run_case(
+            language, audio_filename, config, upload_id=upload_id
         )
         if not case:
-            available = [
-                (c["language"], c["audio_filename"])
-                for c in cases
-                if c.get("status") == "ready"
-            ]
             raise ValueError(
                 f"No test case found for language='{language}', "
                 f"audio_filename='{audio_filename}'. Available: {available}"
@@ -313,6 +408,8 @@ def execute_test_run(
         audio_filename = case["audio_filename"]
         result.language = language
         result.audio_filename = audio_filename
+        case_upload_id = str(upload_id or case.get("upload_id") or "").strip()
+        is_upload = _is_upload_case(case, case_upload_id)
 
         log.info("[%s] Test case found: %s", test_id, case.get("folder_label", case["language"]))
         result.folder_label = case.get("folder_label", "")
@@ -320,19 +417,35 @@ def execute_test_run(
         result.has_ground_truth = case.get("has_transcript", False)
         result.has_soap_ground_truth = case.get("has_soap_ground_truth", False)
         result.drive_audio_file_id = case.get("audio_file_id", "")
-        result.drive_audio_filename = case.get("audio_filename", "")
+        result.drive_audio_filename = case.get("audio_filename", "") if not is_upload else ""
         result.drive_folder_id = case.get("folder_id", "")
         result.drive_transcript_file_id = case.get("transcript_file_id") or ""
         result.drive_soap_gt_file_id = case.get("soap_gt_file_id") or ""
         result.drive_translation_gt_file_id = case.get("translation_gt_file_id") or ""
+        result.audio_source = "upload" if is_upload else "google_drive"
+        if is_upload:
+            result.uploaded_audio_filename = audio_filename
 
-        drive_svc = drive_service.get_drive_service(config)
+        drive_svc = None
+        if not is_upload:
+            try:
+                drive_svc = drive_service.get_drive_service(config)
+            except Exception as auth_exc:
+                msg = drive_auth_message(auth_exc)
+                log.error("[%s] %s", test_id, msg)
+                result.accuracy_skip_reason = msg
+                raise RuntimeError(msg) from auth_exc
 
-        log.info("[%s] STEP 2: Downloading audio and ground truth...", test_id)
+        log.info("[%s] STEP 2: Fetching audio...", test_id)
         t0 = time.time()
-        audio_bytes = drive_service.download_file(case["audio_file_id"], drive_svc)
+        if is_upload:
+            held_upload_id = case_upload_id
+            acquire_uploaded_audio(held_upload_id)
+            audio_bytes = read_uploaded_bytes(held_upload_id)
+        else:
+            audio_bytes = drive_service.download_file(case["audio_file_id"], drive_svc)
         result.audio_size_bytes = len(audio_bytes)
-        log.info("[%s] Audio: %d bytes", test_id, len(audio_bytes))
+        log.info("[%s] Audio: %d bytes source=%s", test_id, len(audio_bytes), result.audio_source)
 
         ground_truth = ""
         soap_ground_truth = None
@@ -350,9 +463,15 @@ def execute_test_run(
             )
             log.info("[%s] Transcript: %d chars", test_id, len(ground_truth))
         elif not case.get("has_transcript"):
-            log.info("[%s] No ground truth — accuracy scoring will be skipped", test_id)
-            result.accuracy_skipped = True
-            result.accuracy_skip_reason = "No ground truth transcript found for this audio"
+            if case.get("has_soap_ground_truth"):
+                log.info(
+                    "[%s] No transcript GT — SOAP-only accuracy scoring",
+                    test_id,
+                )
+            else:
+                log.info("[%s] No ground truth — accuracy scoring will be skipped", test_id)
+                result.accuracy_skipped = True
+                result.accuracy_skip_reason = MISSING_TRANSCRIPT
 
         language_code = medsum_api.normalize_language(language)
 
@@ -376,7 +495,7 @@ def execute_test_run(
                     len(translation_ground_truth),
                 )
             else:
-                log.info("[%s] Translation GT: not available", test_id)
+                log.info("[%s] %s", test_id, TRANSLATION_GT_UNAVAILABLE)
 
         if case.get("has_soap_ground_truth") and case.get("soap_gt_file_id"):
             log.info("[%s] Downloading SOAP ground truth...", test_id)
@@ -388,7 +507,7 @@ def execute_test_run(
             if soap_ground_truth:
                 log.info("[%s] SOAP GT: keys=%s", test_id, list(soap_ground_truth.keys()))
             else:
-                log.info("[%s] SOAP GT: not available or parse failed", test_id)
+                log.info("[%s] %s", test_id, SOAP_PARSE_FAILED)
         else:
             log.info("[%s] has_soap_ground_truth: false — skipping SOAP GT download", test_id)
 
@@ -400,12 +519,61 @@ def execute_test_run(
             translation_ground_truth or ""
         ) or None
 
+        ground_truth, translation_ground_truth, soap_ground_truth, applied_manual = (
+            apply_gt_override_to_loaded(
+                ground_truth,
+                translation_ground_truth,
+                soap_ground_truth,
+                gt_override,
+            )
+        )
+
         result.ground_truth_transcription = ground_truth
         result.ground_truth = ground_truth
         result.soap_ground_truth = soap_ground_truth
         result.has_soap_ground_truth = soap_ground_truth is not None
+        result.has_summary_ground_truth = soap_ground_truth is not None
+        result.has_transcript_ground_truth = bool(ground_truth)
+        result.has_ground_truth = bool(ground_truth)
         result.translation_ground_truth = translation_ground_truth or ""
         result.has_translation_ground_truth = bool(translation_ground_truth)
+        gt_skips = collect_gt_skip_reasons(
+            has_transcript_file=bool(
+                case.get("has_transcript") and case.get("transcript_file_id")
+            ),
+            transcript_text=ground_truth,
+            has_soap_gt_file=bool(
+                case.get("has_soap_ground_truth") and case.get("soap_gt_file_id")
+            ),
+            soap_ground_truth=soap_ground_truth if isinstance(soap_ground_truth, dict) else None,
+            has_translation_gt_file=bool(
+                case.get("has_translation_ground_truth")
+                and case.get("translation_gt_file_id")
+            ),
+            translation_text=translation_ground_truth,
+            language_code=language_code,
+        )
+        if soap_ground_truth and not ground_truth:
+            result.accuracy_skipped = False
+            result.accuracy_skip_reason = ""
+        elif gt_skips["accuracy"]:
+            result.accuracy_skipped = True
+            result.accuracy_skip_reason = gt_skips["accuracy"]
+        else:
+            result.accuracy_skipped = False
+            result.accuracy_skip_reason = ""
+        log.info(
+            "[%s] GT skip reasons transcription=%r soap=%r translation=%r accuracy=%r",
+            test_id,
+            gt_skips["transcription"],
+            gt_skips["soap"],
+            gt_skips["translation"],
+            result.accuracy_skip_reason,
+        )
+        if applied_manual:
+            result.ground_truth_source = "upload"
+        elif ground_truth or soap_ground_truth or translation_ground_truth:
+            result.ground_truth_source = "google_drive"
 
         duration_seconds = 0
         try:
@@ -633,9 +801,19 @@ def execute_test_run(
                 "[%s] Skipping transcription comparison — GT: %s, Generated: %s",
                 test_id, bool(ground_truth), bool(transcription),
             )
-            if not result.accuracy_skip_reason:
+            if not result.accuracy_skip_reason and not soap_ground_truth:
                 result.accuracy_skipped = True
-                result.accuracy_skip_reason = "No ground truth available"
+                result.accuracy_skip_reason = (
+                    gt_skips.get("accuracy") or MISSING_GROUND_TRUTH
+                )
+            transcription_comparison = ComparisonResult(
+                skipped=True,
+                skip_reason=(
+                    gt_skips.get("transcription")
+                    or result.accuracy_skip_reason
+                    or MISSING_TRANSCRIPT
+                ),
+            )
 
         # ─────────────────────────────────────────────────────────
         # COMPARISON 2 — Translation: Ground Truth vs Generated
@@ -668,6 +846,7 @@ def execute_test_run(
                 "[%s] Skipping translation comparison — GT: %s, Generated: %s",
                 test_id, bool(gt_translation), bool(gen_translation),
             )
+            translation_comparison = skipped_comparison(gt_skips.get("translation") or "")
 
         # ─────────────────────────────────────────────────────────
         # COMPARISON 3 — SOAP (three-way when GT exists)
@@ -704,6 +883,7 @@ def execute_test_run(
                 "gt_vs_generated":  None,
                 "gt_vs_raw":        None,
                 "raw_vs_generated": raw_vs_gen,
+                "skip_reason": gt_skips.get("soap") or "",
                 "scores": {
                     "gt_vs_generated":  None,
                     "gt_vs_raw":        None,
@@ -721,6 +901,7 @@ def execute_test_run(
                 test_id, bool(soap_ground_truth),
                 bool(soap_generated), bool(soap_raw),
             )
+            soap_comparison = skipped_comparison(gt_skips.get("soap") or "")
 
         # ─────────────────────────────────────────────────────────
         # COMPARISON 4 — Medication validation (raw vs generated)
@@ -755,8 +936,35 @@ def execute_test_run(
         result.translation_comparison  = translation_comparison
         result.soap_comparison         = soap_comparison
         result.medication_validation   = medication_validation
+        soap_main = (soap_comparison or {}).get("gt_vs_generated") or {}
+        soap_score = soap_main.get("overall_weighted_clinical_score")
+        if soap_score is None:
+            soap_score = soap_main.get("similarity_score")
+        soap_severity = soap_main.get("overall_severity")
+        transcription_skipped = bool(
+            transcription_comparison is None
+            or getattr(transcription_comparison, "skipped", False)
+        )
+        transcription_severity = (
+            None
+            if transcription_skipped or transcription_comparison is None
+            else getattr(transcription_comparison, "severity", None)
+        )
+        transcription_score = (
+            None
+            if transcription_skipped or transcription_comparison is None
+            else getattr(transcription_comparison, "similarity_score", None)
+        )
+        has_transcript_gt = bool((ground_truth or "").strip())
+        has_soap_gt = bool(soap_ground_truth) or bool(result.has_soap_ground_truth)
+
         if transcription_comparison and not getattr(transcription_comparison, "skipped", False):
             result.accuracy_score = transcription_comparison.similarity_score
+            result.ai_model_used = ai_model
+        elif has_soap_gt and soap_score is not None:
+            result.accuracy_score = soap_score
+            result.accuracy_skipped = False
+            result.accuracy_skip_reason = ""
             result.ai_model_used = ai_model
 
         if previous and previous.generated_summary is not None:
@@ -782,17 +990,20 @@ def execute_test_run(
 
         _update_step(result, "Running AI comparison", "done")
 
-        if result.accuracy_skipped:
-            result.final_result = "complete_no_accuracy"
-        elif result.transcription_comparison and result.transcription_comparison.severity in (
-            "high",
-            "critical",
-        ):
-            result.final_result = "fail"
-        elif result.transcription_comparison and (result.accuracy_score or 0) >= 80:
-            result.final_result = "pass"
-        else:
-            result.final_result = "review"
+        result.final_result = classify_final_result(
+            has_transcript_gt=has_transcript_gt,
+            has_soap_gt=has_soap_gt,
+            transcription_skipped=transcription_skipped,
+            transcription_severity=transcription_severity,
+            transcription_score=transcription_score
+            if transcription_score is not None
+            else result.accuracy_score,
+            soap_score=soap_score,
+            soap_severity=soap_severity,
+            thresholds=get_accuracy_thresholds(config),
+        )
+        if result.final_result == "complete_no_accuracy":
+            result.accuracy_skipped = True
 
         timings["total_test_time_seconds"] = round(time.time() - run_start, 3)
         result.total_test_time_seconds = timings["total_test_time_seconds"]
@@ -821,6 +1032,9 @@ def execute_test_run(
         log.error("[%s] Traceback:\n%s", test_id, tb)
         save_result(result)
         return result
+    finally:
+        if held_upload_id:
+            release_uploaded_audio(held_upload_id)
 
     save_result(result)
     return result
@@ -838,6 +1052,8 @@ def _run_and_store(
     patient_id: str | None = None,
     doctor_id: str | None = None,
     phone: str | None = None,
+    gt_override: dict | None = None,
+    upload_id: str | None = None,
 ) -> TestResult:
     log.info("[%s] Background thread started", test_id)
     config = get_config()
@@ -911,6 +1127,8 @@ def _run_and_store(
             patient_id=resolved_patient_id,
             doctor_id=doctor_id,
             phone=phone,
+            gt_override=gt_override,
+            upload_id=upload_id,
         )
         log.info("[%s] Background thread finished — status=%s", test_id, result.status)
 
@@ -952,6 +1170,49 @@ def _run_and_store(
         return result
 
 
+@bp.route("/upload-audio", methods=["POST"])
+def upload_audio():
+    """Store a Test Run drop-zone file so Run Batch Test can execute it.
+
+    Choice (a): upload on drop/select, then run-all stays JSON. Switching
+    run-all to multipart would change the Drive selected_audios body; this
+    keeps that path intact and only adds an upload_id on source=upload rows.
+    """
+    uploaded = (
+        request.files.get("file")
+        or request.files.get("audio")
+        or next(iter(request.files.values()), None)
+    )
+    if uploaded is None or not getattr(uploaded, "filename", None):
+        return jsonify({"error": "audio file is required"}), 400
+    filename = Path(uploaded.filename).name
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in AUDIO_EXTENSIONS:
+        return jsonify({
+            "error": f"Unsupported audio type '{ext or filename}'. "
+            f"Allowed: {', '.join(sorted(AUDIO_EXTENSIONS))}"
+        }), 400
+    data = uploaded.read()
+    if not data:
+        return jsonify({"error": "audio file is empty"}), 400
+    language = str(request.form.get("language") or "").strip()
+    try:
+        record = store_upload(
+            filename,
+            data,
+            language=language,
+            content_type=getattr(uploaded, "content_type", "") or "",
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({
+        "upload_id": record["upload_id"],
+        "filename": record["filename"],
+        "language": record["language"],
+        "size_bytes": record["size_bytes"],
+    }), 201
+
+
 @bp.route("/drive-files", methods=["GET"])
 def drive_files():
     try:
@@ -968,8 +1229,11 @@ def run_test():
     audio_filename = body.get("audio_filename", "").strip()
     ai_model = body.get("ai_model", "gpt-4o-mini").strip()
     patient_id = str(body.get("patient_id") or "").strip()
+    upload_id = str(body.get("upload_id") or "").strip()
 
-    if not language or not audio_filename:
+    if not audio_filename:
+        return jsonify({"error": "audio_filename is required"}), 400
+    if not language and not upload_id:
         return jsonify({"error": "language and audio_filename are required"}), 400
 
     if ai_model not in VALID_MODELS:
@@ -1007,6 +1271,10 @@ def run_test():
             "manual",
             token,
             patient_id,
+            None,
+            None,
+            None,
+            upload_id,
         ),
         daemon=True,
     )
@@ -1029,7 +1297,10 @@ def run_all_tests():
     if not patient_id:
         patient_id = _resolve_patient_id("", config)
 
-    doctors = _parse_doctors(body.get("doctors"), fallback_patient_id=patient_id)
+    try:
+        doctors = _parse_doctors(body.get("doctors"), fallback_patient_id=patient_id)
+    except DoctorPatientError as exc:
+        return jsonify({"error": str(exc)}), 400
     if not doctors:
         return jsonify({"error": "No doctors provided"}), 400
 
@@ -1039,9 +1310,17 @@ def run_all_tests():
                      "Provide it in the request body or set patient.id in medsum_config.yaml"
         }), 400
 
+    selected_audios = body.get("selected_audios")
+    if selected_audios is not None:
+        if not isinstance(selected_audios, list):
+            return jsonify({"error": "selected_audios must be a list"}), 400
+        if missing_language_uploads(selected_audios):
+            return jsonify({"error": MISSING_LANGUAGE_RUN_MESSAGE}), 400
+
     log.info("run_all_tests: patient_id=%s ai_model=%s", patient_id, ai_model)
 
-    batch_id = str(uuid.uuid4())
+    ident = allocate_batch_identity()
+    batch_id = ident.batch_id
 
     authed = []
     for doctor in doctors:
@@ -1057,9 +1336,28 @@ def run_all_tests():
                 "error": f"Auth failed for {doctor['phone']}: {exc}"
             }), 500
 
-    test_cases = [
+    # Drive discovery is unchanged. Session uploads are merged in so
+    # filter_cases_for_run can match source=upload selected_audios rows.
+    all_cases = [
         tc for tc in drive_service.list_test_cases(config) if tc.get("status") == "ready"
     ]
+    selected_audios = body.get("selected_audios")
+    if selected_audios is not None:
+        all_cases = all_cases + cases_for_selection(selected_audios)
+        test_cases = filter_cases_for_run(all_cases, selected_audios)
+        test_cases = attach_selection_overrides(test_cases, selected_audios)
+        log.info(
+            "run_all: filtered to %d/%d selected audio files",
+            len(test_cases),
+            len(all_cases),
+        )
+        if not test_cases:
+            return jsonify({
+                "error": "No matching audio files for the current selection"
+            }), 400
+    else:
+        test_cases = all_cases
+        log.info("run_all: running all %d audio files", len(test_cases))
 
     jobs = []
     for doctor in authed:
@@ -1067,10 +1365,13 @@ def run_all_tests():
             for tc in test_cases:
                 jobs.append((doctor, patient_id, tc))
 
-    batch_ref = medsum_api.create_batch(
+    django_batch = medsum_api.create_batch(
         batch_id, ai_model, config, authed[0]["token"], total_files=len(jobs)
     )
-    log.info("Batch created: batch_id=%s batch_ref=%s", batch_id, batch_ref)
+    log.info(
+        "Batch created: batch_id=%s django=%s",
+        batch_id, django_batch,
+    )
 
     stagger = config.get("test_settings", {}).get("run_all_stagger_seconds", 3)
     test_ids = []
@@ -1114,13 +1415,14 @@ def run_all_tests():
                 str(patient_id),
                 str(doctor["doctor_id"]),
                 doctor["phone"],
+                tc.get("manual_gt"),
+                tc.get("upload_id") or "",
             ),
         ).start()
 
     log.info("Batch %s started — %d tests", batch_id, len(test_ids))
     return jsonify({
         "batch_id": batch_id,
-        "batch_ref": batch_ref,
         "total": len(test_ids),
         "test_ids": test_ids,
         "status": "started",

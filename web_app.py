@@ -44,7 +44,7 @@ SOAP_TEMPLATE = {
         "social_history": "", "family_history": "",
     },
     "objective": {
-        "vitals": {"blood_pressure": "", "heart_rate": "", "respiratory_rate": "", "temperature": ""},
+        "vitals": {"blood_pressure": "", "heart_rate": "", "respiratory_rate": "", "temperature": "", "spo2": ""},
         "physical_exam": {"heart": []},
     },
     "assessment": [],

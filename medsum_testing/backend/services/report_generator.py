@@ -15,6 +15,22 @@ from reportlab.lib.units import cm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from medsum_testing.backend.models.test_result import TestResult
+from medsum_testing.backend.services.batch_report import (
+    BATCH_REPORT_SECTIONS,
+    build_batch_report,
+)
+from medsum_testing.backend.services.individual_report import (
+    extra_report_fields,
+    individual_report_fields,
+)
+
+
+# One PDF table row cannot be taller than the page frame (~686pt on A4
+# with these margins). 8pt type at 11pt leading wraps ~80 chars/line, so
+# ~1800 characters stays well under one frame. Longer values are split
+# across continuation rows instead of overflowing (LayoutError 500).
+PDF_CELL_CHAR_LIMIT = 1800
+PDF_TABLE_ROWS_PER_BLOCK = 12
 
 
 def _fmt(value: Any) -> str:
@@ -25,13 +41,47 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
+def _escape_pdf(text: str) -> str:
+    return (
+        str(text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\n", "<br/>")
+    )
+
+
+def _chunks_for_pdf(text: str, limit: int = PDF_CELL_CHAR_LIMIT) -> list[str]:
+    raw = str(text or "")
+    if len(raw) <= limit:
+        return [raw]
+    parts: list[str] = []
+    remaining = raw
+    while remaining:
+        if len(remaining) <= limit:
+            parts.append(remaining)
+            break
+        window = remaining[:limit]
+        cut = window.rfind("\n")
+        if cut < limit // 4:
+            cut = window.rfind(" ")
+        if cut < limit // 4:
+            cut = limit
+        else:
+            cut += 1
+        parts.append(remaining[:cut])
+        remaining = remaining[cut:]
+    return parts or [""]
+
+
 def _section_rows(result: TestResult) -> list[tuple[str, str]]:
+    required = individual_report_fields(result)
     tc = result.transcription_comparison
     sc = result.summary_comparison
     mc = result.medication_comparison
     rc = result.regression_comparison
 
-    rows = [
+    rows = required + extra_report_fields(result) + [
         ("Test Case ID", result.test_case_id or "N/A"),
         ("Test ID", result.test_id),
         ("Patient ID", result.patient_id or "N/A"),
@@ -139,30 +189,32 @@ def generate_pdf(test_result: TestResult) -> bytes:
 
     table_data = []
     for label, value in _section_rows(test_result):
-        safe_value = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        safe_value = safe_value.replace("\n", "<br/>")
-        table_data.append(
-            [
-                Paragraph(label, label_style),
-                Paragraph(safe_value[:8000], value_style),
-            ]
-        )
+        chunks = _chunks_for_pdf(value)
+        for i, chunk in enumerate(chunks):
+            table_data.append(
+                [
+                    Paragraph(label if i == 0 else "", label_style),
+                    Paragraph(_escape_pdf(chunk), value_style),
+                ]
+            )
 
-    table = Table(table_data, colWidths=[5.5 * cm, 12 * cm])
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f1f5")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d9dce6")),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
+    kv_style = TableStyle(
+        [
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f1f5")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d9dce6")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]
     )
-    story.append(table)
+    for start in range(0, len(table_data), PDF_TABLE_ROWS_PER_BLOCK):
+        block = table_data[start : start + PDF_TABLE_ROWS_PER_BLOCK]
+        table = Table(block, colWidths=[5.5 * cm, 12 * cm], splitByRow=1)
+        table.setStyle(kv_style)
+        story.append(table)
+        story.append(Spacer(1, 0.05 * cm))
     doc.build(story)
     return buffer.getvalue()
 
@@ -226,3 +278,191 @@ def save_report_path(
         token,
         config,
     )
+
+
+def _kv_rows(mapping: dict) -> list[tuple[str, str]]:
+    rows = []
+    for key, value in mapping.items():
+        if key in {"status_counts", "execution_counts", "evaluation_counts"} and isinstance(value, dict):
+            rows.append((key, ", ".join(f"{k}={v}" for k, v in value.items()) or "—"))
+        elif key == "stage_averages" and isinstance(value, dict):
+            rows.append((key, ", ".join(f"{k}={v}" for k, v in value.items())))
+        elif isinstance(value, list):
+            continue
+        else:
+            rows.append((key, _fmt(value)))
+    return rows
+
+
+def generate_batch_pdf(rows: list) -> bytes:
+    report = build_batch_report(rows)
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=1.5 * cm, leftMargin=1.5 * cm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "BatchTitle",
+        parent=styles["Heading1"],
+        fontSize=16,
+        spaceAfter=12,
+        textColor=colors.HexColor("#2563eb"),
+    )
+    heading = ParagraphStyle(
+        "BatchH",
+        parent=styles["Heading2"],
+        fontSize=12,
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+    label_style = ParagraphStyle(
+        "BatchLabel",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=8,
+    )
+    value_style = ParagraphStyle(
+        "BatchValue",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8,
+        leading=11,
+    )
+
+    def _cell(text: str, style) -> Paragraph:
+        return Paragraph(_escape_pdf(str(text)[: PDF_CELL_CHAR_LIMIT * 2]), style)
+
+    def _kv_table(pairs: list[tuple[str, str]]):
+        rows = []
+        for key, value in pairs:
+            chunks = _chunks_for_pdf(value)
+            for i, chunk in enumerate(chunks):
+                rows.append([
+                    _cell(key if i == 0 else "", label_style),
+                    _cell(chunk, value_style),
+                ])
+        return rows
+
+    story = [Paragraph(report["title"], title_style)]
+    for section in BATCH_REPORT_SECTIONS:
+        story.append(Paragraph(section, heading))
+        body = report.get(section)
+        if section == "Test Case Details":
+            table_data = [[
+                _cell("Test Case ID", label_style),
+                _cell("Execution Status", label_style),
+                _cell("SOAP Evaluation", label_style),
+                _cell("Accuracy", label_style),
+                _cell("Latency", label_style),
+                _cell("Individual Report", label_style),
+            ]]
+            for case in body or []:
+                table_data.append([
+                    _cell(case.get("test_case_id", ""), value_style),
+                    _cell(case.get("execution_status", ""), value_style),
+                    _cell(case.get("soap_evaluation", ""), value_style),
+                    _cell(case.get("accuracy", ""), value_style),
+                    _cell(case.get("latency", ""), value_style),
+                    _cell(case.get("individual_report", ""), value_style),
+                ])
+        elif isinstance(body, dict):
+            pairs = list(_kv_rows(body))
+            if body.get("per_case"):
+                pairs.append((
+                    "per_case",
+                    "\n".join(
+                        f"{c.get('test_case_id') or c.get('audio_file')}: "
+                        f"{c.get('accuracy') or c.get('total_time')}"
+                        for c in body["per_case"]
+                    ),
+                ))
+            table_data = _kv_table(pairs)
+        else:
+            table_data = _kv_table([("", _fmt(body))])
+        table = Table(
+            table_data,
+            colWidths=[4.5 * cm, 13 * cm] if section != "Test Case Details" else None,
+            splitByRow=1,
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f1f5")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d9dce6")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        story.append(table)
+        story.append(Spacer(1, 0.2 * cm))
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def generate_batch_excel(rows: list) -> bytes:
+    report = build_batch_report(rows)
+    wb = Workbook()
+    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+
+    first = True
+    for section in BATCH_REPORT_SECTIONS:
+        ws = wb.active if first else wb.create_sheet(section[:31])
+        if first:
+            ws.title = section[:31]
+            first = False
+        body = report.get(section)
+        if section == "Test Case Details":
+            headers = [
+                "Test Case ID",
+                "Execution Status",
+                "SOAP Evaluation",
+                "Accuracy",
+                "Latency",
+                "Audio File",
+                "Individual Report",
+            ]
+            for col, title in enumerate(headers, start=1):
+                cell = ws.cell(row=1, column=col, value=title)
+                cell.fill = header_fill
+                cell.font = header_font
+            for idx, case in enumerate(body or [], start=2):
+                ws.cell(row=idx, column=1, value=case.get("test_case_id"))
+                ws.cell(row=idx, column=2, value=case.get("execution_status"))
+                ws.cell(row=idx, column=3, value=case.get("soap_evaluation"))
+                ws.cell(row=idx, column=4, value=case.get("accuracy"))
+                ws.cell(row=idx, column=5, value=case.get("latency"))
+                ws.cell(row=idx, column=6, value=case.get("audio_file"))
+                ws.cell(row=idx, column=7, value=case.get("individual_report"))
+        else:
+            ws.cell(row=1, column=1, value="Field").fill = header_fill
+            ws.cell(row=1, column=1).font = header_font
+            ws.cell(row=1, column=2, value="Value").fill = header_fill
+            ws.cell(row=1, column=2).font = header_font
+            row_i = 2
+            for key, value in _kv_rows(body or {}):
+                ws.cell(row=row_i, column=1, value=key)
+                ws.cell(row=row_i, column=2, value=value)
+                row_i += 1
+            if isinstance(body, dict) and body.get("per_case"):
+                ws.cell(row=row_i, column=1, value="per_case")
+                ws.cell(row=row_i, column=1).font = Font(bold=True)
+                row_i += 1
+                keys = list(body["per_case"][0].keys()) if body["per_case"] else []
+                for col, key in enumerate(keys, start=1):
+                    cell = ws.cell(row=row_i, column=col, value=key)
+                    cell.fill = header_fill
+                    cell.font = header_font
+                row_i += 1
+                for case in body["per_case"]:
+                    for col, key in enumerate(keys, start=1):
+                        ws.cell(row=row_i, column=col, value=case.get(key))
+                    row_i += 1
+        ws.column_dimensions["A"].width = 28
+        ws.column_dimensions["B"].width = 50
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()

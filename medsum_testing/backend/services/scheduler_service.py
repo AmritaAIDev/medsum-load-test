@@ -14,6 +14,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from medsum_testing.backend.routes.test_runner import _run_and_store
 from medsum_testing.backend.services import medsum_api
+from medsum_testing.backend.services.batch_identity import allocate_batch_identity
 from medsum_testing.backend.services.config_loader import get_config, get_results_dir
 from medsum_testing.backend.services.drive_service import list_test_cases
 from medsum_testing.backend.services.result_store import has_recent_result
@@ -112,7 +113,8 @@ def run_all_tests(ai_model: str, skip_recent: bool = True) -> list[dict]:
             _schedule_state["last_run_status"] = status
         return status
 
-    batch_id = str(uuid.uuid4())
+    ident = allocate_batch_identity()
+    batch_id = ident.batch_id
     medsum_api.create_batch(
         batch_id, ai_model, config, token, total_files=len(test_cases)
     )

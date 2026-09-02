@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from medsum_testing.backend.models.test_result import TestResult
+from medsum_testing.backend.models.test_result import TestResult, attach_row_display
+from medsum_testing.backend.services.batch_identity import canonical_batch_id
 from medsum_testing.backend.services.config_loader import get_results_dir
 
 
@@ -54,6 +55,83 @@ def _identity_fields(data: dict) -> dict:
     }
 
 
+def _comparison_snippet(comp: Any) -> dict | None:
+    if not isinstance(comp, dict):
+        return None
+    details = comp.get("medical_difference_details") or []
+    types: list[str] = []
+    seen: set[str] = set()
+    for item in details:
+        if isinstance(item, dict):
+            kind = str(item.get("type") or "").strip().replace("_", " ")
+            if kind and kind not in seen:
+                seen.add(kind)
+                types.append(kind)
+    return {
+        "similarity_score": comp.get("similarity_score"),
+        "summary": (comp.get("summary") or "")[:240],
+        "skipped": comp.get("skipped", False),
+        "skip_reason": comp.get("skip_reason") or "",
+        "error": comp.get("error") or "",
+        "severity": comp.get("severity") or comp.get("overall_severity") or "",
+        "medical_difference_details": [
+            {"type": t} for t in types
+        ],
+        "medical_differences": types,
+    }
+
+
+def _soap_snippet(soap: Any) -> dict | None:
+    if not isinstance(soap, dict):
+        return None
+    scores = soap.get("scores") if isinstance(soap.get("scores"), dict) else {}
+    gt_vs = soap.get("gt_vs_generated") if isinstance(soap.get("gt_vs_generated"), dict) else {}
+    metrics = gt_vs.get("metrics") if isinstance(gt_vs.get("metrics"), dict) else {}
+    snippet_metrics = {}
+    for key in (
+        "overall_weighted_clinical_score",
+        "correct_count",
+        "incorrect_count",
+        "missing_count",
+        "hallucination_count",
+        "captured_count",
+        "applicable_count",
+    ):
+        if metrics.get(key) is not None:
+            snippet_metrics[key] = metrics[key]
+    pair = {
+        "similarity_score": scores.get("gt_vs_generated")
+        or gt_vs.get("similarity_score")
+        or gt_vs.get("overall_weighted_clinical_score"),
+        "overall_weighted_clinical_score": gt_vs.get("overall_weighted_clinical_score")
+        or scores.get("gt_vs_generated"),
+        "summary": (gt_vs.get("summary") or "")[:240],
+    }
+    if snippet_metrics:
+        pair["metrics"] = snippet_metrics
+    return {
+        "scores": {
+            "gt_vs_generated": pair["similarity_score"],
+        },
+        "gt_vs_generated": pair,
+        "skipped": bool(soap.get("skipped")),
+        "skip_reason": soap.get("skip_reason") or "",
+    }
+
+
+def _timing_snippet(data: dict) -> dict:
+    tr = data.get("transcription_result")
+    if not isinstance(tr, dict):
+        return {}
+    return {
+        "audio_length": tr.get("audio_length"),
+        "translation-time": tr.get("translation-time"),
+        "transcription-time": tr.get("transcription-time"),
+        "llm-time": tr.get("llm-time"),
+        "total-time": tr.get("total-time"),
+    }
+
+
 def list_results() -> list[dict]:
     return [summary for _, summary in _iter_result_files()]
 
@@ -76,9 +154,9 @@ def _iter_result_files(full: bool = False):
         except (json.JSONDecodeError, OSError):
             continue
         if full:
-            yield data, path
+            yield attach_row_display(data), path
         else:
-            yield path, {
+            yield path, attach_row_display({
                 "id": data.get("test_id", path.stem),
                 "test_id": data.get("test_id", path.stem),
                 "tc_ref": data.get("tc_ref", ""),
@@ -95,13 +173,36 @@ def _iter_result_files(full: bool = False):
                     or (data.get("transcription_comparison") or {}).get("similarity_score")
                 ),
                 "status": data.get("status", ""),
-                "batch_id": data.get("batch_id", ""),
+                "batch_id": canonical_batch_id(
+                    data.get("batch_id") or "",
+                    data.get("batch_ref") or "",
+                ),
+                "created_at": data.get("timestamp", ""),
+                "completed_at": data.get("timestamp", ""),
                 **_identity_fields(data),
                 "total_test_time_seconds": data.get("total_test_time_seconds"),
-                "comparison": data.get("comparison") or data.get("transcription_comparison"),
-                "has_ground_truth": data.get("has_ground_truth", True),
+                "audio_duration_seconds": data.get("audio_duration_seconds") or 0,
+                "transcription_result": _timing_snippet(data),
+                "comparison": _comparison_snippet(
+                    data.get("comparison") or data.get("transcription_comparison")
+                ) or data.get("comparison") or data.get("transcription_comparison"),
+                "transcription_comparison": _comparison_snippet(
+                    data.get("transcription_comparison") or data.get("comparison")
+                ),
+                "translation_comparison": _comparison_snippet(
+                    data.get("translation_comparison")
+                ),
+                "soap_comparison": _soap_snippet(data.get("soap_comparison")),
+                "has_ground_truth": data.get("has_ground_truth"),
+                "has_translation_ground_truth": data.get("has_translation_ground_truth"),
+                "has_soap_ground_truth": data.get("has_soap_ground_truth"),
                 "ground_truth_transcription": data.get("ground_truth_transcription", ""),
-            }
+                "accuracy_skipped": data.get("accuracy_skipped", False),
+                "accuracy_skip_reason": data.get("accuracy_skip_reason", ""),
+                "ai_model": data.get("ai_model", ""),
+                "ai_model_used": data.get("ai_model_used") or data.get("ai_model", ""),
+                "llm_model": data.get("llm_model", ""),
+            })
 
 
 def find_previous_result(

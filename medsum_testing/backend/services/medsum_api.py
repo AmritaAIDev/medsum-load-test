@@ -76,6 +76,24 @@ SOAP_CONSULT_TEMPLATE: dict[str, Any] = {
 }
 
 
+def supported_language_labels() -> tuple[str, ...]:
+    """Drive folder labels after extract_language (capitalize). Same API set."""
+    return tuple(name.capitalize() for name in LANGUAGE_CODE_MAP)
+
+
+def canonical_language_label(raw: str | None) -> str:
+    """Map a folder name or API code onto a supported Drive label, else ''."""
+    key = str(raw or "").strip().lower()
+    if not key:
+        return ""
+    if key in LANGUAGE_CODE_MAP:
+        return key.capitalize()
+    for name, code in LANGUAGE_CODE_MAP.items():
+        if key == code:
+            return name.capitalize()
+    return ""
+
+
 def normalize_language(language: str) -> str:
     """Convert 'Malayalam' → 'ml', 'Hindi' → 'hi', etc."""
     key = language.lower().strip()

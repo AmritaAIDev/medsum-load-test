@@ -46,6 +46,7 @@ SOAP_TEMPLATE = {
             "heart_rate": "",
             "respiratory_rate": "",
             "temperature": "",
+            "spo2": "",
         },
         "physical_exam": {"heart": []},
     },
