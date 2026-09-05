@@ -5046,3 +5046,29 @@ em.na { color: var(--text-muted); font-style: italic; }
 @media (max-width: 480px) {
   .accuracy-stat-value { font-size: 20px; }
 }
+
+.recordings-table-section {
+  margin-top: 0;
+}
+.recordings-table-wrap {
+  max-height: 420px;
+  overflow: auto;
+}
+.recordings-table {
+  min-width: 720px;
+}
+.recordings-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+}
+.recordings-id {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.recordings-empty {
+  text-align: center;
+  color: var(--text-secondary);
+  padding: 1.25rem 0.65rem;
+}

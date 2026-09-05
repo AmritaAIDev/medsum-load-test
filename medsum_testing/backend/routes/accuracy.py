@@ -58,6 +58,31 @@ def get_batch_accuracy_metrics(batch_id: str):
     return jsonify({"status": "success", "data": payload})
 
 
+@bp.route("/api/batches/<batch_id>/recordings/", methods=["GET"])
+@bp.route("/api/batches/<batch_id>/recordings", methods=["GET"])
+@bp.route("/api/medsum-test/batches/<batch_id>/recordings/", methods=["GET"])
+@bp.route("/api/medsum-test/batches/<batch_id>/recordings", methods=["GET"])
+def get_batch_recordings(batch_id: str):
+    test_type, model, batch_ids = _query_filters()
+    status_filter = (
+        request.args.get("status_filter")
+        or request.args.get("statusFilter")
+        or ""
+    ).strip()
+    calc = AccuracyCalculator(
+        batch_id,
+        test_type=test_type,
+        model=model,
+        batch_ids=batch_ids or None,
+    )
+    if not calc.batch_exists():
+        return _missing_batch(batch_id)
+    return jsonify({
+        "status": "success",
+        "data": calc.get_recordings_payload(status_filter),
+    })
+
+
 @bp.route("/api/batches/<batch_id>/accuracy/<path:category>/", methods=["GET"])
 @bp.route("/api/batches/<batch_id>/accuracy/<path:category>", methods=["GET"])
 @bp.route("/api/medsum-test/batches/<batch_id>/accuracy/<path:category>/", methods=["GET"])

@@ -21,7 +21,12 @@
   };
 
   let abortController = null;
+  let recordingsAbort = null;
   let lastPayload = null;
+  let lastRecordings = [];
+  let lastRecordingsTotal = 0;
+  let recordingsFilter = '';
+  let lastFetchOpts = { batchId: 'all', batchIds: [], testType: 'All', model: 'All' };
   let expanded = new Set();
   let expandAll = false;
   let onRowClick = null;
@@ -30,6 +35,10 @@
     return document.getElementById('accuracy-table-section')
       || document.getElementById('clinical-accuracy-section')
       || document.querySelector('[data-accuracy-table]');
+  }
+
+  function recordingsEl() {
+    return document.getElementById('recordings-table-section');
   }
 
   function esc(value) {
@@ -161,13 +170,21 @@
     sel.value = [...sel.options].some((opt) => opt.value === previous) ? previous : 'all';
   }
 
+  function selectedBatchList(batchId, batchIds) {
+    const fromList = (batchIds || []).map((id) => String(id || '').trim()).filter((id) => id && id !== 'all');
+    if (fromList.length) return fromList;
+    const single = String(batchId || '').trim();
+    if (single && single.toLowerCase() !== 'all') return [single];
+    return [];
+  }
+
   function metricsUrl(batchId, testType, model, batchIds) {
-    const id = encodeURIComponent(batchId || 'all');
     const params = new URLSearchParams();
     params.set('test_type', testType || 'All');
     params.set('model', model || 'All');
-    if (batchIds && batchIds.length) params.set('batch_ids', batchIds.join(','));
-    return `${API_BASE}/${id}/accuracy-by-category/?${params.toString()}`;
+    const ids = selectedBatchList(batchId, batchIds);
+    if (ids.length) params.set('batch_ids', ids.join(','));
+    return `${API_BASE}/all/accuracy-by-category/?${params.toString()}`;
   }
 
   function statusBadge(row) {
@@ -270,6 +287,121 @@
       </div>`;
   }
 
+  function formatDurationMins(seconds) {
+    if (seconds == null || seconds === '') return '—';
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n < 0) return '—';
+    if (n < 60) return `${Math.round(n)}s`;
+    const m = Math.floor(n / 60);
+    const rem = Math.round(n % 60);
+    return `${m}m ${rem}s`;
+  }
+
+  function formatLatencySecs(seconds) {
+    if (seconds == null || seconds === '') return '—';
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n < 0) return '—';
+    return `${Math.round(n)}s`;
+  }
+
+  function recordingDisplayStatus(row) {
+    const data = row || {};
+    if (data.has_safety_flag) {
+      return { key: 'safety', label: 'Safety flag' };
+    }
+    const raw = String(data.status || '').toLowerCase();
+    if (raw === 'pass') return { key: 'pass', label: 'Pass' };
+    if (raw === 'na' || raw === 'n/a') return { key: 'na', label: 'N/A' };
+    return { key: 'review', label: 'Needs review' };
+  }
+
+  function recordingStatusBadge(row) {
+    const meta = recordingDisplayStatus(row);
+    return `<span class="recording-badge status-${esc(meta.key)}">${esc(meta.label)}</span>`;
+  }
+
+  function recordingRowHtml(row) {
+    const data = row || {};
+    const hasGt = data.has_ground_truth !== false && Number(data.ground_truth) > 0;
+    const tc = data.test_case_number || data.tc_ref || data.test_id || '—';
+    const testId = data.test_id || '';
+    const correctGt = hasGt
+      ? `<span class="correct">${esc(formatCount(data.correct))}</span><span class="separator"> / </span><span class="total">${esc(formatCount(data.ground_truth))}</span>`
+      : 'N/A';
+    const flag = data.has_safety_flag
+      ? '<span class="recordings-flag" title="Safety flag">🚩</span>'
+      : '';
+    return `
+      <tr class="recording-row" data-test-id="${esc(testId)}">
+        <td class="flag-col">${flag}</td>
+        <td class="recording-name">
+          <a href="#detail/${encodeURIComponent(testId)}" data-open-recording="${esc(testId)}">${esc(tc)}</a>
+        </td>
+        <td class="duration">${esc(formatDurationMins(data.duration_seconds))}</td>
+        <td class="metrics">${correctGt}</td>
+        <td class="missed">${hasGt ? esc(formatCount(data.missed)) : 'N/A'}</td>
+        <td class="wrong">${hasGt ? esc(formatCount(data.wrong)) : 'N/A'}</td>
+        <td class="invented">${hasGt ? esc(formatCount(data.invented)) : 'N/A'}</td>
+        <td class="latency">${esc(formatLatencySecs(data.latency_seconds))}</td>
+        <td>${recordingStatusBadge(data)}</td>
+      </tr>`;
+  }
+
+  function recordingsFilterButtons(total) {
+    const filters = [
+      { key: '', label: `All ${total}` },
+      { key: 'safety_flag', label: 'Safety flag' },
+      { key: 'review', label: 'Needs review' },
+      { key: 'pass', label: 'Passed' },
+      { key: 'invented', label: 'Has invented fact' },
+      { key: 'allergy_error', label: 'Allergy error' },
+      { key: 'dose_error', label: 'Dose / frequency error' },
+      { key: 'numeral_error', label: 'Hindi numeral error' },
+      { key: 'drug_error', label: 'Brand / sound-alike drug' },
+    ];
+    return filters.map((item) => `
+      <button type="button" class="recordings-filter-btn${recordingsFilter === item.key ? ' active' : ''}"
+              data-recordings-filter="${esc(item.key)}">${esc(item.label)}</button>
+    `).join('');
+  }
+
+  function recordingsHtml(rows, total) {
+    const items = rows || [];
+    const all = total == null ? items.length : total;
+    const body = items.length
+      ? items.map(recordingRowHtml).join('')
+      : '<tr><td colspan="9" class="recordings-empty">No recordings in the current filter.</td></tr>';
+    return `
+      <div class="accuracy-table-head">
+        <div>
+          <h3>Recordings</h3>
+          <p class="recordings-subtitle">Click any row to open the fact-level review</p>
+        </div>
+      </div>
+      <div class="recordings-filters">${recordingsFilterButtons(all)}</div>
+      <p class="recordings-count">Showing ${items.length} of ${all}</p>
+      <div class="recordings-table-wrap">
+        <table class="clinical-accuracy-table recordings-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Recording</th>
+              <th>Duration (mins)</th>
+              <th>Correct / GT</th>
+              <th>Missed</th>
+              <th>Wrong</th>
+              <th>Invented</th>
+              <th>Latency</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${body}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
   function passRuleHtml() {
     return `
       <div class="pass-rule">
@@ -333,7 +465,93 @@
       ${passRuleHtml()}`;
   }
 
+  function renderRecordingsLoading() {
+    const rec = recordingsEl();
+    if (!rec) return;
+    rec.hidden = false;
+    rec.innerHTML = `
+      <div class="accuracy-table-head">
+        <div>
+          <h3>Recordings</h3>
+          <p class="recordings-subtitle">Click any row to open the fact-level review</p>
+        </div>
+      </div>
+      <div class="accuracy-table-state" role="status">Loading recordings…</div>`;
+  }
+
+  function paintRecordings(rows, total) {
+    const rec = recordingsEl();
+    if (!rec) return;
+    rec.hidden = false;
+    lastRecordings = rows || [];
+    lastRecordingsTotal = total == null ? lastRecordings.length : total;
+    rec.innerHTML = recordingsHtml(lastRecordings, lastRecordingsTotal);
+    rec.querySelectorAll('[data-recordings-filter]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        recordingsFilter = btn.getAttribute('data-recordings-filter') || '';
+        refreshRecordings(lastFetchOpts);
+      });
+    });
+    rec.querySelectorAll('[data-open-recording]').forEach((link) => {
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
+        const testId = link.getAttribute('data-open-recording') || '';
+        if (testId && typeof root.openTestDetail === 'function') {
+          root.openTestDetail(testId);
+        }
+      });
+    });
+  }
+
+  function recordingsUrl(batchId, testType, model, batchIds, statusFilter) {
+    const params = new URLSearchParams();
+    params.set('test_type', testType || 'All');
+    params.set('model', model || 'All');
+    const ids = selectedBatchList(batchId, batchIds);
+    if (ids.length) params.set('batch_ids', ids.join(','));
+    if (statusFilter) params.set('status_filter', statusFilter);
+    return `${API_BASE}/all/recordings/?${params.toString()}`;
+  }
+
+  async function refreshRecordings(opts) {
+    const rec = recordingsEl();
+    if (!rec) return;
+    const options = opts || lastFetchOpts;
+    renderRecordingsLoading();
+    if (recordingsAbort) recordingsAbort.abort();
+    recordingsAbort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    try {
+      const url = recordingsUrl(
+        options.batchId,
+        options.testType,
+        options.model,
+        options.batchIds,
+        recordingsFilter
+      );
+      const resp = await fetch(url, {
+        signal: recordingsAbort ? recordingsAbort.signal : undefined,
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error((body && body.error) || `Could not load recordings (${resp.status})`);
+      }
+      const data = body.data || body;
+      paintRecordings(data.recordings || [], data.total_recordings);
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      rec.hidden = false;
+      rec.innerHTML = `
+        <div class="accuracy-table-head">
+          <div>
+            <h3>Recordings</h3>
+          </div>
+        </div>
+        <div class="accuracy-table-state is-error" role="alert">${esc(err && err.message ? err.message : 'Could not load recordings.')}</div>`;
+    }
+  }
+
   function renderLoading() {
+    renderRecordingsLoading();
     const el = sectionEl();
     if (!el) return;
     el.hidden = false;
@@ -428,12 +646,13 @@
     const testType = opts.testType != null ? opts.testType : filters.testType;
     const model = opts.model != null ? opts.model : filters.model;
     if (opts.onRowClick) onRowClick = opts.onRowClick;
-    const batchId = batchIds && batchIds.length === 1 ? batchIds[0] : (opts.batchId || 'all');
-    const extraIds = batchIds && batchIds.length > 1 ? batchIds : [];
+    const batchId = opts.batchId || 'all';
+    lastFetchOpts = { batchId, batchIds, testType, model };
     syncFilterQuery(testType, model);
     renderLoading();
+    refreshRecordings(lastFetchOpts);
     try {
-      const data = await fetchMetrics(batchId, testType, model, extraIds);
+      const data = await fetchMetrics(batchId, testType, model, batchIds);
       paint(data);
     } catch (err) {
       if (err && err.name === 'AbortError') return;

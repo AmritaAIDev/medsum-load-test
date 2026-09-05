@@ -47,6 +47,13 @@ STATUS_REVIEW = "review"
 STATUS_FAIL = "fail"
 STATUS_NA = "na"
 
+FLAG_INVENTED = "Has invented fact"
+FLAG_ALLERGY = "Allergy error"
+FLAG_DOSE = "Dose / frequency error"
+FLAG_NUMERAL = "Hindi numeral error"
+FLAG_DRUG = "Brand / sound-alike drug"
+_DEVANAGARI_DIGIT_RE = re.compile(r"[०-९]")
+
 _WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
 _CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _DEFAULT_TTL = 300.0
@@ -457,17 +464,36 @@ class AccuracyCalculator:
             candidates.extend(config.values())
         return any(wanted in _norm_name(item) or _norm_name(item) == wanted for item in candidates if _text(item))
 
+    def _wanted_batch_keys(self) -> set[str]:
+        keys: set[str] = set()
+        for item in self._wanted_batch_ids():
+            raw = _text(item)
+            if not raw:
+                continue
+            keys.add(_norm_name(raw))
+            keys.add(_norm_name(canonical_batch_id(raw, "")))
+        return {key for key in keys if key}
+
+    def _run_matches_batch(self, run: dict, wanted: set[str]) -> bool:
+        if not wanted:
+            return True
+        candidates = [
+            self._run_batch_id(run),
+            run.get("batch_id"),
+            run.get("batch_ref"),
+        ]
+        return any(_norm_name(item) in wanted for item in candidates if _text(item))
+
     def _get_filtered_runs(self) -> list[dict]:
         if self._filtered is not None:
             return self._filtered
         pool = list(self._provided_runs) if self._provided_runs is not None else load_all_results_raw()
-        wanted = {_norm_name(item) for item in self._wanted_batch_ids()}
+        wanted = self._wanted_batch_keys()
         matched: list[dict] = []
         for run in pool:
             if not isinstance(run, dict):
                 continue
-            batch = self._run_batch_id(run)
-            if wanted and _norm_name(batch) not in wanted and _norm_name(run.get("batch_id")) not in wanted:
+            if wanted and not self._run_matches_batch(run, wanted):
                 continue
             self._batch_found = True
             if not self._matches_test_type(run):
@@ -673,11 +699,191 @@ class AccuracyCalculator:
                 }
                 for name, spec in self.thresholds.items()
             },
+            "recordings": self.get_recording_rows(),
             "note": (
                 ""
                 if overall.get("has_ground_truth")
                 else "Accuracy was not calculated — no SOAP ground truth in the selected runs."
             ),
+        }
+
+    def _run_duration_seconds(self, run: dict) -> float | None:
+        tr = _as_dict(run.get("transcription_result"))
+        for raw in (
+            run.get("audio_duration_seconds"),
+            tr.get("audio_length"),
+            run.get("audio_length"),
+            tr.get("audio_duration_seconds"),
+        ):
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+
+    def _run_latency_seconds(self, run: dict) -> float | None:
+        tr = _as_dict(run.get("transcription_result"))
+        nested = _as_dict(tr.get("time"))
+        for raw in (
+            tr.get("total-time"),
+            nested.get("total"),
+            run.get("total_test_time_seconds"),
+        ):
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _run_recording_status(self, totals: dict[str, Any]) -> str:
+        gt = int(totals.get("ground_truth") or 0)
+        if gt <= 0 and not totals.get("has_ground_truth"):
+            return "N/A"
+        if gt <= 0:
+            return "N/A"
+        invented = int(totals.get("invented") or 0)
+        if invented > 0:
+            return "FAIL"
+        accuracy = 100.0 * int(totals.get("correct") or 0) / gt
+        if accuracy >= 95:
+            return "PASS"
+        if accuracy >= 85:
+            return "REVIEW"
+        return "FAIL"
+
+    def _recording_safety_flags(self, run: dict, facts: list[dict], totals: dict) -> list[str]:
+        flags: list[str] = []
+        seen: set[str] = set()
+
+        def add(flag: str) -> None:
+            if flag and flag not in seen:
+                seen.add(flag)
+                flags.append(flag)
+
+        if int(totals.get("invented") or 0) > 0:
+            add(FLAG_INVENTED)
+        soap = _as_dict(run.get("soap_comparison"))
+        pair = soap.get("gt_vs_generated") if isinstance(soap.get("gt_vs_generated"), dict) else soap
+        metrics = _as_dict(_as_dict(pair).get("metrics") or soap.get("metrics"))
+        try:
+            if float(metrics.get("critical_error_count") or 0) > 0:
+                add(FLAG_INVENTED)
+        except (TypeError, ValueError):
+            pass
+        for fact in facts:
+            result = fact_classification(fact)
+            if result not in (MISSING, INCORRECT, HALLUCINATION):
+                continue
+            field = _norm_name(fact.get("base_field") or fact.get("field"))
+            values = " ".join(
+                _text(fact.get(key))
+                for key in ("ground_truth", "generated", "value")
+            )
+            if result == HALLUCINATION:
+                add(FLAG_INVENTED)
+            if "allerg" in field:
+                add(FLAG_ALLERGY)
+            if field in {"dose", "schedule"} or "dose" in field or "schedule" in field:
+                add(FLAG_DOSE)
+            if field in {"drug name", "drug_name"} or field.startswith("drug name"):
+                add(FLAG_DRUG)
+            if _DEVANAGARI_DIGIT_RE.search(values):
+                add(FLAG_NUMERAL)
+        return flags
+
+    def _matches_recording_filter(self, row: dict[str, Any], status_filter: str) -> bool:
+        wanted = _norm_name(status_filter)
+        if wanted in {"", "all"}:
+            return True
+        status = _norm_name(row.get("status"))
+        flags = {_norm_name(item) for item in (row.get("safety_flags") or [])}
+        if wanted in {"pass", "passed"}:
+            return status == "pass"
+        if wanted in {"review", "needs review"}:
+            return status == "review" or (
+                status == "fail" and not row.get("has_safety_flag")
+            )
+        if wanted in {"safety flag", "safety_flag", "fail"}:
+            return bool(row.get("has_safety_flag"))
+        if wanted in {"invented", "has invented fact"}:
+            return int(row.get("invented") or 0) > 0 or FLAG_INVENTED in (row.get("safety_flags") or [])
+        if wanted in {"allergy error", "allergy_error"}:
+            return _norm_name(FLAG_ALLERGY) in flags
+        if wanted in {"dose error", "dose_error", "dose frequency error"}:
+            return _norm_name(FLAG_DOSE) in flags
+        if wanted in {"numeral error", "numeral_error", "hindi numeral error"}:
+            return _norm_name(FLAG_NUMERAL) in flags
+        if wanted in {"drug error", "drug_error", "brand sound alike drug"}:
+            return _norm_name(FLAG_DRUG) in flags
+        return True
+
+    def get_recording_rows(self) -> list[dict[str, Any]]:
+        ratio = float(self.acc_config["review_ratio"])
+        rows: list[dict[str, Any]] = []
+        for run in self._get_filtered_runs():
+            buckets = {name: empty_category_metrics() for name in SOAP_CATEGORIES}
+            facts = self._facts_for_run(run)
+            if facts:
+                self._accumulate_classified(buckets, facts)
+            elif self._run_has_soap_gt(run):
+                self._accumulate_matched(buckets, run)
+            scored = {}
+            for name in SOAP_CATEGORIES:
+                threshold = self.thresholds.get(name) or _default_category(name)
+                scored[name] = apply_accuracy_and_status(
+                    buckets[name],
+                    threshold,
+                    review_ratio=ratio,
+                )
+            totals = self.get_overall_metrics(scored)
+            flags = self._recording_safety_flags(run, facts, totals)
+            tc_ref = _text(run.get("tc_ref") or run.get("test_case_id") or run.get("test_id"))
+            row = {
+                "test_id": run.get("test_id") or run.get("id"),
+                "test_case_number": tc_ref,
+                "tc_ref": tc_ref,
+                "run_number": _text(run.get("run_ref") or run.get("run_number") or run.get("test_id")),
+                "audio_filename": _text(run.get("audio_filename") or run.get("filename")),
+                "duration_seconds": self._run_duration_seconds(run),
+                "latency_seconds": self._run_latency_seconds(run),
+                "ground_truth": int(totals.get("ground_truth") or 0),
+                "correct": int(totals.get("correct") or 0),
+                "missed": int(totals.get("missed") or 0),
+                "wrong": int(totals.get("wrong") or 0),
+                "invented": int(totals.get("invented") or 0),
+                "has_ground_truth": bool(totals.get("has_ground_truth")),
+                "status": self._run_recording_status(totals),
+                "has_safety_flag": bool(flags),
+                "safety_flags": flags,
+                "model_used": _text(
+                    run.get("ai_model_used") or run.get("ai_model") or run.get("llm_model")
+                ),
+            }
+            rows.append(row)
+        return rows
+
+    def get_recordings_payload(self, status_filter: str = "") -> dict[str, Any]:
+        all_rows = self.get_recording_rows()
+        filtered = [
+            row for row in all_rows
+            if self._matches_recording_filter(row, status_filter)
+        ]
+        return {
+            "batch_id": (
+                "all"
+                if self._is_all_batches() and not self.batch_ids
+                else (
+                    ",".join(self.batch_ids)
+                    if self.batch_ids
+                    else self.batch_id
+                )
+            ),
+            "test_type": self.test_type,
+            "model": self.model,
+            "total_recordings": len(all_rows),
+            "recordings": filtered,
         }
 
     def get_category_run_details(self, category: str) -> list[dict[str, Any]]:
