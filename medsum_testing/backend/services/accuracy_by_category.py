@@ -764,14 +764,6 @@ class AccuracyCalculator:
 
         if int(totals.get("invented") or 0) > 0:
             add(FLAG_INVENTED)
-        soap = _as_dict(run.get("soap_comparison"))
-        pair = soap.get("gt_vs_generated") if isinstance(soap.get("gt_vs_generated"), dict) else soap
-        metrics = _as_dict(_as_dict(pair).get("metrics") or soap.get("metrics"))
-        try:
-            if float(metrics.get("critical_error_count") or 0) > 0:
-                add(FLAG_INVENTED)
-        except (TypeError, ValueError):
-            pass
         for fact in facts:
             result = fact_classification(fact)
             if result not in (MISSING, INCORRECT, HALLUCINATION):

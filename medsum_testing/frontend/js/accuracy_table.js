@@ -306,13 +306,38 @@
 
   function recordingDisplayStatus(row) {
     const data = row || {};
-    if (data.has_safety_flag) {
-      return { key: 'safety', label: 'Safety flag' };
-    }
     const raw = String(data.status || '').toLowerCase();
+    if (data.has_safety_flag) return { key: 'safety', label: 'Safety flag' };
     if (raw === 'pass') return { key: 'pass', label: 'Pass' };
     if (raw === 'na' || raw === 'n/a') return { key: 'na', label: 'N/A' };
     return { key: 'review', label: 'Needs review' };
+  }
+
+  function matchesRecordingsFilter(row, filterKey) {
+    const wanted = String(filterKey || '').trim().toLowerCase();
+    if (!wanted) return true;
+    const data = row || {};
+    const status = String(data.status || '').toLowerCase();
+    const flags = (data.safety_flags || []).map((item) => String(item || '').toLowerCase());
+    if (wanted === 'pass') return status === 'pass';
+    if (wanted === 'review') {
+      return status === 'review' || (status === 'fail' && !data.has_safety_flag);
+    }
+    if (wanted === 'safety_flag') return !!data.has_safety_flag;
+    if (wanted === 'invented') {
+      return Number(data.invented) > 0 || flags.some((f) => f.includes('invented'));
+    }
+    if (wanted === 'allergy_error') return flags.some((f) => f.includes('allergy'));
+    if (wanted === 'dose_error') return flags.some((f) => f.includes('dose'));
+    if (wanted === 'numeral_error') return flags.some((f) => f.includes('numeral'));
+    if (wanted === 'drug_error') {
+      return flags.some((f) => f.includes('brand') || f.includes('drug'));
+    }
+    return true;
+  }
+
+  function applyRecordingsFilter(rows) {
+    return (rows || []).filter((row) => matchesRecordingsFilter(row, recordingsFilter));
   }
 
   function recordingStatusBadge(row) {
@@ -483,13 +508,15 @@
     const rec = recordingsEl();
     if (!rec) return;
     rec.hidden = false;
-    lastRecordings = rows || [];
-    lastRecordingsTotal = total == null ? lastRecordings.length : total;
-    rec.innerHTML = recordingsHtml(lastRecordings, lastRecordingsTotal);
+    if (rows) lastRecordings = rows;
+    if (total != null) lastRecordingsTotal = total;
+    else if (!recordingsFilter) lastRecordingsTotal = lastRecordings.length;
+    const visible = applyRecordingsFilter(lastRecordings);
+    rec.innerHTML = recordingsHtml(visible, lastRecordingsTotal);
     rec.querySelectorAll('[data-recordings-filter]').forEach((btn) => {
       btn.addEventListener('click', () => {
         recordingsFilter = btn.getAttribute('data-recordings-filter') || '';
-        refreshRecordings(lastFetchOpts);
+        paintRecordings(null, lastRecordingsTotal);
       });
     });
     rec.querySelectorAll('[data-open-recording]').forEach((link) => {
@@ -521,12 +548,13 @@
     if (recordingsAbort) recordingsAbort.abort();
     recordingsAbort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     try {
+      // Always fetch the full list for the selected batch; filter client-side.
       const url = recordingsUrl(
         options.batchId,
         options.testType,
         options.model,
         options.batchIds,
-        recordingsFilter
+        ''
       );
       const resp = await fetch(url, {
         signal: recordingsAbort ? recordingsAbort.signal : undefined,
@@ -536,9 +564,16 @@
         throw new Error((body && body.error) || `Could not load recordings (${resp.status})`);
       }
       const data = body.data || body;
-      paintRecordings(data.recordings || [], data.total_recordings);
+      const rows = data.recordings || [];
+      paintRecordings(rows, data.total_recordings != null ? data.total_recordings : rows.length);
     } catch (err) {
       if (err && err.name === 'AbortError') return;
+      // Fall back to recordings embedded in the accuracy payload when present.
+      const fallback = (lastPayload && lastPayload.recordings) || lastRecordings || [];
+      if (fallback.length) {
+        paintRecordings(fallback, fallback.length);
+        return;
+      }
       rec.hidden = false;
       rec.innerHTML = `
         <div class="accuracy-table-head">
@@ -621,6 +656,11 @@
     lastPayload = payload;
     el.innerHTML = tableHtml(payload);
     bindSection(el);
+    // Populate Recordings immediately from the accuracy payload so the table
+    // is never empty while the dedicated /recordings/ request is in flight.
+    if (payload && Array.isArray(payload.recordings)) {
+      paintRecordings(payload.recordings, payload.recordings.length);
+    }
   }
 
   async function fetchMetrics(batchId, testType, model, batchIds) {
@@ -650,7 +690,7 @@
     lastFetchOpts = { batchId, batchIds, testType, model };
     syncFilterQuery(testType, model);
     renderLoading();
-    refreshRecordings(lastFetchOpts);
+    const recordingsPromise = refreshRecordings(lastFetchOpts);
     try {
       const data = await fetchMetrics(batchId, testType, model, batchIds);
       paint(data);
@@ -658,6 +698,7 @@
       if (err && err.name === 'AbortError') return;
       renderError(err && err.message ? err.message : 'Could not load clinical fact accuracy.');
     }
+    await recordingsPromise;
   }
 
   function refreshFromDashboard(options) {

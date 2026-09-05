@@ -5050,22 +5050,105 @@ em.na { color: var(--text-muted); font-style: italic; }
 .recordings-table-section {
   margin-top: 0;
 }
+.recordings-subtitle {
+  margin: 0.2rem 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.recordings-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0 0 0.75rem;
+}
+.recordings-filter-btn {
+  padding: 0.35rem 0.85rem;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.recordings-filter-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.recordings-filter-btn.active {
+  background: #2b6cb0;
+  border-color: #2b6cb0;
+  color: #fff;
+}
+.recordings-count {
+  margin: 0 0 0.65rem;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
 .recordings-table-wrap {
   max-height: 420px;
   overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 .recordings-table {
-  min-width: 720px;
+  min-width: 760px;
 }
 .recordings-table thead th {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--bg);
+  background: #f7fafc;
 }
-.recordings-id {
+.recordings-table tbody tr:hover td {
+  background: #f7fafc;
+}
+.recordings-table .flag-col {
+  width: 2rem;
+  text-align: center;
+}
+.recording-name {
   font-weight: 700;
-  color: var(--text-primary);
+}
+.recording-name a {
+  color: #2b6cb0;
+  text-decoration: none;
+}
+.recording-name a:hover {
+  text-decoration: underline;
+}
+.recordings-table .metrics .correct { color: #22863a; font-weight: 700; }
+.recordings-table .metrics .separator { color: #718096; }
+.recordings-table .metrics .total { color: #4a5568; }
+.recordings-table .missed,
+.recordings-table .wrong { color: #cb2431; font-weight: 650; }
+.recordings-table .invented { color: #6f42c1; font-weight: 700; }
+.recording-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 5.5rem;
+  padding: 0.25rem 0.7rem;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.recording-badge.status-pass {
+  background: #e6f8e6;
+  color: #22863a;
+}
+.recording-badge.status-review {
+  background: #fff3cd;
+  color: #bf8700;
+}
+.recording-badge.status-safety,
+.recording-badge.status-fail {
+  background: #ffeef0;
+  color: #cb2431;
+}
+.recording-badge.status-na {
+  background: #E5E7EB;
+  color: #4B5563;
 }
 .recordings-empty {
   text-align: center;
