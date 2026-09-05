@@ -2013,6 +2013,9 @@ async function loadDashboardFilters() {
     }
     persistSelectedBatchIds();
     syncBatchFilterToggleLabel();
+    const acc = accuracyTableApi();
+    if (acc.populateModelFilter) acc.populateModelFilter(data);
+    if (acc.applyQueryToFilters) acc.applyQueryToFilters();
   } catch (err) {
     console.warn('Dashboard filters failed:', err);
   }
@@ -2047,6 +2050,26 @@ function selectedModelFromUi() {
 
 function runSummaryApi() {
   return window.MedsumRunSummary || {};
+}
+
+function fillBatchOverview(data) {
+  const section = document.getElementById('dashboard-batch-overview');
+  if (!section) return;
+  const api = runSummaryApi();
+  if (!api.batchOverviewDisplay) {
+    section.hidden = true;
+    return;
+  }
+  const rows = data || [];
+  section.hidden = !rows.length;
+  const display = api.batchOverviewDisplay(rows, selectedModelFromUi());
+  section.querySelectorAll('[data-overview-field]').forEach(el => {
+    const key = el.getAttribute('data-overview-field');
+    const val = display[key];
+    el.textContent = val != null && val !== '' ? val : '—';
+  });
+  const asrWrap = section.querySelector('[data-overview-asr-wrap]');
+  if (asrWrap) asrWrap.hidden = !display.has_asr;
 }
 
 function fillRunSummary(data, source) {
@@ -2100,10 +2123,40 @@ function updateDashboardStats(data, selectedBatchIds) {
     's'
   );
   set('stat-reports', reports);
+  fillBatchOverview(rows);
   fillRunSummary(rows, 'dashboard');
+  refreshAccuracyTable(rows, selected);
 
   renderAccuracyChart(rows, selected);
   renderDistributionChart(rows);
+}
+
+function accuracyTableApi() {
+  return window.MedsumAccuracyTable || {};
+}
+
+function dashboardTestType() {
+  return document.getElementById('type-filter')?.value || 'All';
+}
+
+function dashboardModelFilter() {
+  return document.getElementById('model-filter')?.value || 'All';
+}
+
+function refreshAccuracyTable(rows, selectedBatchIds) {
+  const api = accuracyTableApi();
+  if (!api.refreshFromDashboard && !api.refresh) return;
+  const selected = selectedBatchIds == null ? getSelectedBatchIds() : selectedBatchIds;
+  const items = rows || [];
+  if (api.populateModelFilter) api.populateModelFilter(items);
+  const payload = {
+    batchIds: selected,
+    testType: dashboardTestType(),
+    model: dashboardModelFilter(),
+    onRowClick: (category) => console.log(`Clicked: ${category}`),
+  };
+  if (api.refreshFromDashboard) api.refreshFromDashboard(payload);
+  else api.refresh(payload);
 }
 
 function setStatCard(id, value) {
@@ -2509,6 +2562,7 @@ function normalizeResultSummary(r) {
     ai_model: r.ai_model || '',
     ai_model_used: r.ai_model_used || r.ai_model || '',
     llm_model: r.llm_model || '',
+    stt_model: r.stt_model || r.asr_model || '',
   };
 }
 

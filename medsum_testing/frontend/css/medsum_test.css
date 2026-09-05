@@ -19,6 +19,13 @@
   --accuracy-med: #6C5CE7;
   --accuracy-warn: #FDCB6E;
   --accuracy-low: #E17055;
+  --clinical-correct: #22863a;
+  --clinical-missed: #cb2431;
+  --clinical-wrong: #cb2431;
+  --clinical-invented: #6f42c1;
+  --clinical-pass: #22863a;
+  --clinical-review: #bf8700;
+  --clinical-fail: #cb2431;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -257,6 +264,28 @@ body {
   align-items: center;
 }
 
+.main-content:has(#dashboard-view.is-active) {
+  padding-top: 16px;
+}
+
+#dashboard-view .dashboard-page-header {
+  align-items: center;
+  margin-bottom: 12px;
+  gap: 12px;
+}
+
+#dashboard-view .dashboard-page-header h1 {
+  font-size: 18px;
+  font-weight: 650;
+  margin: 0;
+  line-height: 1.2;
+}
+
+#dashboard-view .dashboard-page-header .how-it-works-open {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
 .select-input {
   padding: 10px 14px;
   border: 1px solid var(--border);
@@ -341,13 +370,302 @@ body {
   display: flex;
   gap: 1rem;
   align-items: center;
-  margin-bottom: 1.25rem;
+  margin-bottom: 0.75rem;
   padding: 0.75rem 1rem;
   background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: visible;
 }
+
+.batch-overview {
+  margin: 0 0 1.25rem;
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+
+.batch-overview-meta {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.45rem;
+  padding: 0.85rem 1.25rem;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.batch-overview-item {
+  white-space: nowrap;
+}
+
+.batch-overview-item [data-overview-field="recordings_label"] {
+  margin-left: 0.25em;
+}
+
+.batch-overview-meta strong {
+  font-weight: 650;
+}
+
+.batch-overview-sep {
+  color: var(--text-muted);
+}
+
+.batch-overview-asr {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem 0.45rem;
+}
+
+.batch-overview-asr[hidden] {
+  display: none;
+}
+
+.batch-overview-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.75rem;
+}
+
+.batch-kpi {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 1.1rem 1.2rem 1rem;
+  min-width: 0;
+}
+
+.batch-kpi-value {
+  font-size: 32px;
+  font-weight: 750;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  margin-bottom: 0.55rem;
+}
+
+.batch-kpi.is-pass .batch-kpi-value { color: #1F8A4C; }
+.batch-kpi.is-fail .batch-kpi-value { color: #C17A3A; }
+.batch-kpi.is-safety .batch-kpi-value { color: #D63031; }
+
+.batch-kpi-label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text-primary);
+  margin-bottom: 0.3rem;
+}
+
+.batch-kpi-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #fff;
+}
+
+.batch-kpi.is-pass .batch-kpi-icon { background: #1F8A4C; }
+.batch-kpi.is-fail .batch-kpi-icon { background: #C17A3A; }
+.batch-kpi.is-safety .batch-kpi-icon {
+  background: #D63031;
+  border-radius: 5px;
+}
+
+.batch-kpi-sub {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.accuracy-table-section {
+  margin-top: 0.85rem;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 1.1rem 1.2rem 1.15rem;
+}
+
+.accuracy-table-section[hidden] {
+  display: none;
+}
+
+.accuracy-table-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.accuracy-table-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.accuracy-table-sub {
+  margin: 0.2rem 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.accuracy-details-btn {
+  flex-shrink: 0;
+}
+
+.accuracy-summary-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.accuracy-stat {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.7rem 0.85rem;
+}
+
+.accuracy-stat-value {
+  font-size: 20px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.accuracy-stat-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+}
+
+.accuracy-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.clinical-accuracy-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 640px;
+  font-size: 13px;
+}
+
+.clinical-accuracy-table th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-secondary);
+  padding: 0.55rem 0.65rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.clinical-accuracy-table td {
+  padding: 0.7rem 0.65rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.clinical-accuracy-table .category-row {
+  cursor: default;
+}
+
+.clinical-accuracy-table .category-row:hover td,
+.clinical-accuracy-table .category-row.is-expanded td {
+  background: #F8FAFF;
+}
+
+.clinical-accuracy-table .category-row.is-total td {
+  font-weight: 650;
+  background: #F3F4F8;
+}
+
+.clinical-accuracy-table .col-category {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.metric-value.correct { color: #22863a; font-weight: 650; }
+.metric-value.missed { color: #cb2431; font-weight: 650; }
+.metric-value.wrong { color: #cb2431; font-weight: 650; }
+.metric-value.invented { color: #6f42c1; font-weight: 650; }
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  font-size: 12px;
+  font-weight: 650;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.status-pass { background: #22863a; }
+.status-review { background: #bf8700; }
+.status-fail { background: #cb2431; }
+.status-na {
+  background: #E5E7EB;
+  color: #4B5563;
+}
+
+.detail-row td {
+  background: #F8FAFF;
+  padding: 0 0.65rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.detail-row-body {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.pass-rule {
+  margin-top: 0.85rem;
+  padding: 0.75rem 0.85rem;
+  background: #F8F9FD;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.accuracy-table-note,
+.accuracy-table-message {
+  margin: 0.75rem 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.accuracy-table-message.is-error {
+  color: #cb2431;
+}
+
+@media (max-width: 900px) {
+  .accuracy-summary-stats { grid-template-columns: 1fr; }
+  .accuracy-table-toolbar { flex-direction: column; }
+}
+
+@media (max-width: 768px) {
+  .clinical-accuracy-table { min-width: 520px; }
+}
+
 .filter-group {
   display: flex;
   align-items: center;
@@ -1396,6 +1714,8 @@ td[data-col="soap-accuracy"] .pill-label {
   .main-content {
     padding: 16px;
   }
+  .batch-overview-kpis { grid-template-columns: 1fr; }
+  .accuracy-summary-stats { grid-template-columns: 1fr; }
   .stat-grid { grid-template-columns: 1fr; }
   .stat-cards-grid { grid-template-columns: repeat(2, 1fr); }
   .run-summary-grid { grid-template-columns: repeat(2, 1fr); }
@@ -4538,4 +4858,191 @@ em.na { color: var(--text-muted); font-style: italic; }
   .soap-nav-expand-btns { margin-left: 0; }
   .soap-nav-compare-grid { grid-template-columns: 1fr; }
   .soap-nav-meta { grid-template-columns: 1fr 1fr; }
+}
+
+/* Clinical Fact Accuracy table */
+.accuracy-table-section {
+  margin: 0 0 1.25rem;
+  padding: 1.15rem 1.25rem 1.2rem;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+.accuracy-table-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+.accuracy-table-section h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.accuracy-table-sub,
+.accuracy-table-note {
+  margin: 0.2rem 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.accuracy-table-note { margin: 0 0 0.75rem; }
+.accuracy-details-toggle {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  font-size: 13px;
+}
+.accuracy-summary-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.9rem;
+}
+.accuracy-stat {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.75rem 0.9rem;
+}
+.accuracy-stat-value {
+  font-size: 22px;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+.accuracy-stat-label {
+  margin-top: 0.2rem;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.accuracy-table-wrap {
+  overflow-x: auto;
+}
+.clinical-accuracy-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px;
+  font-size: 13px;
+}
+.clinical-accuracy-table th,
+.clinical-accuracy-table td {
+  padding: 0.7rem 0.65rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.clinical-accuracy-table th {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  background: var(--bg);
+}
+.clinical-accuracy-table th:not(:first-child),
+.clinical-accuracy-table td:not(:first-child) {
+  text-align: center;
+}
+.category-row {
+  cursor: default;
+}
+.category-row:hover td { background: var(--bg); }
+.category-row.is-open td,
+.category-row.is-expanded td { background: #F8FAFF; }
+.category-row.is-total td {
+  font-weight: 700;
+  background: #F3F4F8;
+}
+.category-name { font-weight: 650; }
+.col-category {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+.safety-pill {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #6f42c1;
+  background: #F3E8FF;
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.metric-value { font-variant-numeric: tabular-nums; font-weight: 650; }
+.metric-value.correct { color: var(--clinical-correct); }
+.metric-value.missed,
+.metric-value.wrong { color: var(--clinical-missed); }
+.metric-value.invented { color: var(--clinical-invented); }
+.status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-width: 4.6rem;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--text-muted);
+}
+.status.pass { background: var(--clinical-pass); }
+.status.review { background: var(--clinical-review); }
+.status.fail { background: var(--clinical-fail); }
+.status.na { background: #9CA3AF; }
+.detail-row td {
+  background: #F8FAFF;
+  padding: 0;
+}
+.detail-row[hidden] { display: none; }
+.detail-row-inner {
+  padding: 0.75rem 0.9rem 0.9rem 1.1rem;
+}
+.detail-title {
+  margin: 0 0 0.35rem;
+  font-size: 13px;
+  font-weight: 700;
+}
+.detail-row-inner ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--text-secondary);
+}
+.detail-note {
+  margin: 0.45rem 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.pass-rule {
+  margin-top: 0.9rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.pass-rule p { margin: 0; }
+.accuracy-table-state {
+  padding: 1.25rem 0.25rem 0.4rem;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+.accuracy-table-state.is-error { color: var(--clinical-fail); }
+
+@media (max-width: 1100px) {
+  .accuracy-summary-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 768px) {
+  .accuracy-table-section { padding: 1rem; }
+  .accuracy-table-head { flex-direction: column; align-items: stretch; }
+  .accuracy-summary-stats { grid-template-columns: 1fr; }
+  .clinical-accuracy-table { min-width: 640px; }
+}
+@media (max-width: 480px) {
+  .accuracy-stat-value { font-size: 20px; }
 }

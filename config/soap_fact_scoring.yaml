@@ -50,6 +50,95 @@ severity_to_criticality:
 # test_settings (accuracy_pass_score, accuracy_review_score). Do not
 # re-add a pass_score here — that would be a second, stale threshold.
 
+# Dashboard Clinical Fact Accuracy table (7 SOAP clinical categories).
+# Missed/wrong limits are percent of ground-truth facts. A rate at or
+# above review_ratio of the limit is REVIEW; exceeding the limit is FAIL.
+# safety_critical + max_invented 0: any invented fact is a safety FAIL.
+# zero_missed: any missed fact is FAIL (Allergies).
+clinical_accuracy:
+  review_ratio: 0.8
+  correct_similarity: 0.7
+  wrong_similarity: 0.5
+  cache_ttl_seconds: 300
+  categories:
+    - name: "Symptoms & History"
+      max_missed_pct: 10
+      max_wrong_pct: 10
+      max_invented: null
+      zero_missed: false
+      safety_critical: false
+      fields:
+        - Chief complaint
+        - History of present illness
+        - Past medical history
+        - Current medications
+        - Social history
+        - Family history
+    - name: "Diagnosis"
+      max_missed_pct: 5
+      max_wrong_pct: 5
+      max_invented: 0
+      zero_missed: false
+      safety_critical: true
+      fields:
+        - Diagnosis
+        - Diagnosis type
+        - Diagnosis status
+        - Assessment reasoning
+    - name: "Medicines"
+      max_missed_pct: 5
+      max_wrong_pct: 5
+      max_invented: 0
+      zero_missed: false
+      safety_critical: true
+      fields:
+        - Drug name
+        - Dose
+        - Schedule
+        - Duration
+    - name: "Medication Instructions"
+      max_missed_pct: 10
+      max_wrong_pct: 10
+      max_invented: null
+      zero_missed: false
+      safety_critical: false
+      fields:
+        - Instructions
+    - name: "Investigation"
+      max_missed_pct: 10
+      max_wrong_pct: 10
+      max_invented: null
+      zero_missed: false
+      safety_critical: false
+      fields:
+        - Investigations
+    - name: "Vitals and measurements"
+      max_missed_pct: 10
+      max_wrong_pct: 10
+      max_invented: null
+      zero_missed: false
+      safety_critical: false
+      fields:
+        - Blood pressure
+        - Pulse
+        - Heart rate
+        - Respiratory rate
+        - Temperature
+        - Heart exam
+        - Other findings
+    - name: "Allergies & Follow-up Plan"
+      max_missed_pct: 0
+      max_wrong_pct: 5
+      max_invented: 0
+      zero_missed: true
+      safety_critical: true
+      fields:
+        - Allergy
+        - Follow-up
+        - Activity
+        - Education
+        - Summary
+
 # Critical-Fact Accuracy / Critical Error Count (MOM Ex1 6/7 = 85.7%, Ex2 2/8 = 25%).
 # Duration is Temporal Accuracy; Instructions is Normal counseling.
 # Hallucination facts (any field) join the Critical-Fact Accuracy denominator

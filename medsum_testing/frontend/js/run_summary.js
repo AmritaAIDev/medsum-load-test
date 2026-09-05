@@ -35,6 +35,75 @@
     return String(data.ai_model_used || data.ai_model || data.llm_model || '').trim();
   }
 
+  function rowAsrModel(row) {
+    const data = row || {};
+    return String(data.stt_model || data.asr_model || '').trim();
+  }
+
+  function isFailedFinalResult(value) {
+    const v = String(value || '').trim().toLowerCase();
+    return v === 'fail' || v === 'review';
+  }
+
+  function audioKey(row) {
+    const data = row || {};
+    return String(
+      data.audio_filename || data.filename || data.test_id || data.id || ''
+    ).trim().toLowerCase();
+  }
+
+  function rowAudioSeconds(row) {
+    const data = row || {};
+    const tr = data.transcription_result || {};
+    const raw = data.audio_duration_seconds || tr.audio_length || data.audio_length;
+    if (raw == null || raw === '') return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  function rowCriticalErrorCount(row) {
+    const data = row || {};
+    const soap = data.soap_comparison || {};
+    const pair = soap.gt_vs_generated && typeof soap.gt_vs_generated === 'object'
+      ? soap.gt_vs_generated
+      : soap;
+    const metrics = (pair && pair.metrics) || soap.metrics || {};
+    const raw = metrics.critical_error_count;
+    if (raw == null || raw === '') return 0;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  function rowHasSafetyFlag(row) {
+    if (rowCriticalErrorCount(row) > 0) return true;
+    const data = row || {};
+    const soap = data.soap_comparison || {};
+    const pair = soap.gt_vs_generated && typeof soap.gt_vs_generated === 'object'
+      ? soap.gt_vs_generated
+      : soap;
+    const severity = String(
+      (pair && pair.overall_severity) || soap.overall_severity || ''
+    ).trim().toLowerCase();
+    return severity === 'high' || severity === 'critical';
+  }
+
+  function formatTotalAudio(seconds) {
+    if (seconds == null || seconds === '') return '—';
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n <= 0) return '—';
+    const total = Math.round(n);
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    if (hours > 0) {
+      return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+    }
+    if (minutes > 0) {
+      return secs ? `${minutes}m ${secs}s` : `${minutes}m`;
+    }
+    return `${secs}s`;
+  }
+
   function uniqueNonempty(values) {
     const seen = new Set();
     const out = [];
@@ -130,6 +199,57 @@
     };
   }
 
+  function computeBatchOverview(rows, selectedModel) {
+    const items = rows || [];
+    const byAudio = new Map();
+    items.forEach((row, index) => {
+      const key = audioKey(row) || `row-${index}`;
+      if (!byAudio.has(key)) byAudio.set(key, row);
+    });
+    const uniqueAudios = Array.from(byAudio.values());
+    const audioSeconds = uniqueAudios
+      .map(rowAudioSeconds)
+      .filter(n => n != null)
+      .reduce((sum, n) => sum + n, 0);
+    const models = uniqueNonempty(items.map(rowModel));
+    const fallback = String(selectedModel || '').trim();
+    if (fallback && !models.length) models.push(fallback);
+    const asrModels = uniqueNonempty(items.map(rowAsrModel));
+    const total = items.length;
+    const passed = items.filter(r => isPassedFinalResult(r.final_result)).length;
+    const failed = items.filter(r => isFailedFinalResult(r.final_result)).length;
+    const safety = items.filter(rowHasSafetyFlag).length;
+    return {
+      recordings: uniqueAudios.length,
+      audio_seconds: audioSeconds || null,
+      evaluation_model: models.join(', '),
+      asr_model: asrModels.join(', '),
+      passed,
+      failed,
+      safety_flags: safety,
+      total,
+    };
+  }
+
+  function batchOverviewDisplay(rows, selectedModel) {
+    const raw = computeBatchOverview(rows, selectedModel);
+    const total = raw.total;
+    return {
+      recordings: String(raw.recordings),
+      recordings_label: raw.recordings === 1 ? 'recording' : 'recordings',
+      audio: formatTotalAudio(raw.audio_seconds),
+      model: formatModel(raw.evaluation_model),
+      asr: formatModel(raw.asr_model),
+      passed: total ? `${raw.passed} / ${total}` : '0 / 0',
+      failed: total ? `${raw.failed} / ${total}` : '0 / 0',
+      safety: String(raw.safety_flags),
+      safety_note: raw.safety_flags
+        ? `${raw.safety_flags} of the ${raw.failed} failed cases carry a safety concern`
+        : 'No safety concerns in this batch',
+      has_asr: Boolean(String(raw.asr_model || '').trim()),
+    };
+  }
+
   const api = {
     HEADLINE_METRIC_KEYS: [
       'total_test_cases',
@@ -140,11 +260,14 @@
     ],
     computeRunSummary,
     summaryDisplay,
+    computeBatchOverview,
+    batchOverviewDisplay,
     transcriptionScore,
     formatAccuracy,
     formatLatency,
     formatModel,
     formatMeta,
+    formatTotalAudio,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

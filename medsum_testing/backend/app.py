@@ -12,6 +12,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from flask import Flask, jsonify, send_from_directory
 
+from medsum_testing.backend.routes.accuracy import bp as accuracy_bp
 from medsum_testing.backend.routes.report import bp as report_bp
 from medsum_testing.backend.routes.results import bp as results_bp
 from medsum_testing.backend.routes.scheduler import bp as scheduler_bp
@@ -55,6 +56,7 @@ def _ai_config_warning(config: dict) -> str | None:
 def create_app() -> Flask:
     app = Flask(__name__)
 
+    app.register_blueprint(accuracy_bp)
     app.register_blueprint(test_runner_bp, url_prefix="/api/medsum-test")
     app.register_blueprint(results_bp, url_prefix="/api/medsum-test")
     app.register_blueprint(report_bp, url_prefix="/api/medsum-test")

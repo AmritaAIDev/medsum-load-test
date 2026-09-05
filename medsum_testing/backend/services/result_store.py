@@ -87,6 +87,8 @@ def _soap_snippet(soap: Any) -> dict | None:
     scores = soap.get("scores") if isinstance(soap.get("scores"), dict) else {}
     gt_vs = soap.get("gt_vs_generated") if isinstance(soap.get("gt_vs_generated"), dict) else {}
     metrics = gt_vs.get("metrics") if isinstance(gt_vs.get("metrics"), dict) else {}
+    if not metrics and isinstance(soap.get("metrics"), dict):
+        metrics = soap.get("metrics") or {}
     snippet_metrics = {}
     for key in (
         "overall_weighted_clinical_score",
@@ -96,6 +98,7 @@ def _soap_snippet(soap: Any) -> dict | None:
         "hallucination_count",
         "captured_count",
         "applicable_count",
+        "critical_error_count",
     ):
         if metrics.get(key) is not None:
             snippet_metrics[key] = metrics[key]
@@ -106,6 +109,7 @@ def _soap_snippet(soap: Any) -> dict | None:
         "overall_weighted_clinical_score": gt_vs.get("overall_weighted_clinical_score")
         or scores.get("gt_vs_generated"),
         "summary": (gt_vs.get("summary") or "")[:240],
+        "overall_severity": gt_vs.get("overall_severity") or soap.get("overall_severity") or "",
     }
     if snippet_metrics:
         pair["metrics"] = snippet_metrics
@@ -202,6 +206,7 @@ def _iter_result_files(full: bool = False):
                 "ai_model": data.get("ai_model", ""),
                 "ai_model_used": data.get("ai_model_used") or data.get("ai_model", ""),
                 "llm_model": data.get("llm_model", ""),
+                "stt_model": data.get("stt_model") or data.get("asr_model") or "",
             })
 
 
