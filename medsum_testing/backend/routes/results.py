@@ -28,6 +28,9 @@ from medsum_testing.backend.services.test_case_view import (
     prefer_local_batch_runs,
     stable_test_id,
 )
+from medsum_testing.backend.services.soap_gt_comparison_report import (
+    build_soap_gt_comparison_report,
+)
 
 bp = Blueprint("medsum_results", __name__)
 log = logging.getLogger("medsum_results")
@@ -204,7 +207,9 @@ def get_result(test_id: str):
     data = result.to_dict()
     if stable_test_id(data) != test_id:
         return jsonify({"error": "Test result not found"}), 404
-    return jsonify(attach_row_display(data))
+    payload = attach_row_display(data)
+    payload["soap_gt_comparison_report"] = build_soap_gt_comparison_report(payload)
+    return jsonify(payload)
 
 
 @bp.route("/results/<test_id>/audio", methods=["GET"])

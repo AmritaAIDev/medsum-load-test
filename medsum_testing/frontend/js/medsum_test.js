@@ -342,6 +342,16 @@ function bindEvents() {
       const panel = exportMenu.querySelector('.export-menu');
       if (panel) panel.hidden = true;
     });
+    exportMenu.querySelectorAll('[data-soap-gt-export]').forEach(item => {
+      item.addEventListener('click', () => {
+        const format = item.getAttribute('data-soap-gt-export') || 'json';
+        downloadSoapGtComparison(format);
+        exportMenu.classList.remove('open');
+        exportBtn.setAttribute('aria-expanded', 'false');
+        const panel = exportMenu.querySelector('.export-menu');
+        if (panel) panel.hidden = true;
+      });
+    });
   }
 
   if (window.MedsumPageNav && window.MedsumPageNav.bind) {
@@ -556,11 +566,99 @@ async function downloadTotalReport(format) {
   }
 }
 
+function soapBatchFilename(format) {
+  if (format === 'excel') return 'soap-batch-comparison.xlsx';
+  if (format === 'csv') return 'soap-batch-comparison.csv';
+  if (format === 'html') return 'soap-batch-comparison.html';
+  if (format === 'json') return 'soap-batch-comparison.json';
+  return 'soap-batch-comparison.pdf';
+}
+
+async function downloadSoapBatchReport(format) {
+  const rows = lastListView === 'runs'
+    ? (window._historyResults || [])
+    : (window._currentResults || []);
+  const ids = rows.map(resultStableId).filter(Boolean);
+  if (!ids.length) {
+    showToast('No results to download');
+    return;
+  }
+  try {
+    const resp = await fetch(`${API}/report/total/soap-comparison?format=${format || 'pdf'}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        test_ids: ids,
+        batch_id: rows[0]?.batch_id || '',
+        format: format || 'pdf',
+      }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${resp.status}`);
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = soapBatchFilename(format);
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    showToast(`SOAP batch report failed: ${err.message}`);
+  }
+}
+
+function closeBatchExportMenu(root) {
+  if (!root) return;
+  root.classList.remove('open');
+  const toggle = root.querySelector('[data-batch-export-toggle]');
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
+  const panel = root.querySelector('.export-menu');
+  if (panel) panel.hidden = true;
+}
+
 function bindTotalReportDownloads() {
+  document.querySelectorAll('[data-batch-export]').forEach(root => {
+    if (root.dataset.bound) return;
+    root.dataset.bound = '1';
+    const toggle = root.querySelector('[data-batch-export-toggle]');
+    const panel = root.querySelector('.export-menu');
+    if (toggle && panel) {
+      toggle.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const open = !root.classList.contains('open');
+        document.querySelectorAll('[data-batch-export]').forEach(other => {
+          if (other !== root) closeBatchExportMenu(other);
+        });
+        root.classList.toggle('open', open);
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        panel.hidden = !open;
+      });
+    }
+  });
+  document.addEventListener('click', event => {
+    document.querySelectorAll('[data-batch-export]').forEach(root => {
+      if (root.contains(event.target)) return;
+      closeBatchExportMenu(root);
+    });
+  });
   document.querySelectorAll('[data-download-total-report]').forEach(btn => {
     if (btn.dataset.bound) return;
     btn.dataset.bound = '1';
-    btn.addEventListener('click', () => downloadTotalReport('pdf'));
+    btn.addEventListener('click', () => {
+      downloadTotalReport(btn.getAttribute('data-download-total-report') || 'pdf');
+      closeBatchExportMenu(btn.closest('[data-batch-export]'));
+    });
+  });
+  document.querySelectorAll('[data-download-soap-batch]').forEach(btn => {
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', () => {
+      downloadSoapBatchReport(btn.getAttribute('data-download-soap-batch') || 'pdf');
+      closeBatchExportMenu(btn.closest('[data-batch-export]'));
+    });
   });
 }
 
@@ -2028,9 +2126,11 @@ function switchTableTab(tabId, btn) {
   paintResultsTable(source, cachedRowsForSource(source));
 }
 
+const DETAIL_CMP_TABS = ['summary', 'detail', 'soap-gt-report'];
+
 const detailCmpUi = {
   tab: 'summary',
-  scroll: { summary: 0, detail: 0 },
+  scroll: { summary: 0, detail: 0, 'soap-gt-report': 0 },
 };
 
 function wrapDetailCmpSection(id, html) {
@@ -2041,23 +2141,27 @@ function wrapDetailCmpSection(id, html) {
 function switchDetailComparisonTab(tabId, btn) {
   const root = document.getElementById('detail-comparison-tabs');
   if (!root) return;
-  const next = tabId === 'detail' ? 'detail' : 'summary';
+  const next = DETAIL_CMP_TABS.includes(tabId) ? tabId : 'summary';
   detailCmpUi.scroll[detailCmpUi.tab] = window.scrollY;
   detailCmpUi.tab = next;
   root.querySelectorAll('[data-detail-cmp-tab]').forEach(el => {
     el.classList.toggle('active', el.getAttribute('data-detail-cmp-tab') === next);
   });
-  const summary = document.getElementById('detail-cmp-summary');
-  const detail = document.getElementById('detail-cmp-detail');
-  if (summary) summary.hidden = next !== 'summary';
-  if (detail) detail.hidden = next !== 'detail';
+  DETAIL_CMP_TABS.forEach(id => {
+    const panel = document.getElementById(
+      id === 'summary' ? 'detail-cmp-summary'
+        : id === 'detail' ? 'detail-cmp-detail'
+          : 'detail-cmp-soap-gt-report'
+    );
+    if (panel) panel.hidden = next !== id;
+  });
   window.scrollTo(0, detailCmpUi.scroll[next] || 0);
   if (btn && btn.focus) btn.focus();
 }
 
 function resetDetailComparisonTabs() {
   detailCmpUi.tab = 'summary';
-  detailCmpUi.scroll = { summary: 0, detail: 0 };
+  detailCmpUi.scroll = { summary: 0, detail: 0, 'soap-gt-report': 0 };
   const root = document.getElementById('detail-comparison-tabs');
   if (!root) return;
   root.querySelectorAll('[data-detail-cmp-tab]').forEach(el => {
@@ -2065,8 +2169,10 @@ function resetDetailComparisonTabs() {
   });
   const summary = document.getElementById('detail-cmp-summary');
   const detail = document.getElementById('detail-cmp-detail');
+  const report = document.getElementById('detail-cmp-soap-gt-report');
   if (summary) summary.hidden = false;
   if (detail) detail.hidden = true;
+  if (report) report.hidden = true;
 }
 
 function onResultsTableFilter(input) {
@@ -3345,6 +3451,10 @@ function renderDetailPage(result) {
   if (cmpHost && window.MedsumSoapSummaryNav) {
     window.MedsumSoapSummaryNav.mount(cmpHost, result);
   }
+  const soapGtHost = document.getElementById('soap-gt-report-host');
+  if (soapGtHost && window.MedsumSoapGtComparisonReport) {
+    window.MedsumSoapGtComparisonReport.mount(soapGtHost, result);
+  }
   resetDetailComparisonTabs();
   renderAccuracySummary(result, model);
   const legend = document.getElementById('detail-status-legend');
@@ -3503,6 +3613,30 @@ function latencyCardHtml(result, model) {
       </div>`;
 }
 
+function evaluationMetricsCardHtml(acc, pct) {
+  const metrics = (acc && acc.metrics) || {};
+  const rows = [
+    { key: 'fill_rate', label: 'Fill Rate' },
+    { key: 'clinical_fact_recall', label: 'Clinical Fact Recall' },
+    { key: 'clinical_fact_precision', label: 'Clinical Fact Precision' },
+    { key: 'hallucination_rate', label: 'Hallucination Rate' },
+    { key: 'critical_fact_accuracy', label: 'Critical-Fact Accuracy' },
+  ];
+  const body = `<div class="eval-metrics-mini-grid">
+          ${rows.map(item => `
+            <div class="eval-metrics-mini" data-eval-metric="${esc(item.key)}"
+                 title="${esc(item.label)}">
+              <span class="eval-metrics-label">${esc(item.label)}</span>
+              <span class="eval-metrics-value">${esc(pct(metrics[item.key]))}</span>
+            </div>`).join('')}
+        </div>`;
+  return `
+      <div class="detail-stat-card detail-eval-metrics-card" data-field="evaluation-metrics">
+        <span class="detail-stat-label">Evaluation Metrics</span>
+        ${body}
+      </div>`;
+}
+
 function renderAccuracySummary(result, model) {
   const container = document.getElementById('accuracy-summary');
   if (!container) return;
@@ -3531,6 +3665,7 @@ function renderAccuracySummary(result, model) {
           </div>
         </div>
       </div>
+      ${evaluationMetricsCardHtml(acc, pct)}
       ${latencyCardHtml(result, view)}
       ${caseMaterialsCardHtml(result, view)}
     </div>`;
@@ -4449,6 +4584,15 @@ function showTestRuns() {
 function downloadReport(format) {
   if (!currentTestId) return;
   window.location.href = `${API}/report/${currentTestId}?format=${format}`;
+}
+
+function downloadSoapGtComparison(format) {
+  if (!currentTestId) return;
+  if (window.MedsumSoapGtComparisonReport && window.MedsumSoapGtComparisonReport.downloadUrl) {
+    window.location.href = window.MedsumSoapGtComparisonReport.downloadUrl(currentTestId, format);
+    return;
+  }
+  window.location.href = `${API}/report/${currentTestId}/soap-comparison?format=${format || 'json'}`;
 }
 
 function formatDuration(seconds) {

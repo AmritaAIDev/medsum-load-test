@@ -293,6 +293,7 @@ def _accuracy_details(result: dict) -> dict[str, Any]:
         "summary": trans.get("summary") or "",
         "skipped": bool(result.get("accuracy_skipped")),
         "skip_reason": result.get("accuracy_skip_reason") or "",
+        "metrics": (soap.get("gt_vs_generated") or {}).get("metrics") or {},
     }
 
 

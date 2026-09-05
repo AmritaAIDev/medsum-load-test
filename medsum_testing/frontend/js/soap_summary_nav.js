@@ -35,6 +35,14 @@
   const ALWAYS_PLAN_GROUPS = {
     medications: 1, investigations: 1, procedures: 1, follow_up: 1,
   };
+  const OBJECTIVE_GROUP_ORDER = ['vitals', 'physical_exam', 'other'];
+  const OBJECTIVE_GROUP_LABELS = {
+    vitals: 'Vitals',
+    physical_exam: 'Physical Exam',
+    other: 'Other',
+  };
+  const ALWAYS_OBJECTIVE_GROUPS = { vitals: 1, physical_exam: 1 };
+  const TABLE_GROUP_KEYS = { vitals: 1, physical_exam: 1 };
   const SOAP_NAV_CATALOG = [
     { field: 'Chief complaint', section: 'subjective', base: 'chief_complaint' },
     { field: 'History of present illness', section: 'subjective', base: 'history_of_present_illness' },
@@ -43,11 +51,12 @@
     { field: 'Allergy', section: 'subjective', base: 'allergy' },
     { field: 'Social history', section: 'subjective', base: 'social_history' },
     { field: 'Family history', section: 'subjective', base: 'family_history' },
-    { field: 'Blood pressure', section: 'objective', base: 'blood_pressure' },
-    { field: 'Pulse', section: 'objective', base: 'heart_rate' },
-    { field: 'Respiratory rate', section: 'objective', base: 'respiratory_rate' },
-    { field: 'Temperature', section: 'objective', base: 'temperature' },
-    { field: 'Heart exam', section: 'objective', base: 'heart_exam' },
+    { field: 'Blood pressure', section: 'objective', base: 'blood_pressure', group: 'vitals' },
+    { field: 'Pulse', section: 'objective', base: 'heart_rate', group: 'vitals' },
+    { field: 'Respiratory rate', section: 'objective', base: 'respiratory_rate', group: 'vitals' },
+    { field: 'Temperature', section: 'objective', base: 'temperature', group: 'vitals' },
+    { field: 'Heart exam', section: 'objective', base: 'heart_exam', group: 'physical_exam' },
+    { field: 'Other findings', section: 'objective', base: 'other_findings', group: 'physical_exam' },
     { field: 'Diagnosis', section: 'assessment', base: 'diagnosis' },
     { field: 'Diagnosis type', section: 'assessment', base: 'diagnosis_type' },
     { field: 'Diagnosis status', section: 'assessment', base: 'diagnosis_status' },
@@ -82,6 +91,16 @@
   const PROC_FIELDS = { procedures: 1, procedure: 1 };
   const FOLLOW_FIELDS = {
     'follow-up': 1, 'follow up': 1, follow_up: 1, followup: 1,
+  };
+  const VITALS_FIELDS = {
+    'blood pressure': 1, bp: 1,
+    pulse: 1, 'heart rate': 1, hr: 1,
+    'respiratory rate': 1, rr: 1, 'resp rate': 1,
+    temperature: 1, temp: 1,
+  };
+  const PHYSICAL_EXAM_FIELDS = {
+    'heart exam': 1, heart: 1,
+    'other findings': 1, 'other finding': 1,
   };
 
   function text(value) {
@@ -223,7 +242,7 @@
       const lower = normName(name);
       if (/chief|history|allergy|cough|fever|social|family|blood group|past medical|current med/.test(lower)) {
         raw = 'subjective';
-      } else if (/blood pressure|pulse|heart rate|temperature|spo2|respiratory|height|weight|heart exam/.test(lower)) {
+      } else if (/blood pressure|pulse|heart rate|temperature|spo2|respiratory|height|weight|heart exam|other findings/.test(lower)) {
         raw = 'objective';
       } else if (/diagnosis|assessment reasoning/.test(lower)) {
         raw = 'assessment';
@@ -245,6 +264,15 @@
     if (INVEST_FIELDS[name] || name.indexOf('investigation') !== -1) return 'investigations';
     if (PROC_FIELDS[name] || name.indexOf('procedure') !== -1) return 'procedures';
     if (FOLLOW_FIELDS[name] || name.indexOf('follow') === 0) return 'follow_up';
+    return 'other';
+  }
+
+  function objectiveGroupKey(fact) {
+    const data = asDict(fact);
+    if (sectionKey(data) !== 'objective') return null;
+    const name = normName(data.base_field || data.field || data.label);
+    if (VITALS_FIELDS[name]) return 'vitals';
+    if (PHYSICAL_EXAM_FIELDS[name]) return 'physical_exam';
     return 'other';
   }
 
@@ -270,6 +298,9 @@
     const prompt1 = resultOf(data);
     const result = displayFilterResult(prompt1);
     const section = sectionKey(data);
+    let group = null;
+    if (section === 'plan') group = planGroupKey(data);
+    else if (section === 'objective') group = objectiveGroupKey(data);
     let gt = data.ground_truth;
     const gen = data.generated;
     if (!('ground_truth' in data) && 'value' in data) gt = data.value;
@@ -277,7 +308,7 @@
     return {
       id: fieldId(data, index),
       section: section,
-      group: section === 'plan' ? planGroupKey(data) : null,
+      group: group,
       label: displayFieldLabel(data),
       base_field: text(data.base_field || data.field),
       result: result,
@@ -647,6 +678,30 @@
     return groups;
   }
 
+  function buildObjectiveGroups(fields) {
+    const rows = (fields || []).filter(f => f.section === 'objective');
+    const buckets = {};
+    OBJECTIVE_GROUP_ORDER.forEach(k => { buckets[k] = []; });
+    rows.forEach(field => {
+      if (field.group && buckets[field.group]) buckets[field.group].push(field);
+      else buckets.other.push(field);
+    });
+    const groups = [];
+    OBJECTIVE_GROUP_ORDER.forEach(key => {
+      const items = buckets[key];
+      if (!items.length && !ALWAYS_OBJECTIVE_GROUPS[key]) return;
+      groups.push({
+        id: 'objective.' + key,
+        key: key,
+        label: OBJECTIVE_GROUP_LABELS[key],
+        count_label: groupCountLabel(key, items),
+        field_ids: items.map(f => f.id),
+        fields: items,
+      });
+    });
+    return groups;
+  }
+
   function buildSections(fields) {
     return SECTION_KEYS.map(key => {
       const owned = (fields || []).filter(f => f.section === key);
@@ -661,7 +716,9 @@
         pct_label: pct == null ? '' : pct + '%',
         field_ids: owned.map(f => f.id),
         fields: owned,
-        groups: key === 'plan' ? buildPlanGroups(owned) : [],
+        groups: key === 'plan' ? buildPlanGroups(owned)
+          : key === 'objective' ? buildObjectiveGroups(owned)
+          : [],
       };
     });
   }
@@ -747,15 +804,59 @@
     );
   }
 
-  function resultBadge(result) {
+  function tableStatusLabel(result) {
+    const key = text(result).toLowerCase();
+    if (key === 'correct') return 'Match';
+    if (key === 'incorrect') return 'Modified';
+    if (key === 'hallucination') return 'Hallucinated';
+    return result || '';
+  }
+
+  function resultBadge(result, opts) {
     const key = text(result).toLowerCase();
     let cls = 'soap-nav-badge-incorrect';
     let label = result || '';
     if (key === 'correct') { cls = 'soap-nav-badge-match'; label = 'Match'; }
     else if (key === 'missing') { cls = 'soap-nav-badge-missing'; }
     else if (key === 'hallucination') { cls = 'soap-nav-badge-hallucinated'; label = 'Hallucinated'; }
-    else if (key === 'incorrect') { cls = 'soap-nav-badge-incorrect'; label = 'Incorrect'; }
+    else if (key === 'incorrect') {
+      if (opts && opts.modified) {
+        cls = 'soap-nav-badge-modified';
+        label = 'Modified';
+      } else {
+        cls = 'soap-nav-badge-incorrect';
+        label = 'Incorrect';
+      }
+    }
     return '<span class="soap-nav-result-badge ' + cls + '">' + esc(label) + '</span>';
+  }
+
+  function groupTableRows(fields) {
+    return (fields || []).map(field => {
+      const result = text(field.result);
+      return {
+        id: field.id,
+        field: field.label || field.field || 'Unknown',
+        ground_truth: field.gt_empty ? '—' : (field.ground_truth || '—'),
+        generated: field.gen_empty ? '—' : (field.generated || '—'),
+        result: result,
+        status: tableStatusLabel(result),
+        is_mismatch: result !== 'Correct' && result !== 'NA',
+      };
+    });
+  }
+
+  function findGroup(state, groupId) {
+    const sections = (state && state.sections) || [];
+    for (let i = 0; i < sections.length; i++) {
+      const group = (sections[i].groups || []).find(g => g.id === groupId);
+      if (group) return group;
+    }
+    return null;
+  }
+
+  function isTableGroup(group) {
+    return !!(group && TABLE_GROUP_KEYS[group.key]);
   }
 
   function highlightHtml(value, phrase) {
@@ -839,7 +940,50 @@
     );
   }
 
+  function groupTableHtml(group) {
+    const rows = groupTableRows(group && group.fields);
+    const body = rows.map(row => {
+      const mismatch = row.is_mismatch ? ' is-mismatch' : '';
+      const badge = !row.result || row.result === 'NA'
+        ? '—'
+        : resultBadge(row.result, { modified: true });
+      return '<tr class="' + mismatch.trim() + '" data-soap-nav-pick="' + esc(row.id || '')
+        + '" data-soap-result="' + esc(row.result) + '">'
+        + '<td class="soap-nav-group-field">' + esc(row.field) + '</td>'
+        + '<td data-soap-cell="gt">' + esc(row.ground_truth) + '</td>'
+        + '<td data-soap-cell="gen">' + esc(row.generated) + '</td>'
+        + '<td class="soap-result-cell">' + badge + '</td>'
+        + '</tr>';
+    }).join('');
+    return (
+      '<div class="detail-table-scroll soap-nav-group-scroll">'
+      + '<table class="soap-compare-table soap-nav-group-table">'
+      + '<thead><tr><th>Field</th><th>Ground Truth</th><th>AI Output</th><th>Status</th></tr></thead>'
+      + '<tbody>' + (body || '<tr><td colspan="4">No SOAP values for this group.</td></tr>')
+      + '</tbody></table></div>'
+    );
+  }
+
+  function groupPane(group, state) {
+    return (
+      '<div class="soap-nav-selected" data-soap-nav-selected data-soap-nav-panel tabindex="0">'
+      + '<article class="soap-nav-compare-card" data-soap-nav-group-pane="' + esc(group.id) + '">'
+      + '<header class="soap-nav-compare-head">'
+      + '<h4>' + esc(group.label) + '</h4>'
+      + '<div class="soap-nav-compare-actions">'
+      + '<button type="button" class="soap-nav-close" data-soap-nav-close aria-label="Close group comparison">×</button>'
+      + '</div></header>'
+      + '<div class="soap-nav-compare-scroll">'
+      + groupTableHtml(group)
+      + '</div></article></div>'
+    );
+  }
+
   function selectedPane(state) {
+    if (state.selectedGroupId) {
+      const group = findGroup(state, state.selectedGroupId);
+      if (group && isTableGroup(group)) return groupPane(group, state);
+    }
     if (!state.selected_ids.length) return emptyPane();
     const byId = {};
     state.fields.forEach(f => { byId[f.id] = f; });
@@ -925,9 +1069,10 @@
     );
   }
 
-  function groupRow(group, selected, open) {
+  function groupRow(group, selected, open, state) {
     const any = group.field_ids.some(id => selected[id]);
-    const on = any ? ' is-selected' : '';
+    const groupOn = !!(state && state.selectedGroupId === group.id);
+    const on = (any || groupOn) ? ' is-selected' : '';
     const body = open
       ? '<div class="soap-nav-subleaves">'
         + group.fields.map(f => fieldRow(f, selected)).join('')
@@ -952,13 +1097,13 @@
     state.selected_ids.forEach(id => { selected[id] = true; });
     let body = '';
     if (open) {
-      if (section.key === 'plan' && section.groups.length) {
+      if (section.groups && section.groups.length) {
         body = '<div class="soap-nav-leaves">'
           + section.groups.map(g => {
             if (g.key === 'medications' && g.fields.length === 1 && g.fields[0].is_medicine) {
               return fieldRow(g.fields[0], selected);
             }
-            return groupRow(g, selected, !!(state.expandedGroups && state.expandedGroups[g.id]));
+            return groupRow(g, selected, !!(state.expandedGroups && state.expandedGroups[g.id]), state);
           }).join('')
           + '</div>';
       } else {
@@ -1016,9 +1161,11 @@
   }
 
   function idsForGroup(state, groupId) {
-    const plan = state.sections.find(s => s.key === 'plan');
-    const group = ((plan && plan.groups) || []).find(g => g.id === groupId);
-    return group ? group.field_ids.slice() : [];
+    for (let i = 0; i < (state.sections || []).length; i++) {
+      const group = (state.sections[i].groups || []).find(g => g.id === groupId);
+      if (group) return group.field_ids.slice();
+    }
+    return [];
   }
 
   function toggleIds(current, ids) {
@@ -1033,7 +1180,12 @@
   function paint(host, state) {
     const visible = filterFields(state.fields, { status: state.status, query: state.query });
     state.sections = buildSections(visible);
-    state.selected_count = state.selected_ids.length;
+    if (state.selectedGroupId) {
+      const group = findGroup(state, state.selectedGroupId);
+      state.selected_count = group ? (group.field_ids || []).length : 0;
+    } else {
+      state.selected_count = state.selected_ids.length;
+    }
     state.total_count = state.fields.length;
     const queryEl = host.querySelector('[data-soap-nav-query]');
     const caret = queryEl ? queryEl.selectionStart : null;
@@ -1075,7 +1227,18 @@
       const groupBtn = ev.target && ev.target.closest('[data-soap-nav-group]');
       if (groupBtn && host.contains(groupBtn) && !ev.target.closest('[data-soap-nav-pick]')) {
         const gid = groupBtn.getAttribute('data-soap-nav-group');
+        const group = findGroup(state, gid);
         state.expandedGroups = state.expandedGroups || {};
+        if (isTableGroup(group)) {
+          state.selectedGroupId = gid;
+          state.selected_ids = [];
+          state.expanded.objective = true;
+          state.expandedGroups[gid] = true;
+          paint(host, state);
+          const panel = host.querySelector('[data-soap-nav-panel]');
+          if (panel && panel.focus) panel.focus();
+          return;
+        }
         state.expandedGroups[gid] = !state.expandedGroups[gid];
         paint(host, state);
         return;
@@ -1100,6 +1263,7 @@
       if (pick && host.contains(pick)) {
         const id = pick.getAttribute('data-soap-nav-pick');
         state.selected_ids = id ? [id] : [];
+        state.selectedGroupId = '';
         paint(host, state);
         const panel = host.querySelector('[data-soap-nav-panel]');
         if (panel && panel.focus) panel.focus();
@@ -1108,6 +1272,7 @@
       const close = ev.target && ev.target.closest('[data-soap-nav-close]');
       if (close && host.contains(close)) {
         state.selected_ids = [];
+        state.selectedGroupId = '';
         paint(host, state);
         return;
       }
@@ -1121,7 +1286,7 @@
           if (field) state.expanded[field.section] = true;
           if (field && field.group) {
             state.expandedGroups = state.expandedGroups || {};
-            state.expandedGroups['plan.' + field.group] = true;
+            state.expandedGroups[field.section + '.' + field.group] = true;
           }
           state.selected_ids = [next];
           paint(host, state);
@@ -1167,6 +1332,7 @@
       status: FILTER_ALL,
       query: '',
       selected_ids: [],
+      selectedGroupId: '',
       selected_count: 0,
       total_count: model.total_count,
       expandedGroups: {},
@@ -1209,6 +1375,10 @@
     adjacentFieldId,
     encodedCells,
     displayFilterResult,
+    tableStatusLabel,
+    groupTableRows,
+    groupTableHtml,
+    findGroup,
     mount,
   };
 

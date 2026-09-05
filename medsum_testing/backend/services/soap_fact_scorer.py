@@ -3,8 +3,12 @@
 Transcription/translation scoring is unchanged and is not blended in.
 
 Overall Weighted Clinical Score
-    = Σ(Correct fact weight) / Σ(Applicable fact weight) × 100
-NA facts are excluded from both sums.
+    = Σ(section score × renormalized section weight) for scored sections
+Fixed quotas (config section_weights): Subjective 25, Objective 20,
+Assessment 25, Plan 30. A section with no applicable facts (score is
+null) is excluded and the remaining quotas are renormalized to 100.
+Within a section, Critical=5 / High=3 / Normal=1 still apply.
+NA facts are excluded from both the section numerator and denominator.
 
 LLM `section_details[].differences[]` types remap:
     missing → Missing, incorrect → Incorrect, extra → Hallucination
@@ -782,7 +786,10 @@ def compute_metrics(
 
     applicable_weight = sum(int(row["weight"]) for row in applicable)
     correct_weight = sum(int(row["weight"]) for row in correct)
-    overall = _percent(correct_weight, applicable_weight, places=2)
+    section_scores = _section_scores(evaluated)
+    overall, section_weight_breakdown = weighted_overall_from_sections(
+        section_scores, cfg
+    )
     if overall is not None and overall == int(overall):
         overall = float(int(overall))
 
@@ -822,8 +829,8 @@ def compute_metrics(
         "correct_weight": correct_weight,
         "fill_rate": _percent(n_cap, n_app, 1),
         "clinical_fact_recall": _percent(n_ok, n_app, 1),
-        "clinical_fact_precision": _percent(n_ok, n_app, 1),
-        "hallucination_rate": _percent(n_hall, n_app, 1),
+        "clinical_fact_precision": _percent(n_ok, n_cap, 1),
+        "hallucination_rate": _percent(n_hall, n_cap, 1),
         "critical_fact_accuracy": _percent(
             len(critical_correct), len(critical_denom), 1
         )
@@ -842,7 +849,65 @@ def compute_metrics(
         "captured_count": n_cap,
         "hallucination_count": n_hall,
         "numeric_tolerance": num_tol,
+        "section_weight_breakdown": section_weight_breakdown,
     }
+
+
+def _section_score_for_rows(rows: list[dict]) -> float | None:
+    applicable = [r for r in rows if r.get("result") != NA]
+    denom = sum(int(r["weight"]) for r in applicable)
+    numer = sum(int(r["weight"]) for r in applicable if r.get("result") == CORRECT)
+    return _percent(numer, denom, places=2)
+
+
+def _section_scores(
+    evaluated: list[dict],
+    section_keys: tuple[str, ...] = ("subjective", "objective", "assessment", "plan"),
+) -> dict[str, float | None]:
+    scores: dict[str, float | None] = {}
+    for key in section_keys:
+        rows = [row for row in evaluated if _norm_name(row.get("section")) == key]
+        scores[key] = _section_score_for_rows(rows)
+    return scores
+
+
+def weighted_overall_from_sections(
+    section_scores: dict[str, Any] | None,
+    cfg: dict,
+) -> tuple[float | None, dict[str, Any]]:
+    """Fixed section quotas, renormalized when a section has no ground truth."""
+    weights = cfg.get("section_weights") or {}
+    scores = section_scores or {}
+    kept: dict[str, tuple[float, float]] = {}
+    for key, raw_weight in weights.items():
+        score = scores.get(key)
+        if score is not None and raw_weight:
+            kept[key] = (float(raw_weight), float(score))
+    if not kept:
+        return None, {}
+    total = sum(weight for weight, _ in kept.values())
+    if not total:
+        return None, {}
+    overall = round(sum((weight / total) * score for weight, score in kept.values()), 2)
+    breakdown: dict[str, Any] = {}
+    for key, raw_weight in weights.items():
+        score = scores.get(key)
+        if key in kept:
+            normalized = kept[key][0] / total * 100
+            breakdown[key] = {
+                "configured_weight": raw_weight,
+                "normalized_weight": round(normalized, 2),
+                "score": score,
+                "scored": True,
+            }
+        else:
+            breakdown[key] = {
+                "configured_weight": raw_weight,
+                "normalized_weight": None,
+                "score": score,
+                "scored": False,
+            }
+    return overall, breakdown
 
 
 def _section_details(evaluated: list[dict]) -> dict[str, Any]:
@@ -850,11 +915,10 @@ def _section_details(evaluated: list[dict]) -> dict[str, Any]:
     for row in evaluated:
         key = _norm_name(row.get("section")) or "other"
         grouped.setdefault(key, []).append(row)
+    soap_scores = _section_scores(evaluated)
     details: dict[str, Any] = {}
     for key, rows in grouped.items():
         applicable = [r for r in rows if r.get("result") != NA]
-        denom = sum(int(r["weight"]) for r in applicable)
-        numer = sum(int(r["weight"]) for r in applicable if r.get("result") == CORRECT)
         diffs = []
         for row in applicable:
             if row.get("result") in (CORRECT, NA):
@@ -870,7 +934,9 @@ def _section_details(evaluated: list[dict]) -> dict[str, Any]:
                 }
             )
         details[key] = {
-            "score": _percent(numer, denom, 1),
+            "score": (
+                soap_scores[key] if key in soap_scores else _section_score_for_rows(rows)
+            ),
             "differences": diffs,
         }
     return details
@@ -999,7 +1065,7 @@ def score_soap(
         "overall_severity": severity,
         "summary": (
             f"SOAP weighted clinical score {overall}% "
-            f"({metrics.get('correct_weight')}/{metrics.get('applicable_weight')} applicable weight)"
+            "(section-weighted: Subjective/Objective/Assessment/Plan)"
             if overall is not None
             else "SOAP not scored"
         ),

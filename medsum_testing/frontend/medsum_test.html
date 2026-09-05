@@ -99,6 +99,7 @@
           </div>
         </div>
 
+        <!-- KPI cards hidden for now
         <div class="stat-cards-grid" id="stat-grid">
           <div class="stat-card">
             <div class="stat-icon">📦</div>
@@ -133,7 +134,9 @@
             <div class="stat-label">Reports Generated</div>
           </div>
         </div>
+        -->
 
+        <!-- Accuracy Over Time and Accuracy Distribution charts hidden for now
         <section class="charts-row">
           <div class="card chart-card">
             <h3 id="accuracy-chart-title">Accuracy Over Time</h3>
@@ -149,16 +152,27 @@
             <div id="distribution-legend" class="distribution-legend"></div>
           </div>
         </section>
+        -->
 
         <div class="results-stack" data-results-source="dashboard">
           <div class="table-panel" data-results-source="dashboard">
             <div class="table-toolbar">
               <h3 class="table-toolbar-title">Recent Test Runs</h3>
               <div class="table-toolbar-right">
-                <button type="button" class="btn-outline"
-                        data-download-total-report>
-                  Download Total Report
-                </button>
+                <div class="export-dropdown" data-batch-export>
+                  <button type="button" class="btn-outline" data-batch-export-toggle
+                          aria-haspopup="true" aria-expanded="false">Download Report ▾</button>
+                  <div class="export-menu" hidden>
+                    <button type="button" class="export-menu-item" data-download-total-report="pdf">Run report PDF</button>
+                    <button type="button" class="export-menu-item" data-download-total-report="excel">Run report Excel</button>
+                    <div class="export-menu-divider" role="separator"></div>
+                    <button type="button" class="export-menu-item" data-download-soap-batch="pdf">SOAP batch PDF</button>
+                    <button type="button" class="export-menu-item" data-download-soap-batch="excel">SOAP batch Excel</button>
+                    <button type="button" class="export-menu-item" data-download-soap-batch="csv">SOAP batch CSV</button>
+                    <button type="button" class="export-menu-item" data-download-soap-batch="html">SOAP batch HTML</button>
+                    <button type="button" class="export-menu-item" data-download-soap-batch="json">SOAP batch JSON</button>
+                  </div>
+                </div>
               </div>
             </div>
             <div class="table-tabs" data-table-tabs>
@@ -564,10 +578,20 @@
               <div class="table-toolbar">
                 <h3 class="table-toolbar-title">Recent Test Runs</h3>
                 <div class="table-toolbar-right">
-                  <button type="button" class="btn-outline"
-                          data-download-total-report>
-                    Download Total Report
-                  </button>
+                  <div class="export-dropdown" data-batch-export>
+                    <button type="button" class="btn-outline" data-batch-export-toggle
+                            aria-haspopup="true" aria-expanded="false">Download Report ▾</button>
+                    <div class="export-menu" hidden>
+                      <button type="button" class="export-menu-item" data-download-total-report="pdf">Run report PDF</button>
+                      <button type="button" class="export-menu-item" data-download-total-report="excel">Run report Excel</button>
+                      <div class="export-menu-divider" role="separator"></div>
+                      <button type="button" class="export-menu-item" data-download-soap-batch="pdf">SOAP batch PDF</button>
+                      <button type="button" class="export-menu-item" data-download-soap-batch="excel">SOAP batch Excel</button>
+                      <button type="button" class="export-menu-item" data-download-soap-batch="csv">SOAP batch CSV</button>
+                      <button type="button" class="export-menu-item" data-download-soap-batch="html">SOAP batch HTML</button>
+                      <button type="button" class="export-menu-item" data-download-soap-batch="json">SOAP batch JSON</button>
+                    </div>
+                  </div>
                   <span id="acc-detail-batch-status"
                         style="font-size:13px;color:var(--text-secondary)"></span>
                   <select id="history-filter" class="config-input"
@@ -702,8 +726,14 @@
               <button id="export-btn" class="btn-outline" type="button"
                       aria-haspopup="true" aria-expanded="false">Export ▾</button>
               <div class="export-menu" hidden>
-                <button id="pdf-btn" class="export-menu-item" type="button">PDF</button>
-                <button id="excel-btn" class="export-menu-item" type="button">Excel</button>
+                <button id="pdf-btn" class="export-menu-item" type="button">Test report PDF</button>
+                <button id="excel-btn" class="export-menu-item" type="button">Test report Excel</button>
+                <div class="export-menu-divider" role="separator"></div>
+                <button class="export-menu-item" type="button" data-soap-gt-export="pdf">SOAP comparison PDF</button>
+                <button class="export-menu-item" type="button" data-soap-gt-export="excel">SOAP comparison Excel</button>
+                <button class="export-menu-item" type="button" data-soap-gt-export="csv">SOAP comparison CSV</button>
+                <button class="export-menu-item" type="button" data-soap-gt-export="html">SOAP comparison HTML</button>
+                <button class="export-menu-item" type="button" data-soap-gt-export="json">SOAP comparison JSON</button>
               </div>
             </div>
           </div>
@@ -730,6 +760,9 @@
             <button type="button" class="table-tab"
                     data-detail-cmp-tab="detail"
                     onclick="switchDetailComparisonTab('detail', this)">Detail</button>
+            <button type="button" class="table-tab"
+                    data-detail-cmp-tab="soap-gt-report"
+                    onclick="switchDetailComparisonTab('soap-gt-report', this)">Comparison Report</button>
           </div>
           <div id="detail-cmp-summary" class="table-tab-content"
                data-detail-cmp-panel-id="summary">
@@ -738,6 +771,10 @@
           <div id="detail-cmp-detail" class="table-tab-content"
                data-detail-cmp-panel-id="detail" hidden>
             <div id="detail-sections"></div>
+          </div>
+          <div id="detail-cmp-soap-gt-report" class="table-tab-content"
+               data-detail-cmp-panel-id="soap-gt-report" hidden>
+            <div id="soap-gt-report-host"></div>
           </div>
         </div>
 
@@ -1167,6 +1204,7 @@
   <script src="/js/test_case_view.js"></script>
   <script src="/js/gt_comparison_table.js"></script>
   <script src="/js/soap_summary_nav.js"></script>
+  <script src="/js/soap_gt_comparison_report.js"></script>
   <script src="/js/accuracy_tooltip.js"></script>
   <script src="/js/tooltip_position.js"></script>
   <script src="/js/latency_analysis.js"></script>

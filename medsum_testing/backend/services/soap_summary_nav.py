@@ -76,6 +76,22 @@ ALWAYS_PLAN_GROUPS = (
     "follow_up",
 )
 
+OBJECTIVE_GROUP_ORDER = (
+    "vitals",
+    "physical_exam",
+    "other",
+)
+OBJECTIVE_GROUP_LABELS = {
+    "vitals": "Vitals",
+    "physical_exam": "Physical Exam",
+    "other": "Other",
+}
+ALWAYS_OBJECTIVE_GROUPS = (
+    "vitals",
+    "physical_exam",
+)
+TABLE_GROUP_KEYS = frozenset({"vitals", "physical_exam"})
+
 EMPTY_HEADING = "Select a field to compare"
 EMPTY_BODY = (
     "Choose any field from the SOAP sections to view Ground Truth vs AI Output "
@@ -107,6 +123,16 @@ _MED_ATTRS = (
 _INVEST_FIELDS = frozenset({"investigations", "investigation"})
 _PROC_FIELDS = frozenset({"procedures", "procedure"})
 _FOLLOW_FIELDS = frozenset({"follow-up", "follow up", "follow_up", "followup"})
+_VITALS_FIELDS = frozenset({
+    "blood pressure", "bp",
+    "pulse", "heart rate", "hr",
+    "respiratory rate", "rr", "resp rate",
+    "temperature", "temp",
+})
+_PHYSICAL_EXAM_FIELDS = frozenset({
+    "heart exam", "heart",
+    "other findings", "other finding",
+})
 
 
 def _as_dict(value: Any) -> dict:
@@ -157,6 +183,19 @@ def plan_group_key(fact: dict | None) -> str | None:
     return "other"
 
 
+def objective_group_key(fact: dict | None) -> str | None:
+    """Objective subgroup: vitals / physical_exam / other."""
+    data = _as_dict(fact)
+    if _section_key(data) != "objective":
+        return None
+    name = _norm_name(data.get("base_field") or data.get("field") or data.get("label"))
+    if name in _VITALS_FIELDS:
+        return "vitals"
+    if name in _PHYSICAL_EXAM_FIELDS:
+        return "physical_exam"
+    return "other"
+
+
 def field_id(fact: dict | None, index: int | str) -> str:
     data = _as_dict(fact)
     section = _section_key(data)
@@ -183,6 +222,12 @@ def nav_field(fact: dict | None, index: int | str) -> dict[str, Any]:
     prompt1 = _result_of(data)
     result = display_filter_result(prompt1)
     section = _section_key(data)
+    if section == "plan":
+        group = plan_group_key(data)
+    elif section == "objective":
+        group = objective_group_key(data)
+    else:
+        group = None
     gt = data.get("ground_truth")
     gen = data.get("generated")
     if "ground_truth" not in data and "value" in data:
@@ -191,7 +236,7 @@ def nav_field(fact: dict | None, index: int | str) -> dict[str, Any]:
     return {
         "id": field_id(data, index),
         "section": section if section in SECTION_KEYS else section,
-        "group": plan_group_key(data) if section == "plan" else None,
+        "group": group,
         "label": display_field_label(data),
         "base_field": _text(data.get("base_field") or data.get("field")),
         "result": result,
@@ -621,6 +666,66 @@ def build_plan_groups(fields: list[dict] | None) -> list[dict[str, Any]]:
     return groups
 
 
+def build_objective_groups(fields: list[dict] | None) -> list[dict[str, Any]]:
+    rows = [f for f in (fields or []) if f.get("section") == "objective"]
+    buckets: dict[str, list[dict]] = {k: [] for k in OBJECTIVE_GROUP_ORDER}
+    for field in rows:
+        group = field.get("group")
+        if group in buckets:
+            buckets[group].append(field)
+        else:
+            buckets["other"].append(field)
+    groups = []
+    for key in OBJECTIVE_GROUP_ORDER:
+        items = buckets[key]
+        if not items and key not in ALWAYS_OBJECTIVE_GROUPS:
+            continue
+        groups.append({
+            "id": f"objective.{key}",
+            "key": key,
+            "label": OBJECTIVE_GROUP_LABELS[key],
+            "count_label": group_count_label(key, items),
+            "field_ids": [f["id"] for f in items],
+            "fields": items,
+        })
+    return groups
+
+
+def table_status_label(result: str | None) -> str:
+    """Group-table Status column. Incorrect displays as Modified (value changed)."""
+    key = normalize_result_type(result) or _text(result)
+    if key == CORRECT:
+        return "Match"
+    if key == INCORRECT:
+        return "Modified"
+    if key == HALLUCINATION:
+        return "Hallucinated"
+    return key or ""
+
+
+def group_table_rows(fields: list[dict] | None) -> list[dict[str, Any]]:
+    """Field / Ground Truth / AI Output / Status rows for a Vitals or Physical Exam click."""
+    rows = []
+    for field in fields or []:
+        result = _text(field.get("result"))
+        gt = field.get("ground_truth") or "—"
+        gen = field.get("generated") or "—"
+        if field.get("gt_empty"):
+            gt = "—"
+        if field.get("gen_empty"):
+            gen = "—"
+        rows.append({
+            "id": field.get("id"),
+            "field": field.get("label") or field.get("field") or "Unknown",
+            "ground_truth": gt,
+            "generated": gen,
+            "result": result,
+            "status": table_status_label(result),
+            "is_mismatch": result != CORRECT and result != NA,
+        })
+    return rows
+
+
 def build_sections(fields: list[dict] | None) -> list[dict[str, Any]]:
     rows = list(fields or [])
     sections = []
@@ -638,7 +743,11 @@ def build_sections(fields: list[dict] | None) -> list[dict[str, Any]]:
             "expanded": bool(DEFAULT_EXPANDED.get(key)),
             "field_ids": [f["id"] for f in owned],
             "fields": owned,
-            "groups": build_plan_groups(owned) if key == "plan" else [],
+            "groups": (
+                build_plan_groups(owned) if key == "plan"
+                else build_objective_groups(owned) if key == "objective"
+                else []
+            ),
         }
         sections.append(item)
     return sections

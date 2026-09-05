@@ -28,6 +28,16 @@ criticality_weights:
   High: 3
   Normal: 1
 
+# Fixed share each SOAP section contributes to the overall weighted score.
+# Must sum to 100. A section with no ground truth (score is null) is excluded
+# and the remaining sections' weights are renormalized back up to 100 —
+# see weighted_overall_from_sections() in soap_fact_scorer.py.
+section_weights:
+  subjective: 25
+  objective: 20
+  assessment: 25
+  plan: 30
+
 unmapped_field_criticality: Normal
 
 severity_to_criticality:
@@ -205,6 +215,16 @@ fields:
     categories: []
     paths:
       - objective.physical_exam.heart
+
+  # Residual physical-exam text the model actually emits. Normal: not a named
+  # vital or the Heart exam field (High). Flag if product wants it stricter.
+  other_findings:
+    field: Other findings
+    section: Objective
+    criticality: Normal
+    categories: []
+    paths:
+      - objective.physical_exam.other_findings
 
   diagnosis:
     field: Diagnosis

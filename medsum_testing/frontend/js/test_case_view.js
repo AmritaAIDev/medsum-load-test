@@ -220,6 +220,7 @@
   function accuracyDetails(data) {
     const trans = data.comparison || data.transcription_comparison || {};
     const translationComp = data.translation_comparison || {};
+    const soap = data.soap_comparison || {};
     return {
       accuracy_score: data.accuracy_score,
       transcription_score: trans.similarity_score,
@@ -228,6 +229,7 @@
       summary: trans.summary || '',
       skipped: !!data.accuracy_skipped,
       skip_reason: data.accuracy_skip_reason || '',
+      metrics: (soap.gt_vs_generated && soap.gt_vs_generated.metrics) || {},
     };
   }
 
