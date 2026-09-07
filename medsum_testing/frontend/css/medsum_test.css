@@ -5329,6 +5329,9 @@ em.na { color: var(--text-muted); font-style: italic; }
 .recordings-table tbody tr:hover td {
   background: #f7fafc;
 }
+.recordings-table tbody tr.recording-row.is-clickable {
+  cursor: pointer;
+}
 .recordings-table .flag-col {
   width: 2.4rem;
   text-align: center;

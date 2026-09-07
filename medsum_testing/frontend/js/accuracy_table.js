@@ -501,7 +501,9 @@
       ? '<span class="recordings-flag" title="Safety flag">🚩</span>'
       : '';
     return `
-      <tr class="recording-row" data-test-id="${esc(testId)}">
+      <tr class="recording-row is-clickable" data-test-id="${esc(testId)}"
+          data-open-recording="${esc(testId)}" role="link" tabindex="0"
+          title="Open fact-level review">
         <td class="flag-col">${flag}</td>
         <td class="recording-name">
           <a href="#detail/${encodeURIComponent(testId)}" data-open-recording="${esc(testId)}">${esc(tc)}</a>
@@ -557,7 +559,9 @@
         : (col.key === 'recording' ? 'recording-name' : '');
       return `<td class="${cls}">${detailedCellHtml(col, data)}</td>`;
     }).join('');
-    return `<tr class="recording-row" data-test-id="${esc(testId)}">${cells}</tr>`;
+    return `<tr class="recording-row is-clickable" data-test-id="${esc(testId)}"
+                data-open-recording="${esc(testId)}" role="link" tabindex="0"
+                title="Open fact-level review">${cells}</tr>`;
   }
 
   function recordingsFilterButtons(total) {
@@ -790,9 +794,26 @@
         paintRecordings(null, lastRecordingsTotal);
       });
     });
-    rec.querySelectorAll('[data-open-recording]').forEach((link) => {
+    rec.querySelectorAll('.recording-row[data-open-recording]').forEach((row) => {
+      const openRecording = (event) => {
+        if (event.target.closest('a, button, input, label')) return;
+        event.preventDefault();
+        const testId = row.getAttribute('data-open-recording') || '';
+        if (testId && typeof root.openTestDetail === 'function') {
+          root.openTestDetail(testId);
+        }
+      };
+      row.addEventListener('click', openRecording);
+      row.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          openRecording(event);
+        }
+      });
+    });
+    rec.querySelectorAll('a[data-open-recording]').forEach((link) => {
       link.addEventListener('click', (event) => {
         event.preventDefault();
+        event.stopPropagation();
         const testId = link.getAttribute('data-open-recording') || '';
         if (testId && typeof root.openTestDetail === 'function') {
           root.openTestDetail(testId);
