@@ -54,9 +54,82 @@ FLAG_NUMERAL = "Hindi numeral error"
 FLAG_DRUG = "Brand / sound-alike drug"
 _DEVANAGARI_DIGIT_RE = re.compile(r"[०-९]")
 
+# Clinical Facts "Error tag" taxonomy (Presence + Value). Codes map to known
+# MedSum tag ids when present on a fact; otherwise tags are inferred.
+ERROR_TAG_OMISSION = "omission"
+ERROR_TAG_HALLUCINATION = "hallucination"
+ERROR_TAG_DUPLICATE = "duplicate"
+ERROR_TAG_MISCLASSIFIED = "misclassified"
+ERROR_TAG_WRONG_VALUE = "wrong_value"
+ERROR_TAG_NUMERIC_DOSE = "numeric_dose"
+ERROR_TAG_UNIT = "unit"
+ERROR_TAG_LATERALITY = "laterality"
+ERROR_TAG_TEMPORAL = "temporal"
+ERROR_TAG_NEGATION = "negation"
+ERROR_TAG_CERTAINTY = "certainty"
+ERROR_TAG_EXPERIENCER = "experiencer"
+ERROR_TAG_BRAND = "brand"
+ERROR_TAG_ABBREVIATION = "abbreviation"
+ERROR_TAG_PARTIAL = "partial"
+
+ERROR_TAG_LABELS: dict[str, str] = {
+    ERROR_TAG_OMISSION: "Omission",
+    ERROR_TAG_HALLUCINATION: "Hallucination / Invented",
+    ERROR_TAG_DUPLICATE: "Duplicate entry",
+    ERROR_TAG_MISCLASSIFIED: "Misclassified category",
+    ERROR_TAG_WRONG_VALUE: "Wrong value/substitution",
+    ERROR_TAG_NUMERIC_DOSE: "Numeric/dose error",
+    ERROR_TAG_UNIT: "Unit error",
+    ERROR_TAG_LATERALITY: "Laterality error",
+    ERROR_TAG_TEMPORAL: "Temporal error",
+    ERROR_TAG_NEGATION: "Negation error",
+    ERROR_TAG_CERTAINTY: "Certainty/hedging error",
+    ERROR_TAG_EXPERIENCER: "Subject/experiencer error",
+    ERROR_TAG_BRAND: "Brand–generic mapping error",
+    ERROR_TAG_ABBREVIATION: "Abbreviation misexpansion",
+    ERROR_TAG_PARTIAL: "Partial capture",
+}
+
+ERROR_TAG_CODES: dict[str, str] = {
+    "medmiss": ERROR_TAG_OMISSION,
+    "ixmiss": ERROR_TAG_OMISSION,
+    "planmiss": ERROR_TAG_OMISSION,
+    "symmiss": ERROR_TAG_OMISSION,
+    "inventeddx": ERROR_TAG_HALLUCINATION,
+    "inventedmed": ERROR_TAG_HALLUCINATION,
+    "lasa": ERROR_TAG_WRONG_VALUE,
+    "numeraldedh": ERROR_TAG_NUMERIC_DOSE,
+    "numeraldhai": ERROR_TAG_NUMERIC_DOSE,
+    "numericvital": ERROR_TAG_NUMERIC_DOSE,
+    "laterality": ERROR_TAG_LATERALITY,
+    "temporality": ERROR_TAG_TEMPORAL,
+    "negation": ERROR_TAG_NEGATION,
+    "uncertainty": ERROR_TAG_CERTAINTY,
+    "experiencer": ERROR_TAG_EXPERIENCER,
+    "brand": ERROR_TAG_BRAND,
+}
+
+# UI result labels (Clinical Facts filter / Result column).
+UI_RESULT_CORRECT = "Correct"
+UI_RESULT_MISSING = "Missing"
+UI_RESULT_WRONG = "Wrong"
+UI_RESULT_PARTIAL = "Partial"
+UI_RESULT_INVENTED = "Invented"
+
 _WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
 _CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _DEFAULT_TTL = 300.0
+_LATERALITY_RE = re.compile(r"\b(left|right|l\/r|bilateral|unilateral)\b", re.I)
+_TEMPORAL_RE = re.compile(
+    r"\b(acute|chronic|past|current|previous|history of|ongoing|recent)\b", re.I
+)
+_NEGATION_RE = re.compile(r"\b(no |not |denies|without|negative for)\b", re.I)
+_CERTAINTY_RE = re.compile(
+    r"\b(possible|probable|suspected|likely|confirmed|definite|maybe)\b", re.I
+)
+_UNIT_RE = re.compile(
+    r"\b(mg|mcg|µg|ug|g|ml|mL|L|l|mmol|mmhg|cm|kg|iu)\b", re.I
+)
 
 
 def _text(value: Any) -> str:
@@ -811,6 +884,48 @@ class AccuracyCalculator:
             return _norm_name(FLAG_DRUG) in flags
         return True
 
+    def _run_asr_wer_percent(self, run: dict) -> float | None:
+        comp = _as_dict(run.get("comparison") or run.get("transcription_comparison"))
+        for raw in (
+            run.get("asr_wer"),
+            run.get("wer"),
+            comp.get("wer"),
+            comp.get("word_error_rate"),
+        ):
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if value <= 1.0:
+                value *= 100.0
+            return round(value, 1)
+        for raw in (
+            comp.get("similarity_score"),
+            run.get("similarity_score"),
+            run.get("accuracy_score"),
+        ):
+            try:
+                sim = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= sim <= 100:
+                # Treat high similarity as near-match; convert to WER-style %.
+                if sim >= 40:
+                    return round(max(0.0, 100.0 - sim), 1)
+        return None
+
+    def _run_realtime_factor(self, duration: float | None, latency: float | None) -> float | None:
+        if duration is None or latency is None:
+            return None
+        try:
+            dur = float(duration)
+            lat = float(latency)
+        except (TypeError, ValueError):
+            return None
+        if dur <= 0:
+            return None
+        return round(lat / dur, 2)
+
     def get_recording_rows(self) -> list[dict[str, Any]]:
         ratio = float(self.acc_config["review_ratio"])
         rows: list[dict[str, Any]] = []
@@ -822,6 +937,7 @@ class AccuracyCalculator:
             elif self._run_has_soap_gt(run):
                 self._accumulate_matched(buckets, run)
             scored = {}
+            category_accuracy: dict[str, float | None] = {}
             for name in SOAP_CATEGORIES:
                 threshold = self.thresholds.get(name) or _default_category(name)
                 scored[name] = apply_accuracy_and_status(
@@ -829,23 +945,32 @@ class AccuracyCalculator:
                     threshold,
                     review_ratio=ratio,
                 )
+                category_accuracy[name] = scored[name].get("accuracy_percent")
             totals = self.get_overall_metrics(scored)
             flags = self._recording_safety_flags(run, facts, totals)
             tc_ref = _text(run.get("tc_ref") or run.get("test_case_id") or run.get("test_id"))
+            duration = self._run_duration_seconds(run)
+            latency = self._run_latency_seconds(run)
+            gt = int(totals.get("ground_truth") or 0)
+            correct = int(totals.get("correct") or 0)
             row = {
                 "test_id": run.get("test_id") or run.get("id"),
                 "test_case_number": tc_ref,
                 "tc_ref": tc_ref,
                 "run_number": _text(run.get("run_ref") or run.get("run_number") or run.get("test_id")),
                 "audio_filename": _text(run.get("audio_filename") or run.get("filename")),
-                "duration_seconds": self._run_duration_seconds(run),
-                "latency_seconds": self._run_latency_seconds(run),
-                "ground_truth": int(totals.get("ground_truth") or 0),
-                "correct": int(totals.get("correct") or 0),
+                "duration_seconds": duration,
+                "latency_seconds": latency,
+                "ground_truth": gt,
+                "correct": correct,
                 "missed": int(totals.get("missed") or 0),
                 "wrong": int(totals.get("wrong") or 0),
                 "invented": int(totals.get("invented") or 0),
                 "has_ground_truth": bool(totals.get("has_ground_truth")),
+                "fact_accuracy_percent": _percent(correct, gt),
+                "category_accuracy": category_accuracy,
+                "asr_wer_percent": self._run_asr_wer_percent(run),
+                "realtime_factor": self._run_realtime_factor(duration, latency),
                 "status": self._run_recording_status(totals),
                 "has_safety_flag": bool(flags),
                 "safety_flags": flags,
@@ -916,6 +1041,353 @@ class AccuracyCalculator:
             })
         return details
 
+    def _empty_category_detail(self) -> dict[str, Any]:
+        row = empty_category_metrics()
+        row.update({
+            "missed_facts": [],
+            "wrong_facts": [],
+            "invented_facts": [],
+        })
+        return row
+
+    def _fact_display_gt(self, fact: dict) -> str:
+        if "ground_truth" in fact:
+            return _text(fact.get("ground_truth"))
+        return _text(fact.get("value"))
+
+    def _fact_display_gen(self, fact: dict) -> str:
+        return _text(fact.get("generated") or fact.get("value"))
+
+    def _format_wrong_fact(self, generated: str, expected: str) -> str:
+        gen = _text(generated)
+        exp = _text(expected)
+        if gen and exp:
+            return f"{gen} (expected: {exp})"
+        return gen or exp
+
+    def _comparison_rows_from_classified(self, facts: list[dict]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for index, fact in enumerate(facts or []):
+            category = resolve_clinical_category(fact, self.scoring_config)
+            if category not in SOAP_CATEGORIES:
+                continue
+            result = fact_classification(fact)
+            if result == NA:
+                continue
+            raw_result = _text(fact.get("result") or fact.get("type"))
+            if _norm_name(raw_result) == "partial":
+                result = "Partial"
+            ui_result = ui_result_label(result)
+            gt_text = self._fact_display_gt(fact)
+            gen_text = self._fact_display_gen(fact)
+            score_result = MISSING if result == "Partial" else result
+            error_tag = infer_error_tag(fact, score_result, category)
+            if result == "Partial":
+                error_tag = ERROR_TAG_PARTIAL
+            if ui_result == UI_RESULT_CORRECT:
+                error_tag = ""
+            safety = infer_safety_concern(
+                fact,
+                INCORRECT if result == "Partial" else result,
+                category,
+                error_tag,
+            )
+            source = (
+                infer_error_source(
+                    fact,
+                    INCORRECT if result == "Partial" else result,
+                )
+                if error_tag
+                else ""
+            )
+            rows.append({
+                "id": _text(fact.get("id")) or f"fact-{index}",
+                "category": category,
+                "field": _text(fact.get("field") or fact.get("base_field")),
+                "ground_truth": gt_text,
+                "generated": gen_text,
+                "result": ui_result,
+                "error_tag": error_tag,
+                "error_tag_label": ERROR_TAG_LABELS.get(error_tag, ""),
+                "error_source": source,
+                "safety_flagged": bool(safety.get("flagged")),
+                "safety_auto_label": _text(safety.get("auto_label")),
+                "safety_reason": _text(safety.get("reason")),
+            })
+        rank = {
+            UI_RESULT_WRONG: 0,
+            UI_RESULT_MISSING: 1,
+            UI_RESULT_PARTIAL: 2,
+            UI_RESULT_INVENTED: 3,
+            UI_RESULT_CORRECT: 4,
+        }
+        rows.sort(key=lambda row: (rank.get(row.get("result"), 9), row.get("category") or ""))
+        return rows
+
+    def _comparison_rows_from_matcher(self, run: dict) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        gt, gen = self._soap_payloads(run)
+        if not gt:
+            return rows
+        index = 0
+        for name in SOAP_CATEGORIES:
+            gt_facts = self.matcher.extract_facts_from_summary(gt, name)
+            gen_facts = self.matcher.extract_facts_from_summary(gen, name) if gen else []
+            if not gt_facts and not gen_facts:
+                continue
+            matched = self.matcher.match_facts(gt_facts, gen_facts)
+            for pair in matched.get("pairs") or []:
+                label = _norm_name(pair.get("label"))
+                if label == "correct":
+                    result = CORRECT
+                    ui_result = UI_RESULT_CORRECT
+                elif label == "missed":
+                    result = MISSING
+                    ui_result = UI_RESULT_MISSING
+                elif label == "wrong":
+                    result = INCORRECT
+                    ui_result = UI_RESULT_WRONG
+                elif label in {"invented", "extra", "hallucination"}:
+                    result = HALLUCINATION
+                    ui_result = UI_RESULT_INVENTED
+                else:
+                    continue
+                gt_text = _text(pair.get("ground_truth"))
+                gen_text = _text(pair.get("extracted") or pair.get("generated"))
+                fake = {
+                    "field": "",
+                    "ground_truth": gt_text,
+                    "generated": gen_text,
+                }
+                error_tag = infer_error_tag(fake, result, name)
+                if ui_result == UI_RESULT_CORRECT:
+                    error_tag = ""
+                safety = infer_safety_concern(fake, result, name, error_tag)
+                source = infer_error_source(fake, result) if error_tag else ""
+                rows.append({
+                    "id": f"match-{index}",
+                    "category": name,
+                    "field": "",
+                    "ground_truth": gt_text,
+                    "generated": gen_text,
+                    "result": ui_result,
+                    "error_tag": error_tag,
+                    "error_tag_label": ERROR_TAG_LABELS.get(error_tag, ""),
+                    "error_source": source,
+                    "safety_flagged": bool(safety.get("flagged")),
+                    "safety_auto_label": _text(safety.get("auto_label")),
+                    "safety_reason": _text(safety.get("reason")),
+                })
+                index += 1
+        rank = {
+            UI_RESULT_WRONG: 0,
+            UI_RESULT_MISSING: 1,
+            UI_RESULT_PARTIAL: 2,
+            UI_RESULT_INVENTED: 3,
+            UI_RESULT_CORRECT: 4,
+        }
+        rows.sort(key=lambda row: (rank.get(row.get("result"), 9), row.get("category") or ""))
+        return rows
+
+    def _category_details_from_classified(
+        self, facts: list[dict]
+    ) -> dict[str, dict[str, Any]]:
+        buckets = {name: self._empty_category_detail() for name in SOAP_CATEGORIES}
+        for fact in facts:
+            category = resolve_clinical_category(fact, self.scoring_config)
+            if category not in buckets:
+                continue
+            result = fact_classification(fact)
+            if result == NA:
+                continue
+            row = buckets[category]
+            field = _text(fact.get("field") or fact.get("base_field"))
+            gt_text = self._fact_display_gt(fact)
+            gen_text = self._fact_display_gen(fact)
+            label = f"{field}: {gt_text}" if field and gt_text else (gt_text or field)
+            gen_label = (
+                f"{field}: {gen_text}" if field and gen_text else (gen_text or field)
+            )
+            if result == HALLUCINATION:
+                row["invented"] += 1
+                if gen_label:
+                    row["invented_facts"].append(gen_label)
+                continue
+            if result == CORRECT:
+                if not is_established_gt(
+                    fact.get("ground_truth") if "ground_truth" in fact else fact.get("value"),
+                    self.scoring_config,
+                ):
+                    continue
+                row["ground_truth"] += 1
+                row["correct"] += 1
+                row["has_ground_truth"] = True
+            elif result == MISSING:
+                row["ground_truth"] += 1
+                row["missed"] += 1
+                row["has_ground_truth"] = True
+                if label:
+                    row["missed_facts"].append(label)
+            elif result == INCORRECT:
+                row["ground_truth"] += 1
+                row["wrong"] += 1
+                row["has_ground_truth"] = True
+                row["wrong_facts"].append(self._format_wrong_fact(gen_text, gt_text))
+        return buckets
+
+    def _category_details_from_matcher(self, run: dict) -> dict[str, dict[str, Any]]:
+        buckets = {name: self._empty_category_detail() for name in SOAP_CATEGORIES}
+        gt, gen = self._soap_payloads(run)
+        if not gt:
+            return buckets
+        for name in SOAP_CATEGORIES:
+            gt_facts = self.matcher.extract_facts_from_summary(gt, name)
+            gen_facts = self.matcher.extract_facts_from_summary(gen, name) if gen else []
+            if not gt_facts and not gen_facts:
+                continue
+            matched = self.matcher.match_facts(gt_facts, gen_facts)
+            row = buckets[name]
+            row["ground_truth"] = int(matched["ground_truth"])
+            row["correct"] = int(matched["correct"])
+            row["missed"] = int(matched["missed"])
+            row["wrong"] = int(matched["wrong"])
+            row["invented"] = int(matched["invented"])
+            if matched["ground_truth"]:
+                row["has_ground_truth"] = True
+            for pair in matched.get("pairs") or []:
+                label = str(pair.get("label") or "")
+                if label == "missed" and _text(pair.get("ground_truth")):
+                    row["missed_facts"].append(_text(pair.get("ground_truth")))
+                elif label == "wrong":
+                    row["wrong_facts"].append(
+                        self._format_wrong_fact(
+                            pair.get("extracted"),
+                            pair.get("ground_truth"),
+                        )
+                    )
+                elif label == "invented" and _text(pair.get("extracted")):
+                    row["invented_facts"].append(_text(pair.get("extracted")))
+        return buckets
+
+    def _find_run(self, recording_id: str) -> dict | None:
+        wanted = _norm_name(recording_id)
+        if not wanted:
+            return None
+        for run in self._get_filtered_runs():
+            candidates = [
+                run.get("test_id"),
+                run.get("id"),
+                run.get("run_ref"),
+                run.get("run_number"),
+                run.get("tc_ref"),
+                run.get("test_case_id"),
+            ]
+            for raw in candidates:
+                if _norm_name(raw) == wanted:
+                    return run
+        return None
+
+    def get_recording_details(self, recording_id: str) -> dict[str, Any] | None:
+        """Fact-level category breakdown for one recording (detail page / drill-down)."""
+        run = self._find_run(recording_id)
+        if run is None:
+            return None
+        ratio = float(self.acc_config["review_ratio"])
+        facts = self._facts_for_run(run)
+        if facts:
+            buckets = self._category_details_from_classified(facts)
+            comparison_rows = self._comparison_rows_from_classified(facts)
+        elif self._run_has_soap_gt(run):
+            buckets = self._category_details_from_matcher(run)
+            comparison_rows = self._comparison_rows_from_matcher(run)
+        else:
+            buckets = {name: self._empty_category_detail() for name in SOAP_CATEGORIES}
+            comparison_rows = []
+
+        categories: dict[str, dict[str, Any]] = {}
+        for name in SOAP_CATEGORIES:
+            threshold = self.thresholds.get(name) or _default_category(name)
+            scored = apply_accuracy_and_status(
+                buckets[name],
+                threshold,
+                review_ratio=ratio,
+            )
+            categories[name] = {
+                "ground_truth": int(scored.get("ground_truth") or 0),
+                "correct": int(scored.get("correct") or 0),
+                "missed": int(scored.get("missed") or 0),
+                "wrong": int(scored.get("wrong") or 0),
+                "invented": int(scored.get("invented") or 0),
+                "accuracy_percent": scored.get("accuracy_percent"),
+                "status": scored.get("status"),
+                "has_ground_truth": bool(scored.get("has_ground_truth")),
+                "missed_facts": list(buckets[name].get("missed_facts") or []),
+                "wrong_facts": list(buckets[name].get("wrong_facts") or []),
+                "invented_facts": list(buckets[name].get("invented_facts") or []),
+            }
+
+        totals = self.get_overall_metrics(categories)
+        duration = self._run_duration_seconds(run)
+        latency = self._run_latency_seconds(run)
+        tc_ref = _text(run.get("tc_ref") or run.get("test_case_id") or run.get("test_id"))
+        run_number = _text(
+            run.get("run_ref") or run.get("run_number") or run.get("test_id")
+        )
+        partial = sum(1 for row in comparison_rows if row.get("result") == UI_RESULT_PARTIAL)
+        safety_count = sum(1 for row in comparison_rows if row.get("safety_flagged"))
+        return {
+            "recording": {
+                "test_id": run.get("test_id") or run.get("id"),
+                "test_case_number": tc_ref,
+                "run_number": run_number,
+                "duration_seconds": duration,
+                "model_used": _text(
+                    run.get("ai_model_used") or run.get("ai_model") or run.get("llm_model")
+                ),
+                "audio_filename": _text(run.get("audio_filename") or run.get("filename")),
+                "batch_id": self._run_batch_id(run),
+                "language": _text(run.get("language") or run.get("audio_language")),
+            },
+            "summary": {
+                "total_ground_truth": int(totals.get("ground_truth") or 0),
+                "total_correct": int(totals.get("correct") or 0),
+                "total_missed": int(totals.get("missed") or 0),
+                "total_wrong": int(totals.get("wrong") or 0),
+                "total_invented": int(totals.get("invented") or 0),
+                "total_partial": partial,
+                "safety_concerns": safety_count,
+                "overall_accuracy_percent": totals.get("accuracy_percent"),
+                "mean_latency_seconds": latency,
+                "asr_wer": self._run_asr_wer_percent(run),
+                "real_time_factor": self._run_realtime_factor(duration, latency),
+                "status": self._run_recording_status(totals),
+                "has_ground_truth": bool(totals.get("has_ground_truth")),
+            },
+            "categories": categories,
+            "comparison_rows": comparison_rows,
+            "error_tag_options": {
+                "presence": [
+                    {"id": ERROR_TAG_OMISSION, "label": ERROR_TAG_LABELS[ERROR_TAG_OMISSION]},
+                    {"id": ERROR_TAG_HALLUCINATION, "label": ERROR_TAG_LABELS[ERROR_TAG_HALLUCINATION]},
+                    {"id": ERROR_TAG_DUPLICATE, "label": ERROR_TAG_LABELS[ERROR_TAG_DUPLICATE]},
+                    {"id": ERROR_TAG_MISCLASSIFIED, "label": ERROR_TAG_LABELS[ERROR_TAG_MISCLASSIFIED]},
+                ],
+                "value": [
+                    {"id": ERROR_TAG_WRONG_VALUE, "label": ERROR_TAG_LABELS[ERROR_TAG_WRONG_VALUE]},
+                    {"id": ERROR_TAG_NUMERIC_DOSE, "label": ERROR_TAG_LABELS[ERROR_TAG_NUMERIC_DOSE]},
+                    {"id": ERROR_TAG_UNIT, "label": ERROR_TAG_LABELS[ERROR_TAG_UNIT]},
+                    {"id": ERROR_TAG_LATERALITY, "label": ERROR_TAG_LABELS[ERROR_TAG_LATERALITY]},
+                    {"id": ERROR_TAG_TEMPORAL, "label": ERROR_TAG_LABELS[ERROR_TAG_TEMPORAL]},
+                    {"id": ERROR_TAG_NEGATION, "label": ERROR_TAG_LABELS[ERROR_TAG_NEGATION]},
+                    {"id": ERROR_TAG_CERTAINTY, "label": ERROR_TAG_LABELS[ERROR_TAG_CERTAINTY]},
+                    {"id": ERROR_TAG_EXPERIENCER, "label": ERROR_TAG_LABELS[ERROR_TAG_EXPERIENCER]},
+                    {"id": ERROR_TAG_BRAND, "label": ERROR_TAG_LABELS[ERROR_TAG_BRAND]},
+                    {"id": ERROR_TAG_ABBREVIATION, "label": ERROR_TAG_LABELS[ERROR_TAG_ABBREVIATION]},
+                    {"id": ERROR_TAG_PARTIAL, "label": ERROR_TAG_LABELS[ERROR_TAG_PARTIAL]},
+                ],
+            },
+        }
+
 
 def resolve_category_name(raw: str) -> str:
     wanted = _norm_name(raw)
@@ -927,6 +1399,148 @@ def resolve_category_name(raw: str) -> str:
 
 def _resolve_category_name(raw: str) -> str:
     return resolve_category_name(raw)
+
+
+def ui_result_label(result: str) -> str:
+    """Map Prompt-1 classification to Clinical Facts Result labels."""
+    if result == CORRECT:
+        return UI_RESULT_CORRECT
+    if result == MISSING:
+        return UI_RESULT_MISSING
+    if result == INCORRECT:
+        return UI_RESULT_WRONG
+    if result == HALLUCINATION:
+        return UI_RESULT_INVENTED
+    if _norm_name(result) == "partial":
+        return UI_RESULT_PARTIAL
+    return _text(result) or UI_RESULT_WRONG
+
+
+def _explicit_error_tag(fact: dict) -> str:
+    for key in ("error_tag", "error_code", "tag", "errorTag", "errorCode"):
+        raw = fact.get(key)
+        if isinstance(raw, (list, tuple)):
+            for item in raw:
+                mapped = ERROR_TAG_CODES.get(_norm_name(item).replace(" ", ""))
+                if mapped:
+                    return mapped
+                label_map = {_norm_name(v): k for k, v in ERROR_TAG_LABELS.items()}
+                hit = label_map.get(_norm_name(item))
+                if hit:
+                    return hit
+            continue
+        code = _norm_name(raw).replace(" ", "")
+        if code in ERROR_TAG_CODES:
+            return ERROR_TAG_CODES[code]
+        label_map = {_norm_name(v): k for k, v in ERROR_TAG_LABELS.items()}
+        hit = label_map.get(_norm_name(raw))
+        if hit:
+            return hit
+    return ""
+
+
+def infer_error_tag(fact: dict, result: str, category: str = "") -> str:
+    """Resolve Presence/Value error tag for a fact row."""
+    explicit = _explicit_error_tag(fact)
+    if explicit:
+        return explicit
+    if result == CORRECT:
+        return ""
+    if result == MISSING:
+        return ERROR_TAG_OMISSION
+    if result == HALLUCINATION:
+        return ERROR_TAG_HALLUCINATION
+    if _norm_name(result) == "partial":
+        return ERROR_TAG_PARTIAL
+
+    field = _norm_name(fact.get("base_field") or fact.get("field"))
+    gt = _text(fact.get("ground_truth") if "ground_truth" in fact else fact.get("value"))
+    gen = _text(fact.get("generated") or fact.get("value"))
+    blob = f"{field} {gt} {gen} {category}"
+
+    # Drug identity first — brand/generic rows often contain strengths (mg).
+    if field in {"drug name", "drug_name"} or field.startswith("drug name"):
+        if "brand" in blob.lower() or "(" in gt or "(" in gen:
+            return ERROR_TAG_BRAND
+        return ERROR_TAG_WRONG_VALUE
+    if field in {"dose", "schedule"} or "dose" in field or "schedule" in field:
+        return ERROR_TAG_NUMERIC_DOSE
+    if _DEVANAGARI_DIGIT_RE.search(blob) or (
+        any(ch.isdigit() for ch in gt + gen)
+        and (
+            "dose" in blob
+            or "tablet" in blob.lower()
+            or "mg" in blob.lower()
+            or "vital" in field
+            or "blood pressure" in field
+            or "temperature" in field
+        )
+    ):
+        return ERROR_TAG_NUMERIC_DOSE
+    if _LATERALITY_RE.search(blob):
+        return ERROR_TAG_LATERALITY
+    if _TEMPORAL_RE.search(gt) and _TEMPORAL_RE.search(gen):
+        return ERROR_TAG_TEMPORAL
+    if _NEGATION_RE.search(gt) or _NEGATION_RE.search(gen):
+        return ERROR_TAG_NEGATION
+    if _CERTAINTY_RE.search(gt) or _CERTAINTY_RE.search(gen):
+        return ERROR_TAG_CERTAINTY
+    if _UNIT_RE.search(gt) and _UNIT_RE.search(gen):
+        gt_units = {m.group(0).lower() for m in _UNIT_RE.finditer(gt)}
+        gen_units = {m.group(0).lower() for m in _UNIT_RE.finditer(gen)}
+        if gt_units and gen_units and gt_units != gen_units:
+            return ERROR_TAG_UNIT
+    return ERROR_TAG_WRONG_VALUE
+
+
+def infer_error_source(fact: dict, result: str) -> str:
+    """ASR vs Summarisation chip for the Error tag column."""
+    raw = _text(
+        fact.get("error_source")
+        or fact.get("source")
+        or fact.get("errorSource")
+    )
+    if raw:
+        key = _norm_name(raw)
+        if "asr" in key or "transcript" in key:
+            return "ASR"
+        if "summar" in key or "llm" in key or "soap" in key:
+            return "Summarisation"
+        return raw
+    if result == MISSING or result == HALLUCINATION:
+        return "Summarisation"
+    tag = _explicit_error_tag(fact)
+    if tag == ERROR_TAG_NUMERIC_DOSE and _DEVANAGARI_DIGIT_RE.search(
+        _text(fact.get("ground_truth")) + _text(fact.get("generated"))
+    ):
+        return "ASR"
+    return "Summarisation"
+
+
+def infer_safety_concern(
+    fact: dict,
+    result: str,
+    category: str,
+    error_tag: str,
+) -> dict[str, Any]:
+    """Auto safety flag for the Safety concern? column."""
+    if result == CORRECT:
+        return {"flagged": False, "auto_label": "", "reason": ""}
+    field = _norm_name(fact.get("base_field") or fact.get("field"))
+    cat = _norm_name(category)
+    if "allerg" in field or "allerg" in cat:
+        return {"flagged": True, "auto_label": "Missed allergy", "reason": "allergy"}
+    if error_tag == ERROR_TAG_NUMERIC_DOSE or field in {"dose", "schedule"}:
+        return {"flagged": True, "auto_label": "Dose error", "reason": "dose"}
+    if error_tag in {ERROR_TAG_BRAND, ERROR_TAG_WRONG_VALUE} and (
+        "drug" in field or "medicine" in cat or "medicin" in cat
+    ):
+        return {"flagged": True, "auto_label": "Wrong medicine", "reason": "drug"}
+    if result == HALLUCINATION or error_tag == ERROR_TAG_HALLUCINATION:
+        return {"flagged": True, "auto_label": "Invented fact", "reason": "invented"}
+    if cat in {"diagnosis"} and result in {MISSING, INCORRECT, HALLUCINATION}:
+        return {"flagged": True, "auto_label": "Diagnosis error", "reason": "diagnosis"}
+    return {"flagged": False, "auto_label": "", "reason": ""}
 
 
 def _results_fingerprint() -> tuple[int, int]:

@@ -26,6 +26,29 @@
   let lastRecordings = [];
   let lastRecordingsTotal = 0;
   let recordingsFilter = '';
+  let recordingsViewMode = 'clinical';
+  let recordingsSortDir = 'up';
+  let recordingsColumnsOpen = false;
+  const DETAILED_COLUMNS = [
+    { key: 'flag', label: '🚩', always: true },
+    { key: 'recording', label: 'Recording', always: true },
+    { key: 'duration', label: 'Duration (mins)' },
+    { key: 'fact_accuracy', label: 'Fact accuracy' },
+    { key: 'symptoms', label: 'Symptoms & History', category: 'Symptoms & History' },
+    { key: 'diagnosis', label: 'Diagnosis', category: 'Diagnosis' },
+    { key: 'medicines', label: 'Medicines', category: 'Medicines' },
+    { key: 'med_instructions', label: 'Medication instructions', category: 'Medication Instructions' },
+    { key: 'investigation', label: 'Investigation', category: 'Investigation' },
+    { key: 'vitals', label: 'Vitals and measurements', category: 'Vitals and measurements' },
+    { key: 'allergies', label: 'Allergies & Follow-up Plan', category: 'Allergies & Follow-up Plan' },
+    { key: 'missed', label: 'Missed' },
+    { key: 'wrong', label: 'Wrong' },
+    { key: 'invented', label: 'Invented' },
+    { key: 'asr_wer', label: 'ASR WER' },
+    { key: 'latency', label: 'Latency' },
+    { key: 'status', label: 'Status' },
+  ];
+  let visibleDetailedColumns = DETAILED_COLUMNS.map((col) => col.key);
   let lastFetchOpts = { batchId: 'all', batchIds: [], testType: 'All', model: 'All' };
   let expanded = new Set();
   let expandAll = false;
@@ -337,7 +360,128 @@
   }
 
   function applyRecordingsFilter(rows) {
-    return (rows || []).filter((row) => matchesRecordingsFilter(row, recordingsFilter));
+    const filtered = (rows || []).filter((row) => matchesRecordingsFilter(row, recordingsFilter));
+    const dir = recordingsSortDir === 'down' ? -1 : 1;
+    return filtered.slice().sort((a, b) => {
+      const aFlag = a && a.has_safety_flag ? 1 : 0;
+      const bFlag = b && b.has_safety_flag ? 1 : 0;
+      if (aFlag !== bFlag) return (aFlag - bFlag) * dir;
+      const aName = String((a && (a.test_case_number || a.tc_ref)) || '');
+      const bName = String((b && (b.test_case_number || b.tc_ref)) || '');
+      return aName.localeCompare(bName) * dir;
+    });
+  }
+
+  function flagSortControlHtml() {
+    const down = recordingsSortDir === 'down';
+    return `
+      <button type="button" class="recordings-flag-sort${down ? ' is-down' : ' is-up'}"
+              data-recordings-flag-sort
+              aria-label="Sort by safety flag"
+              title="Sort by safety flag">
+        <span class="recordings-flag-caret" aria-hidden="true"></span>
+      </button>`;
+  }
+
+  function formatPctShort(value) {
+    if (value == null || value === '') return '—';
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '—';
+    return `${Math.round(n)}%`;
+  }
+
+  function categoryPct(row, categoryName) {
+    const map = (row && row.category_accuracy) || {};
+    return map[categoryName];
+  }
+
+  function detailedSummary(rows) {
+    const items = rows || [];
+    let correct = 0;
+    let gt = 0;
+    let missed = 0;
+    let wrong = 0;
+    let invented = 0;
+    const wers = [];
+    const lats = [];
+    const rtfs = [];
+    items.forEach((row) => {
+      correct += Number(row.correct) || 0;
+      gt += Number(row.ground_truth) || 0;
+      missed += Number(row.missed) || 0;
+      wrong += Number(row.wrong) || 0;
+      invented += Number(row.invented) || 0;
+      if (row.asr_wer_percent != null && Number.isFinite(Number(row.asr_wer_percent))) {
+        wers.push(Number(row.asr_wer_percent));
+      }
+      if (row.latency_seconds != null && Number.isFinite(Number(row.latency_seconds))) {
+        lats.push(Number(row.latency_seconds));
+      }
+      if (row.realtime_factor != null && Number.isFinite(Number(row.realtime_factor))) {
+        rtfs.push(Number(row.realtime_factor));
+      }
+    });
+    const mean = (arr, digits) => {
+      if (!arr.length) return null;
+      const scale = 10 ** (digits == null ? 1 : digits);
+      return Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * scale) / scale;
+    };
+    return {
+      fact_accuracy: gt ? Math.round((100 * correct) / gt) : null,
+      correct,
+      ground_truth: gt,
+      missed,
+      wrong,
+      invented,
+      mean_wer: mean(wers, 1),
+      mean_latency: mean(lats, 1),
+      mean_rtf: mean(rtfs, 2),
+    };
+  }
+
+  function columnsPanelHtml() {
+    const open = recordingsColumnsOpen;
+    const options = DETAILED_COLUMNS.map((col) => {
+      const checked = visibleDetailedColumns.indexOf(col.key) !== -1;
+      const disabled = col.always ? ' disabled' : '';
+      return `
+        <label class="recordings-col-option">
+          <input type="checkbox" data-recordings-col="${esc(col.key)}"
+                 ${checked ? 'checked' : ''}${disabled}>
+          <span>${esc(col.label)}</span>
+        </label>`;
+    }).join('');
+    return `
+      <div class="recordings-columns-box${open ? ' is-open' : ''}">
+        <button type="button" class="recordings-columns-toggle"
+                data-recordings-columns-toggle
+                aria-expanded="${open ? 'true' : 'false'}">
+          Columns <span class="recordings-columns-caret" aria-hidden="true">${open ? '▴' : '▾'}</span>
+        </button>
+        <div class="recordings-columns-grid"${open ? '' : ' hidden'}>
+          ${options}
+        </div>
+      </div>`;
+  }
+
+  function detailedSummaryHtml(rows) {
+    const s = detailedSummary(rows);
+    const fact = s.fact_accuracy == null
+      ? '—'
+      : `${s.fact_accuracy}% (${s.correct}/${s.ground_truth})`;
+    const wer = s.mean_wer == null ? '—' : `${s.mean_wer}%`;
+    const lat = s.mean_latency == null ? '—' : `${Math.round(s.mean_latency)}s`;
+    const rtf = s.mean_rtf == null ? '—' : Number(s.mean_rtf).toFixed(2);
+    return `
+      <div class="recordings-detailed-summary">
+        <span><strong>Fact accuracy:</strong> ${esc(fact)}</span>
+        <span><strong>Missed:</strong> ${esc(formatCount(s.missed))}</span>
+        <span><strong>Wrong:</strong> ${esc(formatCount(s.wrong))}</span>
+        <span><strong>Invented:</strong> ${esc(formatCount(s.invented))}</span>
+        <span><strong>Mean ASR WER:</strong> ${esc(wer)}</span>
+        <span><strong>Mean latency:</strong> ${esc(lat)}</span>
+        <span><strong>Real-time factor:</strong> ${esc(rtf)}</span>
+      </div>`;
   }
 
   function recordingStatusBadge(row) {
@@ -372,10 +516,54 @@
       </tr>`;
   }
 
+  function detailedCellHtml(col, row) {
+    const data = row || {};
+    const hasGt = data.has_ground_truth !== false && Number(data.ground_truth) > 0;
+    const cats = data.category_accuracy || {};
+    if (col.key === 'flag') {
+      return data.has_safety_flag
+        ? '<span class="recordings-flag" title="Safety flag">🚩</span>'
+        : '';
+    }
+    if (col.key === 'recording') {
+      const tc = data.test_case_number || data.tc_ref || data.test_id || '—';
+      const testId = data.test_id || '';
+      return `<a href="#detail/${encodeURIComponent(testId)}" data-open-recording="${esc(testId)}">${esc(tc)}</a>`;
+    }
+    if (col.key === 'duration') return esc(formatDurationMins(data.duration_seconds));
+    if (col.key === 'fact_accuracy') {
+      const pct = data.fact_accuracy_percent != null
+        ? data.fact_accuracy_percent
+        : (hasGt ? (100 * Number(data.correct || 0) / Number(data.ground_truth || 1)) : null);
+      return esc(formatPctShort(pct));
+    }
+    if (col.category) return esc(formatPctShort(cats[col.category]));
+    if (col.key === 'missed') return hasGt ? esc(formatCount(data.missed)) : '—';
+    if (col.key === 'wrong') return hasGt ? esc(formatCount(data.wrong)) : '—';
+    if (col.key === 'invented') return hasGt ? esc(formatCount(data.invented)) : '—';
+    if (col.key === 'asr_wer') return esc(formatPctShort(data.asr_wer_percent));
+    if (col.key === 'latency') return esc(formatLatencySecs(data.latency_seconds));
+    if (col.key === 'status') return recordingStatusBadge(data);
+    return '—';
+  }
+
+  function detailedRowHtml(row) {
+    const data = row || {};
+    const testId = data.test_id || '';
+    const cols = DETAILED_COLUMNS.filter((col) => visibleDetailedColumns.indexOf(col.key) !== -1);
+    const cells = cols.map((col) => {
+      const cls = col.key === 'flag'
+        ? 'flag-col'
+        : (col.key === 'recording' ? 'recording-name' : '');
+      return `<td class="${cls}">${detailedCellHtml(col, data)}</td>`;
+    }).join('');
+    return `<tr class="recording-row" data-test-id="${esc(testId)}">${cells}</tr>`;
+  }
+
   function recordingsFilterButtons(total) {
     const filters = [
       { key: '', label: `All ${total}` },
-      { key: 'safety_flag', label: 'Safety flag' },
+      { key: 'safety_flag', label: '🚩 Safety flag' },
       { key: 'review', label: 'Needs review' },
       { key: 'pass', label: 'Passed' },
       { key: 'invented', label: 'Has invented fact' },
@@ -386,30 +574,40 @@
     ];
     return filters.map((item) => `
       <button type="button" class="recordings-filter-btn${recordingsFilter === item.key ? ' active' : ''}"
-              data-recordings-filter="${esc(item.key)}">${esc(item.label)}</button>
+              data-recordings-filter="${esc(item.key)}">${item.label}</button>
     `).join('');
   }
 
-  function recordingsHtml(rows, total) {
-    const items = rows || [];
-    const all = total == null ? items.length : total;
+  function recordingsViewToggleHtml() {
+    const detailed = recordingsViewMode === 'detailed';
+    return `
+      <div class="recordings-view-toggle" role="group" aria-label="Recordings view">
+        <span class="recordings-view-label${detailed ? '' : ' is-active'}">Clinical View</span>
+        <button type="button" class="recordings-view-switch${detailed ? ' is-detailed' : ''}"
+                data-recordings-view-toggle
+                aria-pressed="${detailed ? 'true' : 'false'}"
+                aria-label="Toggle Clinical View and Detailed View">
+          <span class="recordings-view-knob" aria-hidden="true"></span>
+        </button>
+        <span class="recordings-view-label${detailed ? ' is-active' : ''}">Detailed View</span>
+      </div>`;
+  }
+
+  function clinicalTableHtml(items) {
     const body = items.length
       ? items.map(recordingRowHtml).join('')
       : '<tr><td colspan="9" class="recordings-empty">No recordings in the current filter.</td></tr>';
     return `
-      <div class="accuracy-table-head">
-        <div>
-          <h3>Recordings</h3>
-          <p class="recordings-subtitle">Click any row to open the fact-level review</p>
-        </div>
-      </div>
-      <div class="recordings-filters">${recordingsFilterButtons(all)}</div>
-      <p class="recordings-count">Showing ${items.length} of ${all}</p>
       <div class="recordings-table-wrap">
         <table class="clinical-accuracy-table recordings-table">
           <thead>
             <tr>
-              <th></th>
+              <th class="flag-col">
+                <div class="flag-header-stack">
+                  ${flagSortControlHtml()}
+                  <span class="recordings-flag-header" aria-hidden="true">🚩</span>
+                </div>
+              </th>
               <th>Recording</th>
               <th>Duration (mins)</th>
               <th>Correct / GT</th>
@@ -420,11 +618,58 @@
               <th>Status</th>
             </tr>
           </thead>
-          <tbody>
-            ${body}
-          </tbody>
+          <tbody>${body}</tbody>
         </table>
       </div>`;
+  }
+
+  function detailedTableHtml(items) {
+    const cols = DETAILED_COLUMNS.filter((col) => visibleDetailedColumns.indexOf(col.key) !== -1);
+    const head = cols.map((col) => {
+      if (col.key === 'flag') {
+        return `
+          <th class="flag-col">
+            <div class="flag-header-stack flag-header-stack-vertical">
+              <span class="recordings-flag-header" aria-hidden="true">🚩</span>
+              ${flagSortControlHtml()}
+            </div>
+          </th>`;
+      }
+      return `<th>${esc(col.label)}</th>`;
+    }).join('');
+    const body = items.length
+      ? items.map(detailedRowHtml).join('')
+      : `<tr><td colspan="${cols.length}" class="recordings-empty">No recordings in the current filter.</td></tr>`;
+    return `
+      <div class="recordings-detailed-panel">
+        ${columnsPanelHtml()}
+        ${detailedSummaryHtml(items)}
+        <div class="recordings-table-wrap recordings-table-wrap-detailed">
+          <table class="clinical-accuracy-table recordings-table recordings-table-detailed">
+            <thead><tr>${head}</tr></thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  function recordingsHtml(rows, total) {
+    const items = rows || [];
+    const all = total == null ? items.length : total;
+    const detailed = recordingsViewMode === 'detailed';
+    return `
+      <div class="accuracy-table-head recordings-head">
+        <div class="recordings-head-left">
+          <h3>Recordings</h3>
+          ${detailed
+            ? '<span class="recordings-subtitle-pill">Percentages and technical fields · same underlying data</span>'
+            : '<p class="recordings-subtitle">Click any row to open the fact-level review</p>'}
+        </div>
+        ${recordingsViewToggleHtml()}
+      </div>
+      <div class="recordings-filters">${recordingsFilterButtons(all)}</div>
+      <p class="recordings-count">Showing ${items.length} of ${all}</p>
+      ${detailed ? detailedTableHtml(items) : clinicalTableHtml(items)}`;
   }
 
   function passRuleHtml() {
@@ -516,6 +761,32 @@
     rec.querySelectorAll('[data-recordings-filter]').forEach((btn) => {
       btn.addEventListener('click', () => {
         recordingsFilter = btn.getAttribute('data-recordings-filter') || '';
+        paintRecordings(null, lastRecordingsTotal);
+      });
+    });
+    rec.querySelector('[data-recordings-view-toggle]')?.addEventListener('click', () => {
+      recordingsViewMode = recordingsViewMode === 'clinical' ? 'detailed' : 'clinical';
+      paintRecordings(null, lastRecordingsTotal);
+    });
+    rec.querySelector('[data-recordings-flag-sort]')?.addEventListener('click', () => {
+      recordingsSortDir = recordingsSortDir === 'up' ? 'down' : 'up';
+      paintRecordings(null, lastRecordingsTotal);
+    });
+    rec.querySelector('[data-recordings-columns-toggle]')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      recordingsColumnsOpen = !recordingsColumnsOpen;
+      paintRecordings(null, lastRecordingsTotal);
+    });
+    rec.querySelectorAll('[data-recordings-col]').forEach((input) => {
+      input.addEventListener('change', () => {
+        const key = input.getAttribute('data-recordings-col') || '';
+        const spec = DETAILED_COLUMNS.find((col) => col.key === key);
+        if (!key || (spec && spec.always)) return;
+        if (input.checked) {
+          if (visibleDetailedColumns.indexOf(key) === -1) visibleDetailedColumns.push(key);
+        } else {
+          visibleDetailedColumns = visibleDetailedColumns.filter((item) => item !== key);
+        }
         paintRecordings(null, lastRecordingsTotal);
       });
     });

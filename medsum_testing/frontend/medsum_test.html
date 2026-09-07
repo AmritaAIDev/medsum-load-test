@@ -222,130 +222,11 @@
         </section>
         -->
 
+        <!-- Recent Test Runs table, Summary, and Clinical Quality Bands hidden for now
         <div class="results-stack" data-results-source="dashboard">
-          <div class="table-panel" data-results-source="dashboard">
-            <div class="table-toolbar">
-              <h3 class="table-toolbar-title">Recent Test Runs</h3>
-              <div class="table-toolbar-right">
-                <div class="export-dropdown" data-batch-export>
-                  <button type="button" class="btn-outline" data-batch-export-toggle
-                          aria-haspopup="true" aria-expanded="false">Download Report ▾</button>
-                  <div class="export-menu" hidden>
-                    <button type="button" class="export-menu-item" data-download-total-report="pdf">Run report PDF</button>
-                    <button type="button" class="export-menu-item" data-download-total-report="excel">Run report Excel</button>
-                    <div class="export-menu-divider" role="separator"></div>
-                    <button type="button" class="export-menu-item" data-download-soap-batch="pdf">SOAP batch PDF</button>
-                    <button type="button" class="export-menu-item" data-download-soap-batch="excel">SOAP batch Excel</button>
-                    <button type="button" class="export-menu-item" data-download-soap-batch="csv">SOAP batch CSV</button>
-                    <button type="button" class="export-menu-item" data-download-soap-batch="html">SOAP batch HTML</button>
-                    <button type="button" class="export-menu-item" data-download-soap-batch="json">SOAP batch JSON</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="table-tabs" data-table-tabs>
-              <button type="button" class="table-tab active"
-                      data-table-tab="results"
-                      onclick="switchTableTab('results', this)">Results</button>
-              <button type="button" class="table-tab"
-                      data-table-tab="latency"
-                      onclick="switchTableTab('latency', this)">Latency</button>
-              <div class="table-tabs-right">
-                <input type="search" class="config-input table-row-filter"
-                       data-table-filter
-                       placeholder="Filter by Test Case ID or file"
-                       oninput="onResultsTableFilter(this)">
-              </div>
-            </div>
-            <div id="batch-status-bar" class="batch-status-bar"></div>
-            <div class="table-wrap">
-              <table class="runs-table" data-table="results-runs">
-                <thead>
-                  <tr>
-                    <th>Test Case ID</th>
-                    <th>Audio File</th>
-                    <th>Language</th>
-                    <th>SOAP accuracy</th>
-                    <th>Clinical Quality</th>
-                    <th>Execution Status</th>
-                  </tr>
-                </thead>
-                <tbody id="test-runs-tbody">
-                  <tr><td colspan="6" class="empty-row">Loading…</td></tr>
-                </tbody>
-              </table>
-              <p class="latency-note" data-latency-note hidden>
-                SOAP is Flask <code>llm-time</code> (SOAP/summary generation).
-                Missing timings show as unavailable.
-              </p>
-              <div class="table-pager" data-table-pager></div>
-            </div>
-          </div>
-
-          <section class="card run-summary" data-section="run-summary"
-                   data-results-source="dashboard">
-            <h3>Summary</h3>
-            <div class="run-summary-body">
-              <div class="run-summary-grid">
-                <div>
-                  <div class="stat-value" data-summary-field="total_test_cases">—</div>
-                  <div class="stat-label">Total test cases</div>
-                </div>
-                <div>
-                  <div class="stat-value" data-summary-field="done_tests">—</div>
-                  <div class="stat-label">Done</div>
-                </div>
-                <div class="stat-card-tip" data-accuracy-overall-tip data-tooltip-trigger>
-                  <div class="stat-value" data-summary-field="average_accuracy">—</div>
-                  <div class="stat-label">Average accuracy</div>
-                  <div class="reason-popup stat-tip-popup" role="tooltip"></div>
-                </div>
-                <div>
-                  <div class="stat-value" data-summary-field="average_latency">—</div>
-                  <div class="stat-label">Average latency</div>
-                </div>
-                <div>
-                  <div class="stat-value" data-summary-field="selected_model">—</div>
-                  <div class="stat-label">Selected GPT/LLM model</div>
-                </div>
-              </div>
-              <aside class="quality-bands" data-quality-bands>
-                <div class="quality-bands-title">Clinical Quality Bands</div>
-                <ul class="quality-bands-list">
-                  <li>
-                    <span class="quality-band-dot quality-acceptable" aria-hidden="true"></span>
-                    <span class="quality-band-copy">
-                      <span class="quality-band-name">Clinically Acceptable</span>
-                      <span class="quality-band-range">90–100%</span>
-                    </span>
-                  </li>
-                  <li>
-                    <span class="quality-band-dot quality-minor" aria-hidden="true"></span>
-                    <span class="quality-band-copy">
-                      <span class="quality-band-name">Minor Deviation</span>
-                      <span class="quality-band-range">80–89%</span>
-                    </span>
-                  </li>
-                  <li>
-                    <span class="quality-band-dot quality-moderate" aria-hidden="true"></span>
-                    <span class="quality-band-copy">
-                      <span class="quality-band-name">Moderate Deviation</span>
-                      <span class="quality-band-range">70–79%</span>
-                    </span>
-                  </li>
-                  <li>
-                    <span class="quality-band-dot quality-major" aria-hidden="true"></span>
-                    <span class="quality-band-copy">
-                      <span class="quality-band-name">Major Deviation</span>
-                      <span class="quality-band-range">0–69%</span>
-                    </span>
-                  </li>
-                </ul>
-              </aside>
-            </div>
-            <p class="run-summary-meta" data-summary-field="meta"></p>
-          </section>
+          ...
         </div>
+        -->
       </div>
 
       <div id="runs-view" class="page-view" data-page="runs">
@@ -782,45 +663,68 @@
 
       </div>
 
-      <!-- Detail View -->
+      <!-- Detail View (Case details) -->
       <div id="detail-view" class="page-view" data-page="detail" data-open-test-id="">
-        <div class="detail-info-bar">
-          <button id="back-btn" class="btn-secondary detail-back-btn" type="button"
-                  onclick="backToDashboardFromDetail()">← Back to Dashboard</button>
-          <dl class="detail-info-pairs" id="detail-info-pairs"
-              data-ids="detail-tc-ref detail-batch-ref"></dl>
-          <div class="detail-info-actions">
-            <div class="export-dropdown" id="export-menu">
-              <button id="export-btn" class="btn-outline" type="button"
-                      aria-haspopup="true" aria-expanded="false">Export ▾</button>
-              <div class="export-menu" hidden>
-                <button id="pdf-btn" class="export-menu-item" type="button">Test report PDF</button>
-                <button id="excel-btn" class="export-menu-item" type="button">Test report Excel</button>
-                <div class="export-menu-divider" role="separator"></div>
-                <button class="export-menu-item" type="button" data-soap-gt-export="pdf">SOAP comparison PDF</button>
-                <button class="export-menu-item" type="button" data-soap-gt-export="excel">SOAP comparison Excel</button>
-                <button class="export-menu-item" type="button" data-soap-gt-export="csv">SOAP comparison CSV</button>
-                <button class="export-menu-item" type="button" data-soap-gt-export="html">SOAP comparison HTML</button>
-                <button class="export-menu-item" type="button" data-soap-gt-export="json">SOAP comparison JSON</button>
-              </div>
-            </div>
+        <div class="case-top-bar">
+          <button id="back-btn" class="case-back-btn" type="button"
+                  onclick="backToDashboardFromDetail()">← Back to recordings</button>
+          <span class="case-top-tc" id="case-top-tc"></span>
+          <span class="case-top-lang" id="case-top-lang"></span>
+          <span class="case-top-pill case-top-deid" id="case-top-deid" hidden>De-identified</span>
+          <span class="case-top-status" id="case-top-status" hidden></span>
+        </div>
+
+        <div class="case-detail-card" id="case-detail-card">
+          <div class="case-detail-header" id="case-detail-header" aria-label="Case summary"></div>
+
+          <div class="case-detail-tabs" id="case-detail-tabs" role="tablist"
+               aria-label="Case detail sections">
+            <button type="button" class="case-tab is-active" role="tab"
+                    data-case-tab="clinical" aria-selected="true">Clinical Facts</button>
+            <button type="button" class="case-tab" role="tab"
+                    data-case-tab="soap" aria-selected="false">SOAP</button>
+            <button type="button" class="case-tab" role="tab"
+                    data-case-tab="translation" aria-selected="false">Translation</button>
+            <button type="button" class="case-tab" role="tab"
+                    data-case-tab="transcription" aria-selected="false">Transcription</button>
+            <button type="button" class="case-tab" role="tab"
+                    data-case-tab="audio" aria-selected="false">Audio / Transcript</button>
+          </div>
+
+          <div class="case-tab-panel" data-case-panel="clinical" id="case-panel-clinical"
+               role="tabpanel">
+            <div id="recording-clinical-detail" data-recording-clinical-detail hidden></div>
+          </div>
+          <div class="case-tab-panel" data-case-panel="soap" id="case-panel-soap"
+               role="tabpanel" hidden>
+            <div id="gt-comparison-host"></div>
+          </div>
+          <div class="case-tab-panel" data-case-panel="translation" id="case-panel-translation"
+               role="tabpanel" hidden>
+            <div id="case-translation-host"></div>
+          </div>
+          <div class="case-tab-panel" data-case-panel="transcription" id="case-panel-transcription"
+               role="tabpanel" hidden>
+            <div id="case-transcription-host"></div>
+          </div>
+          <div class="case-tab-panel" data-case-panel="audio" id="case-panel-audio"
+               role="tabpanel" hidden>
+            <div id="detail-case-materials"></div>
           </div>
         </div>
 
-        <div id="detail-stat-block">
+        <!-- Legacy hosts kept for existing export / comparison helpers -->
+        <div id="detail-stat-block" hidden>
           <div id="accuracy-summary"></div>
         </div>
         <div id="latency-section" class="latency-strip" hidden></div>
-
-        <div id="detail-case-materials" hidden></div>
-
+        <div id="detail-info-pairs" hidden></div>
         <div id="flask-error-banner"
              style="display:none; background:#FFF3CD; color:#856404;
-                    padding:0.75rem 1rem; border-radius:8px; margin-bottom:1rem;
+                    padding:0.75rem 1rem; border-radius:8px; margin:1rem 0;
                     font-size:13px; border:1px solid #FFECB5;">
         </div>
-
-        <div id="detail-comparison-tabs" class="table-panel" data-detail-cmp-panel>
+        <div id="detail-comparison-tabs" class="table-panel" data-detail-cmp-panel hidden>
           <div class="table-tabs" data-detail-cmp-tabs>
             <button type="button" class="table-tab active"
                     data-detail-cmp-tab="summary"
@@ -834,7 +738,6 @@
           </div>
           <div id="detail-cmp-summary" class="table-tab-content"
                data-detail-cmp-panel-id="summary">
-            <div id="gt-comparison-host"></div>
           </div>
           <div id="detail-cmp-detail" class="table-tab-content"
                data-detail-cmp-panel-id="detail" hidden>
@@ -1278,6 +1181,7 @@
   <script src="/js/latency_analysis.js"></script>
   <script src="/js/run_summary.js"></script>
   <script src="/js/accuracy_table.js"></script>
+  <script src="/js/recording_detail.js"></script>
   <script src="/js/accuracy_chart.js"></script>
   <script src="/js/results_actions.js"></script>
   <script src="/js/results_table.js"></script>

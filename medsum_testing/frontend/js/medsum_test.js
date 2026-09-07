@@ -2038,7 +2038,7 @@ async function onDashboardFilterChange() {
   }
 
   updateDashboardStats(data, selectedIds);
-  renderTestRunsTable(data.map(normalizeResultSummary));
+  // Recent Test Runs table hidden on dashboard.
 }
 
 function selectedModelFromUi() {
@@ -2124,7 +2124,7 @@ function updateDashboardStats(data, selectedBatchIds) {
   );
   set('stat-reports', reports);
   fillBatchOverview(rows);
-  fillRunSummary(rows, 'dashboard');
+  // Dashboard Summary / Clinical Quality Bands hidden.
   refreshAccuracyTable(rows, selected);
 
   renderAccuracyChart(rows, selected);
@@ -2177,6 +2177,51 @@ function switchTableTab(tabId, btn) {
   const persist = sessionPersistApi();
   if (persist.saveTableTab) persist.saveTableTab(source, tabId);
   paintResultsTable(source, cachedRowsForSource(source));
+}
+
+const CASE_DETAIL_TABS = ['clinical', 'soap', 'translation', 'transcription', 'audio'];
+const caseDetailUi = {
+  tab: 'clinical',
+  scroll: { clinical: 0, soap: 0, translation: 0, transcription: 0, audio: 0 },
+};
+
+function switchCaseDetailTab(tabId, btn) {
+  const next = CASE_DETAIL_TABS.includes(tabId) ? tabId : 'clinical';
+  caseDetailUi.scroll[caseDetailUi.tab] = window.scrollY;
+  caseDetailUi.tab = next;
+  const root = document.getElementById('case-detail-tabs');
+  if (root) {
+    root.querySelectorAll('[data-case-tab]').forEach((el) => {
+      const active = el.getAttribute('data-case-tab') === next;
+      el.classList.toggle('is-active', active);
+      el.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+  }
+  CASE_DETAIL_TABS.forEach((id) => {
+    const panel = document.querySelector(`[data-case-panel="${id}"]`);
+    if (panel) panel.hidden = id !== next;
+  });
+  window.scrollTo(0, caseDetailUi.scroll[next] || 0);
+  if (btn && btn.focus) btn.focus();
+}
+
+function resetCaseDetailTabs() {
+  caseDetailUi.tab = 'clinical';
+  caseDetailUi.scroll = {
+    clinical: 0, soap: 0, translation: 0, transcription: 0, audio: 0,
+  };
+  switchCaseDetailTab('clinical');
+}
+
+function bindCaseDetailTabs() {
+  const root = document.getElementById('case-detail-tabs');
+  if (!root || root.dataset.bound === '1') return;
+  root.dataset.bound = '1';
+  root.addEventListener('click', (event) => {
+    const btn = event.target && event.target.closest('[data-case-tab]');
+    if (!btn) return;
+    switchCaseDetailTab(btn.getAttribute('data-case-tab') || 'clinical', btn);
+  });
 }
 
 const DETAIL_CMP_TABS = ['summary', 'detail', 'soap-gt-report'];
@@ -3491,6 +3536,7 @@ function renderDetailPage(result) {
   }
   const detailView = document.getElementById('detail-view');
   updateDetailBackLabel();
+  bindCaseDetailTabs();
 
   const model = testCaseViewApi().detailViewModel
     ? testCaseViewApi().detailViewModel(result)
@@ -3500,7 +3546,10 @@ function renderDetailPage(result) {
   detailView.setAttribute('data-open-audio', model.audio_filename || '');
   detailView.setAttribute('data-gt-source', model.ground_truth_source || '');
 
-  renderInfoBar(result, model);
+  renderCaseTopBar(result, model);
+  renderCaseDetailHeader(null, result, model);
+  resetCaseDetailTabs();
+
   const cmpHost = document.getElementById('gt-comparison-host');
   if (cmpHost && window.MedsumSoapSummaryNav) {
     window.MedsumSoapSummaryNav.mount(cmpHost, result);
@@ -3509,22 +3558,35 @@ function renderDetailPage(result) {
   if (soapGtHost && window.MedsumSoapGtComparisonReport) {
     window.MedsumSoapGtComparisonReport.mount(soapGtHost, result);
   }
-  resetDetailComparisonTabs();
+
+  // Keep legacy accuracy summary for any helpers that still read it; keep it hidden.
   renderAccuracySummary(result, model);
-  const legend = document.getElementById('detail-status-legend');
-  if (legend) {
-    legend.hidden = true;
-    legend.innerHTML = '';
+
+  if (window.MedsumRecordingDetail && window.MedsumRecordingDetail.mountFromResult) {
+    window.MedsumRecordingDetail.mountFromResult(result).then((payload) => {
+      if (payload) renderCaseDetailHeader(payload, result, model);
+    }).catch(() => {});
   }
+
+  const translationHost = document.getElementById('case-translation-host');
+  if (translationHost) {
+    translationHost.innerHTML = renderTranslationComparison(result) || '<p class="empty-sub">No translation comparison available.</p>';
+    bindTranslationMetricsInfo(translationHost);
+  }
+  const transcriptionHost = document.getElementById('case-transcription-host');
+  if (transcriptionHost) {
+    transcriptionHost.innerHTML = renderTranscriptionComparison(result) || '<p class="empty-sub">No transcription comparison available.</p>';
+  }
+  const materialsHost = document.getElementById('detail-case-materials');
+  if (materialsHost) {
+    materialsHost.hidden = false;
+    materialsHost.innerHTML = renderCaseMaterials(result, model);
+  }
+
   const latency = document.getElementById('latency-section');
   if (latency) {
     latency.style.display = 'none';
     latency.innerHTML = '';
-  }
-  const materialsHost = document.getElementById('detail-case-materials');
-  if (materialsHost) {
-    materialsHost.hidden = true;
-    materialsHost.innerHTML = '';
   }
 
   const flaskError = result.flask_error || result.transcription_result?.error;
@@ -3552,6 +3614,7 @@ function renderDetailPage(result) {
       wrapDetailCmpSection('medicine', renderMedicineComparison(result)),
       wrapDetailCmpSection('medication-validation', renderMedicationValidation(result)),
     ].filter(Boolean).join('');
+    bindTranslationMetricsInfo(sections);
   }
 
   const errorsSection = document.getElementById('errors-section');
@@ -3560,6 +3623,123 @@ function renderDetailPage(result) {
     document.getElementById('errors-box').textContent = result.errors.join('\n\n');
   } else if (errorsSection) {
     errorsSection.style.display = 'none';
+  }
+}
+
+function caseStatusMeta(result, clinicalPayload) {
+  const summary = (clinicalPayload && clinicalPayload.summary) || {};
+  const raw = String(
+    summary.status
+    || result.status
+    || result.final_result
+    || ''
+  ).toLowerCase();
+  if (raw === 'pass' || raw === 'passed' || raw === 'high') {
+    return { key: 'pass', label: 'Pass' };
+  }
+  if (raw === 'fail' || raw === 'failed' || raw === 'low') {
+    return { key: 'fail', label: 'Fail' };
+  }
+  if (raw === 'na' || raw === 'n/a') {
+    return { key: 'na', label: 'N/A' };
+  }
+  return { key: 'review', label: 'Needs review' };
+}
+
+function isDeidentified(result) {
+  const data = result || {};
+  if (data.de_identified === false || data.deidentified === false) return false;
+  if (data.de_identified || data.deidentified || data.phi_removed || data.is_deidentified) {
+    return true;
+  }
+  // Default for clinical review cases when language/audio present (mockup shows pill).
+  return !!(data.language || data.audio_filename || data.tc_ref);
+}
+
+function renderCaseTopBar(result, model) {
+  const tcEl = document.getElementById('case-top-tc');
+  const langEl = document.getElementById('case-top-lang');
+  const deidEl = document.getElementById('case-top-deid');
+  const statusEl = document.getElementById('case-top-status');
+  const tc = (model && (model.tc_ref || model.test_id))
+    || result.tc_ref
+    || result.test_case_id
+    || '—';
+  const lang = (model && model.language) || result.language || '';
+  if (tcEl) tcEl.textContent = tc;
+  if (langEl) {
+    langEl.textContent = lang;
+    langEl.hidden = !lang;
+  }
+  if (deidEl) deidEl.hidden = !isDeidentified(result);
+  if (statusEl) {
+    const meta = caseStatusMeta(result, null);
+    statusEl.textContent = meta.label;
+    statusEl.className = `case-top-status is-${meta.key}`;
+    statusEl.hidden = false;
+  }
+}
+
+function formatCaseDuration(seconds) {
+  if (seconds == null || seconds === '') return '—';
+  const n = Number(seconds);
+  if (!Number.isFinite(n) || n < 0) return '—';
+  if (n < 60) return `${Math.round(n)}s`;
+  const m = Math.floor(n / 60);
+  const rem = Math.round(n % 60);
+  return `${m}m ${rem}s`;
+}
+
+function renderCaseDetailHeader(clinicalPayload, result, model) {
+  const el = document.getElementById('case-detail-header');
+  if (!el) return;
+  const s = (clinicalPayload && clinicalPayload.summary) || {};
+  const r = (clinicalPayload && clinicalPayload.recording) || {};
+  const tc = r.test_case_number
+    || (model && model.tc_ref)
+    || result.tc_ref
+    || result.test_case_id
+    || '—';
+  const duration = r.duration_seconds != null
+    ? r.duration_seconds
+    : (model && model.audio_length);
+  const latency = s.mean_latency_seconds;
+  const wer = s.asr_wer;
+  const correct = s.total_correct != null ? s.total_correct : '';
+  const gt = s.total_ground_truth != null ? s.total_ground_truth : '';
+  const missed = s.total_missed != null ? s.total_missed : 0;
+  const wrong = s.total_wrong != null ? s.total_wrong : 0;
+  const invented = s.total_invented != null ? s.total_invented : 0;
+  const safety = s.safety_concerns != null ? s.safety_concerns : 0;
+  const werLabel = wer == null || wer === '' ? '—' : `${Math.round(Number(wer))}%`;
+  const latLabel = latency == null || latency === ''
+    ? '—'
+    : `${Math.round(Number(latency))}s`;
+  const correctLabel = (correct !== '' && gt !== '')
+    ? `Correct ${correct}/${gt}`
+    : 'Correct —';
+
+  el.innerHTML = `
+    <div class="case-header-left">
+      <span class="case-header-tc">${esc(tc)}</span>
+      <span class="case-header-meta">
+        ${esc(formatCaseDuration(duration))} audio · ${esc(latLabel)} latency · ASR WER ${esc(werLabel)}
+      </span>
+    </div>
+    <div class="case-header-stats" aria-label="Fact outcome summary">
+      <span class="case-hstat case-hstat-correct">${esc(correctLabel)}</span>
+      <span class="case-hstat case-hstat-missed">${esc(String(missed))} missed</span>
+      <span class="case-hstat case-hstat-wrong">${esc(String(wrong))} wrong</span>
+      <span class="case-hstat case-hstat-invented">${esc(String(invented))} invented</span>
+      <span class="case-hstat case-hstat-safety">${esc(String(safety))} safety concerns</span>
+    </div>`;
+
+  const statusEl = document.getElementById('case-top-status');
+  if (statusEl && clinicalPayload) {
+    const meta = caseStatusMeta(result, clinicalPayload);
+    statusEl.textContent = meta.label;
+    statusEl.className = `case-top-status is-${meta.key}`;
+    statusEl.hidden = false;
   }
 }
 
@@ -3892,14 +4072,14 @@ function renderTranslationComparison(result) {
   const transCompEarly = result.translation_comparison || {};
   if (!gtTrans && !genTrans) {
     const reason = transCompEarly.skip_reason || '';
-    if (!reason) return '';
+    if (!reason) return renderTranslationQualityMetrics(result);
     return makeCollapsible('translation', '🌐 Translation Comparison',
       `<p class="skip-reason-banner">${esc(reason)}</p>`, {
       defaultOpen: true,
       score: null,
       scoreReason: reason,
       scoreLabel: 'Translation',
-    });
+    }) + renderTranslationQualityMetrics(result);
   }
 
   const comp = result.translation_comparison || {};
@@ -3908,11 +4088,6 @@ function renderTranslationComparison(result) {
   const translationTime = tr['translation-time'] ?? tr?.time?.Translation;
 
   const { gtHtml, genHtml } = computeWordDiff(gtTrans, genTrans);
-
-  const diffs = comp.differences || comp.medical_differences || [];
-  const diffsHtml = diffs.length === 0 ? '' : `
-        <div class="diff-section-label" style="margin-top:0.75rem">Differences Found</div>
-        ${diffs.map(d => formatDiffItem(d, { showType: false })).join('')}`;
 
   const scoreHtml = score != null ? `
         <div class="section-score-row">
@@ -3940,8 +4115,7 @@ function renderTranslationComparison(result) {
                 <div class="diff-col-header">Generated Translation</div>
                 <div class="diff-text">${genHtml || '<em>No translation</em>'}</div>
             </div>
-        </div>
-        ${diffsHtml}`;
+        </div>`;
 
   return makeCollapsible('translation', '🌐 Translation Comparison', content, {
     defaultOpen: true,
@@ -3950,7 +4124,401 @@ function renderTranslationComparison(result) {
     scoreLabel: 'Translation',
     timeSeconds: translationTime,
     timeLabel: 'Translation',
+  }) + renderTranslationQualityMetrics(result);
+}
+
+function translationMetricValue(sources, keys) {
+  for (let i = 0; i < sources.length; i++) {
+    const src = sources[i] || {};
+    for (let j = 0; j < keys.length; j++) {
+      const raw = src[keys[j]];
+      if (raw == null || raw === '') continue;
+      if (typeof raw === 'object' && raw.value != null) return raw.value;
+      return raw;
+    }
+  }
+  return null;
+}
+
+function formatTranslationMetric(value, style) {
+  if (value == null || value === '') return '—';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  if (style === 'ratio01') {
+    const ratio = n > 1 ? n / 100 : n;
+    return ratio.toFixed(2);
+  }
+  if (style === 'percent') {
+    const pct = n <= 1 ? n * 100 : n;
+    const rounded = Math.round(pct * 10) / 10;
+    return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}%`;
+  }
+  if (style === 'score') {
+    const score = n <= 1 ? n * 100 : n;
+    const rounded = Math.round(score * 10) / 10;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  }
+  return String(value);
+}
+
+const TQ_STOPWORDS = {
+  a: 1, an: 1, the: 1, and: 1, or: 1, but: 1, if: 1, then: 1, else: 1, when: 1,
+  at: 1, by: 1, for: 1, with: 1, about: 1, against: 1, between: 1, into: 1,
+  through: 1, during: 1, before: 1, after: 1, above: 1, below: 1, to: 1, from: 1,
+  up: 1, down: 1, in: 1, out: 1, on: 1, off: 1, over: 1, under: 1, again: 1,
+  further: 1, once: 1, here: 1, there: 1, all: 1, any: 1, both: 1, each: 1,
+  few: 1, more: 1, most: 1, other: 1, some: 1, such: 1, no: 1, nor: 1, not: 1,
+  only: 1, own: 1, same: 1, so: 1, than: 1, too: 1, very: 1, can: 1, will: 1,
+  just: 1, should: 1, now: 1, is: 1, are: 1, was: 1, were: 1, be: 1, been: 1,
+  being: 1, have: 1, has: 1, had: 1, do: 1, does: 1, did: 1, of: 1, as: 1, it: 1,
+  this: 1, that: 1, these: 1, those: 1, he: 1, she: 1, they: 1, them: 1, his: 1,
+  her: 1, their: 1, we: 1, you: 1, i: 1, me: 1, my: 1, our: 1, your: 1,
+  patient: 1, doctor: 1, said: 1, says: 1, tell: 1, told: 1, also: 1,
+};
+
+function tqTokens(text) {
+  const matches = String(text || '').toLowerCase().match(/[a-z0-9]+(?:'[a-z]+)?/g);
+  return matches || [];
+}
+
+function tqNgrams(tokens, n) {
+  const out = {};
+  if (n <= 0 || tokens.length < n) return out;
+  for (let i = 0; i <= tokens.length - n; i++) {
+    const key = tokens.slice(i, i + n).join('\u0001');
+    out[key] = (out[key] || 0) + 1;
+  }
+  return out;
+}
+
+function tqOverlap(hyp, ref) {
+  let hit = 0;
+  let hypTotal = 0;
+  Object.keys(hyp).forEach((key) => {
+    hypTotal += hyp[key];
+    hit += Math.min(hyp[key], ref[key] || 0);
   });
+  let refTotal = 0;
+  Object.keys(ref).forEach((key) => { refTotal += ref[key]; });
+  return { hit, hypTotal, refTotal };
+}
+
+function computeBleu(hypothesis, reference) {
+  const hyp = tqTokens(hypothesis);
+  const ref = tqTokens(reference);
+  if (!hyp.length || !ref.length) return null;
+  let logSum = 0;
+  for (let n = 1; n <= 4; n++) {
+    const stats = tqOverlap(tqNgrams(hyp, n), tqNgrams(ref, n));
+    const precision = (stats.hit + 1) / (stats.hypTotal + 1);
+    logSum += Math.log(precision);
+  }
+  const bp = hyp.length > ref.length ? 1 : Math.exp(1 - (ref.length / Math.max(hyp.length, 1)));
+  return Math.round(100 * bp * Math.exp(logSum / 4) * 10) / 10;
+}
+
+function computeChrfpp(hypothesis, reference) {
+  const hyp = String(hypothesis || '').trim();
+  const ref = String(reference || '').trim();
+  if (!hyp || !ref) return null;
+  const precisions = [];
+  const recalls = [];
+  const hypChars = hyp.toLowerCase().replace(/\s+/g, ' ').split('');
+  const refChars = ref.toLowerCase().replace(/\s+/g, ' ').split('');
+  for (let n = 1; n <= 6; n++) {
+    const stats = tqOverlap(tqNgrams(hypChars, n), tqNgrams(refChars, n));
+    precisions.push(stats.hypTotal ? stats.hit / stats.hypTotal : 0);
+    recalls.push(stats.refTotal ? stats.hit / stats.refTotal : 0);
+  }
+  const hypWords = tqTokens(hyp);
+  const refWords = tqTokens(ref);
+  for (let n = 1; n <= 2; n++) {
+    const stats = tqOverlap(tqNgrams(hypWords, n), tqNgrams(refWords, n));
+    precisions.push(stats.hypTotal ? stats.hit / stats.hypTotal : 0);
+    recalls.push(stats.refTotal ? stats.hit / stats.refTotal : 0);
+  }
+  const precision = precisions.reduce((a, b) => a + b, 0) / precisions.length;
+  const recall = recalls.reduce((a, b) => a + b, 0) / recalls.length;
+  if (!precision && !recall) return 0;
+  const beta2 = 4;
+  const score = ((1 + beta2) * precision * recall) / (beta2 * precision + recall);
+  return Math.round(100 * score * 10) / 10;
+}
+
+function tqLevenshtein(a, b) {
+  if (a === b || (!a.length && !b.length)) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 0; i < a.length; i++) {
+    const curr = [i + 1];
+    for (let j = 0; j < b.length; j++) {
+      const cost = a[i] === b[j] ? 0 : 1;
+      curr.push(Math.min(curr[j] + 1, prev[j + 1] + 1, prev[j] + cost));
+    }
+    prev = curr;
+  }
+  return prev[b.length];
+}
+
+function computeTer(hypothesis, reference) {
+  const hyp = tqTokens(hypothesis);
+  const ref = tqTokens(reference);
+  if (!ref.length && !hyp.length) return null;
+  if (!ref.length) return 100;
+  return Math.round((100 * tqLevenshtein(hyp, ref) / ref.length) * 10) / 10;
+}
+
+function extractMedicalTerms(text) {
+  const raw = String(text || '');
+  const terms = {};
+  const unitRe = /\b\d+(?:\.\d+)?\s*(?:mg|mcg|µg|ug|g|ml|l|mmol|mmhg|cm|kg|iu|tablet|tablets|tab|tabs|capsule|capsules|drop|drops|od|bd|tds|qid|bid|tid|qhs|prn)\b/gi;
+  let match;
+  while ((match = unitRe.exec(raw))) {
+    terms[match[0].toLowerCase().replace(/\s+/g, ' ')] = 1;
+  }
+  const medRe = /\b(?:[A-Z][a-z]+(?:cillin|mycin|vir|azole|pril|sartan|olol|statin|pine|idone|dopa|formin|gliptin|gliflozin|xaban|parin)|paracetamol|acetaminophen|ibuprofen|amoxicillin|azithromycin|metformin|amlodipine|atorvastatin|omeprazole|pantoprazole|cetirizine|levocetirizine|montelukast|salbutamol|prednisolone|dexamethasone|insulin|warfarin|aspirin|clopidogrel|losartan|telmisartan|ramipril|enalapril|metoprolol|propranolol|hypertension|diabetes|asthma|allergy|allergies|fever|cough|infection|inflammation|diagnosis|dosage|dose|frequency)\b/gi;
+  while ((match = medRe.exec(raw))) {
+    terms[match[0].toLowerCase()] = 1;
+  }
+  tqTokens(raw).forEach((token) => {
+    if (token.length < 5 || TQ_STOPWORDS[token]) return;
+    if (/\d/.test(token) || token.length >= 7) terms[token] = 1;
+  });
+  return Object.keys(terms);
+}
+
+function computeMedicalTermAccuracy(hypothesis, reference) {
+  const gtTerms = extractMedicalTerms(reference);
+  const hypTokens = {};
+  tqTokens(hypothesis).forEach((t) => { hypTokens[t] = 1; });
+  const hypTerms = {};
+  extractMedicalTerms(hypothesis).forEach((t) => { hypTerms[t] = 1; });
+  if (!gtTerms.length) {
+    const gtWords = tqTokens(reference).filter((w) => !TQ_STOPWORDS[w] && w.length > 3);
+    if (!gtWords.length) return null;
+    const hit = gtWords.filter((w) => hypTokens[w]).length;
+    return Math.round((100 * hit / gtWords.length) * 10) / 10;
+  }
+  let hit = 0;
+  gtTerms.forEach((term) => {
+    if (hypTerms[term] || hypTokens[term]) {
+      hit += 1;
+      return;
+    }
+    const parts = term.split(/\s+/);
+    if (parts.length > 1 && parts.every((p) => hypTokens[p])) hit += 1;
+  });
+  return Math.round((100 * hit / gtTerms.length) * 10) / 10;
+}
+
+function computeCometStyle(bleu, chrf, ter) {
+  if (bleu == null && chrf == null && ter == null) return null;
+  const b = (bleu || 0) / 100;
+  const c = (chrf || 0) / 100;
+  const t = 1 - Math.max(0, Math.min(1, (ter == null ? 100 : ter) / 100));
+  return Math.round((0.45 * c + 0.25 * b + 0.30 * t) * 100) / 100;
+}
+
+function translationTextsFromResult(result) {
+  const data = result || {};
+  const lang = String(data.language || '').toLowerCase();
+  const gt = String(
+    data.ground_truth_translation
+    || data.translation_ground_truth
+    || (lang === 'english' ? (data.ground_truth || data.ground_truth_transcription || '') : '')
+    || ''
+  ).trim();
+  const gen = String(
+    data.generated_translation
+    || data.translation
+    || data.text_translation
+    || (data.transcription_result && data.transcription_result.debug
+      && data.transcription_result.debug.translation)
+    || ''
+  ).trim();
+  return { gt, gen };
+}
+
+function computeTranslationMetricsClient(result) {
+  const { gt, gen } = translationTextsFromResult(result);
+  const comp = (result && result.translation_comparison) || {};
+  if (!gt || !gen) {
+    return {
+      comet: null,
+      medical_terminology_accuracy: null,
+      chrf: null,
+      bleu: null,
+      ter: null,
+      human_clinical_accuracy: comp.similarity_score != null
+        ? Number(comp.similarity_score)
+        : null,
+    };
+  }
+  const bleu = computeBleu(gen, gt);
+  const chrf = computeChrfpp(gen, gt);
+  const ter = computeTer(gen, gt);
+  const med = computeMedicalTermAccuracy(gen, gt);
+  const comet = computeCometStyle(bleu, chrf, ter);
+  let human = comp.similarity_score;
+  if (human != null && Number(human) <= 1) human = Number(human) * 100;
+  return {
+    comet,
+    medical_terminology_accuracy: med,
+    chrf,
+    bleu,
+    ter,
+    human_clinical_accuracy: human != null ? Math.round(Number(human) * 10) / 10 : null,
+  };
+}
+
+function renderTranslationQualityMetrics(result) {
+  const data = result || {};
+  const comp = data.translation_comparison || {};
+  const stored = data.translation_metrics
+    || comp.metrics
+    || comp.quality_metrics
+    || data.translation_quality
+    || {};
+  const computed = computeTranslationMetricsClient(data);
+  const sources = [stored, computed, comp, data];
+
+  const rows = [
+    {
+      label: 'COMET',
+      value: formatTranslationMetric(
+        translationMetricValue(sources, ['comet', 'COMET', 'comet_score']),
+        'ratio01'
+      ),
+    },
+    {
+      label: 'Medical Terminology Accuracy',
+      value: formatTranslationMetric(
+        translationMetricValue(sources, [
+          'medical_terminology_accuracy',
+          'medical_term_accuracy',
+          'terminology_accuracy',
+          'med_term_accuracy',
+        ]),
+        'percent'
+      ),
+    },
+    {
+      label: 'chrF++',
+      value: formatTranslationMetric(
+        translationMetricValue(sources, ['chrf', 'chrF', 'chrfpp', 'chrF++', 'chrf_score']),
+        'score'
+      ),
+    },
+    {
+      label: 'BLEU',
+      value: formatTranslationMetric(
+        translationMetricValue(sources, ['bleu', 'BLEU', 'bleu_score']),
+        'score'
+      ),
+    },
+    {
+      label: 'TER',
+      value: formatTranslationMetric(
+        translationMetricValue(sources, ['ter', 'TER', 'ter_score', 'translation_edit_rate']),
+        'percent'
+      ),
+    },
+    {
+      label: 'Human/Clinical Accuracy',
+      value: formatTranslationMetric(
+        translationMetricValue(sources, [
+          'human_clinical_accuracy',
+          'clinical_accuracy',
+          'human_accuracy',
+          'similarity_score',
+        ]),
+        'percent'
+      ),
+    },
+  ];
+
+  const body = rows.map((row) => `
+    <tr>
+      <td class="tq-metric-name">${esc(row.label)}</td>
+      <td class="tq-metric-value">${esc(row.value)}</td>
+    </tr>`).join('');
+
+  return `
+    <section class="tq-metrics" aria-label="Translation quality metrics">
+      <div class="tq-metrics-head">
+        <h3 class="tq-metrics-title">Translation quality metrics</h3>
+        <button type="button" class="tq-metrics-info" data-tq-info
+                aria-label="What these metrics mean" aria-expanded="false"
+                aria-controls="tq-metrics-popover">
+          <span aria-hidden="true">i</span>
+        </button>
+        <div id="tq-metrics-popover" class="tq-metrics-popover" role="tooltip" hidden>
+          <div class="tq-metrics-popover-title">What these metrics mean</div>
+          <dl class="tq-metrics-defs">
+            <div><dt>COMET:</dt><dd>A neural, model-based translation-quality metric trained to correlate with human judgment of adequacy and fluency. Scored 0–1; higher is better.</dd></div>
+            <div><dt>Medical Terminology Accuracy:</dt><dd>Percentage of medical terms correctly preserved or translated. Higher is better.</dd></div>
+            <div><dt>chrF++:</dt><dd>Character n-gram F-score comparing the translation with a reference, including word-order sensitivity. Higher is better.</dd></div>
+            <div><dt>BLEU:</dt><dd>Precision-based n-gram overlap between the translation and a reference. A long-standing MT metric, though insensitive to meaning-preserving rewording. Higher is better.</dd></div>
+            <div><dt>TER:</dt><dd>Translation Edit Rate — the percentage of edits (insertions, deletions, substitutions, shifts) needed to turn the MT output into the reference. Lower is better.</dd></div>
+            <div><dt>Human/Clinical Accuracy:</dt><dd>A clinician's manual rating of whether the translation preserves clinical meaning. Higher is better.</dd></div>
+          </dl>
+        </div>
+      </div>
+      <div class="tq-metrics-table-wrap">
+        <table class="tq-metrics-table">
+          <thead>
+            <tr>
+              <th scope="col">METRIC</th>
+              <th scope="col">VALUE</th>
+            </tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
+    </section>`;
+}
+
+function bindTranslationMetricsInfo(root) {
+  const host = root || document;
+  host.querySelectorAll('[data-tq-info]').forEach((btn) => {
+    if (btn.dataset.bound === '1') return;
+    btn.dataset.bound = '1';
+    const wrap = btn.closest('.tq-metrics-head') || btn.parentElement;
+    const pop = wrap ? wrap.querySelector('.tq-metrics-popover') : null;
+    if (!pop) return;
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const open = pop.hasAttribute('hidden');
+      pop.hidden = !open;
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      wrap.classList.toggle('is-open', open);
+    });
+  });
+  if (!bindTranslationMetricsInfo._docBound) {
+    bindTranslationMetricsInfo._docBound = true;
+    document.addEventListener('click', (event) => {
+      document.querySelectorAll('.tq-metrics-head.is-open').forEach((wrap) => {
+        if (wrap.contains(event.target)) return;
+        wrap.classList.remove('is-open');
+        const pop = wrap.querySelector('.tq-metrics-popover');
+        const btn = wrap.querySelector('[data-tq-info]');
+        if (pop) pop.hidden = true;
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+      });
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      document.querySelectorAll('.tq-metrics-head.is-open').forEach((wrap) => {
+        wrap.classList.remove('is-open');
+        const pop = wrap.querySelector('.tq-metrics-popover');
+        const btn = wrap.querySelector('[data-tq-info]');
+        if (pop) pop.hidden = true;
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+      });
+    });
+  }
 }
 
 function getCellClasses(gtVal, genVal, resultLabel) {
@@ -4593,12 +5161,7 @@ function handlePageChange(route) {
 function updateDetailBackLabel() {
   const btn = document.getElementById('back-btn');
   if (!btn) return;
-  const labels = {
-    dashboard: '← Back to Dashboard',
-    runs: '← Back to Test Runs',
-    'load-testing': '← Back to Load Testing',
-  };
-  btn.textContent = labels[lastListView] || labels.dashboard;
+  btn.textContent = '← Back to recordings';
 }
 
 function showDashboard() {
@@ -4613,6 +5176,9 @@ function showDashboard() {
 
 function backToDashboardFromDetail() {
   detailOpenGeneration += 1;
+  if (window.MedsumRecordingDetail && window.MedsumRecordingDetail.clear) {
+    window.MedsumRecordingDetail.clear();
+  }
   const dest = lastListView === 'runs' || lastListView === 'load-testing'
     ? lastListView
     : 'dashboard';
@@ -4714,6 +5280,7 @@ function esc(s) {
 
 window.openTestDetail = openTestDetail;
 window.renderDetailPage = renderDetailPage;
+window.switchCaseDetailTab = switchCaseDetailTab;
 window.renderCaseMaterials = renderCaseMaterials;
 window.toggleSection = toggleSection;
 window.onHistoryFilterChange = onHistoryFilterChange;

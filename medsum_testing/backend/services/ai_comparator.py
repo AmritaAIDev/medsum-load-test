@@ -11,6 +11,9 @@ from openai import OpenAI
 
 from medsum_testing.backend.models.test_result import ComparisonResult, MedComparisonResult
 from medsum_testing.backend.services.config_loader import get_config
+from medsum_testing.backend.services.translation_metrics import (
+    compute_translation_metrics,
+)
 
 log = logging.getLogger("medsum_ai")
 
@@ -421,14 +424,21 @@ def compare_translations(
     Compare ground truth translation with generated translation.
     Both are plain English text.
     Same DeepSeek → GPT-4 fallback as other comparisons.
+    Also attaches surface-metric quality scores (BLEU / chrF++ / TER / …).
     """
     config = config or get_config()
     if not ground_truth_translation or not generated_translation:
+        metrics = compute_translation_metrics(
+            generated_translation or "",
+            ground_truth_translation or "",
+        )
         return {
             "similarity_score": None,
             "overall_severity": "unknown",
             "differences": [],
             "error": "Missing ground truth or generated translation",
+            "metrics": metrics,
+            "quality_metrics": metrics,
         }
 
     system_prompt = """You are a medical AI evaluator comparing two English
@@ -463,6 +473,7 @@ Schema:
 
     models_to_try = _models_to_try(model)
     last_error = None
+    result: dict[str, Any] | None = None
 
     for attempt_model in models_to_try:
         try:
@@ -484,18 +495,28 @@ Schema:
                 attempt_model,
                 result.get("similarity_score"),
             )
-            return result
+            break
         except Exception as exc:
             log.warning("TRANS_COMPARE failed with %s: %s", attempt_model, exc)
             last_error = exc
             continue
 
-    return {
-        "similarity_score": None,
-        "overall_severity": "unknown",
-        "differences": [],
-        "error": str(last_error),
-    }
+    if result is None:
+        result = {
+            "similarity_score": None,
+            "overall_severity": "unknown",
+            "differences": [],
+            "error": str(last_error),
+        }
+
+    metrics = compute_translation_metrics(
+        generated_translation,
+        ground_truth_translation,
+        similarity_score=result.get("similarity_score"),
+    )
+    result["metrics"] = metrics
+    result["quality_metrics"] = metrics
+    return result
 
 
 def compare_transcriptions(
