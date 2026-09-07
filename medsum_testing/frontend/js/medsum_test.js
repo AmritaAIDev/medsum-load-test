@@ -3576,6 +3576,7 @@ function renderDetailPage(result) {
   const transcriptionHost = document.getElementById('case-transcription-host');
   if (transcriptionHost) {
     transcriptionHost.innerHTML = renderTranscriptionComparison(result) || '<p class="empty-sub">No transcription comparison available.</p>';
+    bindTranslationMetricsInfo(transcriptionHost);
   }
   const materialsHost = document.getElementById('detail-case-materials');
   if (materialsHost) {
@@ -3989,14 +3990,14 @@ function renderTranscriptionComparison(result) {
   const transComp = result.comparison || result.transcription_comparison || {};
   if (!gt && !gen) {
     const reason = transComp.skip_reason || result.accuracy_skip_reason || '';
-    if (!reason) return '';
+    if (!reason) return renderTranscriptionQualityMetrics(result);
     return makeCollapsible('transcription', '📝 Transcription Comparison',
       `<p class="skip-reason-banner">${esc(reason)}</p>`, {
       defaultOpen: true,
       score: null,
       scoreReason: reason,
       scoreLabel: 'Transcription',
-    });
+    }) + renderTranscriptionQualityMetrics(result);
   }
 
   const comp = result.comparison || result.transcription_comparison || {};
@@ -4006,15 +4007,7 @@ function renderTranscriptionComparison(result) {
 
   const { gtHtml, genHtml } = computeWordDiff(gt, gen);
 
-  const medDiffs = (comp.medical_difference_details || []).length
-    ? comp.medical_difference_details
-    : (comp.medical_differences || []);
   const genDiffs = comp.general_differences || [];
-
-  const medDiffHtml = medDiffs.length === 0 ? '' : `
-        <div class="diff-section-label">Medical Differences</div>
-        ${medDiffs.map(d => formatDiffItem(d)).join('')}`;
-
   const genDiffHtml = genDiffs.length === 0 ? '' : `
         <div class="diff-section-label" style="margin-top:0.75rem">General Differences</div>
         ${genDiffs.map(d => formatDiffItem(d, { showType: false })).join('')}`;
@@ -4044,7 +4037,6 @@ function renderTranscriptionComparison(result) {
                 <div class="diff-text">${genHtml ? genHtml : genEmpty}</div>
             </div>
         </div>
-        ${medDiffHtml}
         ${genDiffHtml}`;
 
   return makeCollapsible('transcription', '📝 Transcription Comparison', content, {
@@ -4054,7 +4046,7 @@ function renderTranscriptionComparison(result) {
     scoreLabel: 'Transcription',
     timeSeconds: sttTime,
     timeLabel: 'STT',
-  });
+  }) + renderTranscriptionQualityMetrics(result);
 }
 
 function renderTranslationComparison(result) {
@@ -4312,6 +4304,188 @@ function computeMedicalTermAccuracy(hypothesis, reference) {
   return Math.round((100 * hit / gtTerms.length) * 10) / 10;
 }
 
+function computeWer(hypothesis, reference) {
+  const hyp = tqTokens(hypothesis);
+  const ref = tqTokens(reference);
+  if (!ref.length && !hyp.length) return null;
+  if (!ref.length) return 100;
+  return Math.round((100 * tqLevenshtein(hyp, ref) / ref.length) * 10) / 10;
+}
+
+function computeCer(hypothesis, reference) {
+  const hyp = String(hypothesis || '').toLowerCase().replace(/\s+/g, '');
+  const ref = String(reference || '').toLowerCase().replace(/\s+/g, '');
+  if (!ref.length && !hyp.length) return null;
+  if (!ref.length) return 100;
+  return Math.round((100 * tqLevenshtein(hyp, ref) / ref.length) * 10) / 10;
+}
+
+const CLINICAL_BODY_PARTS = {
+  head: 1, neck: 1, chest: 1, abdomen: 1, stomach: 1, back: 1, throat: 1,
+  lung: 1, lungs: 1, heart: 1, liver: 1, kidney: 1, kidneys: 1, skin: 1,
+  eye: 1, eyes: 1, ear: 1, ears: 1, nose: 1, mouth: 1, tongue: 1, tooth: 1,
+  teeth: 1, arm: 1, arms: 1, leg: 1, legs: 1, hand: 1, hands: 1, foot: 1,
+  feet: 1, knee: 1, knees: 1, ankle: 1, wrist: 1, shoulder: 1, spine: 1,
+  brain: 1, blood: 1, urine: 1, bowel: 1, bladder: 1, uterus: 1, prostate: 1,
+};
+
+function extractClinicalEntities(text) {
+  const terms = {};
+  extractMedicalTerms(text).forEach((t) => { terms[t] = 1; });
+  tqTokens(text).forEach((token) => {
+    if (CLINICAL_BODY_PARTS[token]) terms[token] = 1;
+  });
+  return Object.keys(terms);
+}
+
+function entityRecognized(term, hypEntities, hypTokens) {
+  if (hypEntities[term] || hypTokens[term]) return true;
+  const parts = String(term || '').split(/\s+/).filter(Boolean);
+  return parts.length > 1 && parts.every((p) => hypTokens[p]);
+}
+
+function computeEntityErrorRate(hypothesis, reference) {
+  const gtEntities = extractClinicalEntities(reference);
+  if (!gtEntities.length) return null;
+  const hypTokens = {};
+  tqTokens(hypothesis).forEach((t) => { hypTokens[t] = 1; });
+  const hypEntities = {};
+  extractClinicalEntities(hypothesis).forEach((t) => { hypEntities[t] = 1; });
+  let missed = 0;
+  gtEntities.forEach((term) => {
+    if (!entityRecognized(term, hypEntities, hypTokens)) missed += 1;
+  });
+  return Math.round((100 * missed / gtEntities.length) * 10) / 10;
+}
+
+function tqSentences(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return [];
+  const parts = raw
+    .split(/(?<=[.!?।])\s+|\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return parts.length ? parts : [raw];
+}
+
+/** Mark which reference words were substituted/deleted (or next to an insertion). */
+function tqRefWordErrors(hypTokens, refTokens) {
+  const n = hypTokens.length;
+  const m = refTokens.length;
+  const errors = new Array(m).fill(false);
+  if (!m) return errors;
+  if (!n) {
+    for (let j = 0; j < m; j++) errors[j] = true;
+    return errors;
+  }
+
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = 0; i <= n; i++) dp[i][0] = i;
+  for (let j = 0; j <= m; j++) dp[0][j] = j;
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      const cost = hypTokens[i - 1] === refTokens[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+
+  let i = n;
+  let j = m;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0) {
+      const cost = hypTokens[i - 1] === refTokens[j - 1] ? 0 : 1;
+      if (dp[i][j] === dp[i - 1][j - 1] + cost) {
+        if (cost) errors[j - 1] = true;
+        i -= 1;
+        j -= 1;
+        continue;
+      }
+    }
+    if (j > 0 && dp[i][j] === dp[i][j - 1] + 1) {
+      errors[j - 1] = true;
+      j -= 1;
+      continue;
+    }
+    if (i > 0 && dp[i][j] === dp[i - 1][j] + 1) {
+      if (j > 0) errors[j - 1] = true;
+      else errors[0] = true;
+      i -= 1;
+      continue;
+    }
+    if (j > 0) {
+      errors[j - 1] = true;
+      j -= 1;
+    } else {
+      i -= 1;
+    }
+  }
+  return errors;
+}
+
+function computeSentenceErrorRate(hypothesis, reference) {
+  const refSents = tqSentences(reference);
+  if (!refSents.length) return null;
+
+  const hypWords = tqTokens(hypothesis);
+  const refWords = tqTokens(reference);
+  if (!refWords.length) return null;
+
+  // Align full transcripts, then count GT sentences that contain any word error.
+  const wordErrors = tqRefWordErrors(hypWords, refWords);
+  let wordIdx = 0;
+  let errored = 0;
+  let scored = 0;
+
+  refSents.forEach((sent) => {
+    const sentLen = tqTokens(sent).length;
+    if (!sentLen) return;
+    scored += 1;
+    let hasError = false;
+    for (let k = 0; k < sentLen; k++) {
+      if (wordErrors[wordIdx + k]) hasError = true;
+    }
+    wordIdx += sentLen;
+    if (hasError) errored += 1;
+  });
+
+  if (!scored) return null;
+  return Math.round((100 * errored / scored) * 10) / 10;
+}
+
+function transcriptionTextsFromResult(result) {
+  const data = result || {};
+  const gt = stripCaseHeader(
+    data.ground_truth || data.ground_truth_transcription || ''
+  ).trim();
+  const gen = String(
+    data.transcription || data.generated_transcription || ''
+  ).trim();
+  return { gt, gen };
+}
+
+function computeTranscriptionMetricsClient(result) {
+  const { gt, gen } = transcriptionTextsFromResult(result);
+  const empty = {
+    wer: null,
+    medical_term_accuracy: null,
+    cer: null,
+    entity_error_rate: null,
+    sentence_error_rate: null,
+  };
+  if (!gt || !gen) return empty;
+  return {
+    wer: computeWer(gen, gt),
+    medical_term_accuracy: computeMedicalTermAccuracy(gen, gt),
+    cer: computeCer(gen, gt),
+    entity_error_rate: computeEntityErrorRate(gen, gt),
+    sentence_error_rate: computeSentenceErrorRate(gen, gt),
+  };
+}
+
 function computeCometStyle(bleu, chrf, ter) {
   if (bleu == null && chrf == null && ter == null) return null;
   const b = (bleu || 0) / 100;
@@ -4414,7 +4588,7 @@ function renderTranslationQualityMetrics(result) {
       label: 'BLEU',
       value: formatTranslationMetric(
         translationMetricValue(sources, ['bleu', 'BLEU', 'bleu_score']),
-        'score'
+        'percent'
       ),
     },
     {
@@ -4439,21 +4613,22 @@ function renderTranslationQualityMetrics(result) {
   ];
 
   const body = rows.map((row) => `
-    <tr>
-      <td class="tq-metric-name">${esc(row.label)}</td>
-      <td class="tq-metric-value">${esc(row.value)}</td>
+    <tr class="metric-row">
+      <td class="tq-metric-name metric-label">${esc(row.label)}</td>
+      <td class="tq-metric-value metric-value">${esc(row.value)}</td>
     </tr>`).join('');
 
   return `
-    <section class="tq-metrics" aria-label="Translation quality metrics">
-      <div class="tq-metrics-head">
+    <section class="tq-metrics translation-quality-metrics" aria-label="Translation quality metrics">
+      <div class="tq-metrics-head metrics-title">
         <h3 class="tq-metrics-title">Translation quality metrics</h3>
-        <button type="button" class="tq-metrics-info" data-tq-info
+        <button type="button" class="tq-metrics-info info-icon" data-tq-info
                 aria-label="What these metrics mean" aria-expanded="false"
-                aria-controls="tq-metrics-popover">
+                aria-controls="translation-metrics-popover"
+                title="Metrics measuring translation quality across multiple dimensions">
           <span aria-hidden="true">i</span>
         </button>
-        <div id="tq-metrics-popover" class="tq-metrics-popover" role="tooltip" hidden>
+        <div id="translation-metrics-popover" class="tq-metrics-popover" role="tooltip" hidden>
           <div class="tq-metrics-popover-title">What these metrics mean</div>
           <dl class="tq-metrics-defs">
             <div><dt>COMET:</dt><dd>A neural, model-based translation-quality metric trained to correlate with human judgment of adequacy and fluency. Scored 0–1; higher is better.</dd></div>
@@ -4465,17 +4640,116 @@ function renderTranslationQualityMetrics(result) {
           </dl>
         </div>
       </div>
-      <div class="tq-metrics-table-wrap">
-        <table class="tq-metrics-table">
-          <thead>
-            <tr>
-              <th scope="col">METRIC</th>
-              <th scope="col">VALUE</th>
-            </tr>
-          </thead>
-          <tbody>${body}</tbody>
-        </table>
+      <table class="tq-metrics-table metrics-table">
+        <thead>
+          <tr>
+            <th scope="col" class="metric-column">METRIC</th>
+            <th scope="col" class="value-column">VALUE</th>
+          </tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>
+    </section>`;
+}
+
+function renderTranscriptionQualityMetrics(result) {
+  const data = result || {};
+  const comp = data.comparison || data.transcription_comparison || {};
+  const stored = data.transcription_metrics
+    || comp.metrics
+    || comp.quality_metrics
+    || data.asr_metrics
+    || {};
+  const computed = computeTranscriptionMetricsClient(data);
+  const sources = [stored, computed, comp, data];
+
+  const rows = [
+    {
+      label: 'WER',
+      value: formatTranslationMetric(
+        translationMetricValue(sources, [
+          'wer', 'WER', 'word_error_rate', 'asr_wer', 'asr_wer_percent',
+        ]),
+        'percent'
+      ),
+    },
+    {
+      label: 'Medical Term Accuracy',
+      value: formatTranslationMetric(
+        translationMetricValue(sources, [
+          'medical_term_accuracy',
+          'medical_terminology_accuracy',
+          'terminology_accuracy',
+          'med_term_accuracy',
+        ]),
+        'percent'
+      ),
+    },
+    {
+      label: 'CER',
+      value: formatTranslationMetric(
+        translationMetricValue(sources, [
+          'cer', 'CER', 'character_error_rate', 'char_error_rate',
+        ]),
+        'percent'
+      ),
+    },
+    {
+      label: 'Entity Error Rate',
+      value: formatTranslationMetric(
+        translationMetricValue(sources, [
+          'entity_error_rate', 'entity_er', 'named_entity_error_rate',
+        ]),
+        'percent'
+      ),
+    },
+    {
+      label: 'Sentence Error Rate',
+      value: formatTranslationMetric(
+        translationMetricValue(sources, [
+          'sentence_error_rate', 'ser', 'sentence_er',
+        ]),
+        'percent'
+      ),
+    },
+  ];
+
+  const body = rows.map((row) => `
+    <tr class="metric-row">
+      <td class="tq-metric-name metric-label">${esc(row.label)}</td>
+      <td class="tq-metric-value metric-value">${esc(row.value)}</td>
+    </tr>`).join('');
+
+  return `
+    <section class="tq-metrics transcription-quality-metrics" aria-label="Transcription quality metrics">
+      <div class="tq-metrics-head metrics-title">
+        <h3 class="tq-metrics-title">Transcription quality metrics</h3>
+        <button type="button" class="tq-metrics-info info-icon" data-tq-info
+                aria-label="What these metrics mean" aria-expanded="false"
+                aria-controls="transcription-metrics-popover"
+                title="Metrics measuring transcription quality across multiple dimensions">
+          <span aria-hidden="true">i</span>
+        </button>
+        <div id="transcription-metrics-popover" class="tq-metrics-popover" role="tooltip" hidden>
+          <div class="tq-metrics-popover-title">What these metrics mean</div>
+          <dl class="tq-metrics-defs">
+            <div><dt>WER:</dt><dd>Word Error Rate — the percentage of words wrongly inserted, deleted, or substituted by the ASR compared with the ground-truth transcript. Lower is better.</dd></div>
+            <div><dt>Medical Term Accuracy:</dt><dd>Percentage of medical terms (drug names, symptoms, diagnoses) correctly transcribed by the ASR. Higher is better.</dd></div>
+            <div><dt>CER:</dt><dd>Character Error Rate — the percentage of characters wrongly inserted, deleted, or substituted. More sensitive than WER for morphologically rich or mixed-script speech. Lower is better.</dd></div>
+            <div><dt>Entity Error Rate:</dt><dd>Percentage of named clinical entities (drug names, dosages, body parts) that were misrecognized. Lower is better.</dd></div>
+            <div><dt>Sentence Error Rate:</dt><dd>Percentage of sentences containing at least one transcription error. Lower is better.</dd></div>
+          </dl>
+        </div>
       </div>
+      <table class="tq-metrics-table metrics-table">
+        <thead>
+          <tr>
+            <th scope="col" class="metric-column">METRIC</th>
+            <th scope="col" class="value-column">VALUE</th>
+          </tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>
     </section>`;
 }
 
