@@ -3551,8 +3551,8 @@ function renderDetailPage(result) {
   resetCaseDetailTabs();
 
   const cmpHost = document.getElementById('gt-comparison-host');
-  if (cmpHost && window.MedsumSoapSummaryNav) {
-    window.MedsumSoapSummaryNav.mount(cmpHost, result);
+  if (cmpHost && window.MedsumSoapComparison) {
+    cmpHost.innerHTML = '<div class="soap-cmp-state" role="status">Loading SOAP comparison…</div>';
   }
   const soapGtHost = document.getElementById('soap-gt-report-host');
   if (soapGtHost && window.MedsumSoapGtComparisonReport) {
@@ -3565,7 +3565,17 @@ function renderDetailPage(result) {
   if (window.MedsumRecordingDetail && window.MedsumRecordingDetail.mountFromResult) {
     window.MedsumRecordingDetail.mountFromResult(result).then((payload) => {
       if (payload) renderCaseDetailHeader(payload, result, model);
-    }).catch(() => {});
+      if (window.MedsumSoapComparison) {
+        if (payload) window.MedsumSoapComparison.mountWithPayload(payload);
+        else window.MedsumSoapComparison.mountFromResult(result);
+      }
+    }).catch(() => {
+      if (window.MedsumSoapComparison) {
+        window.MedsumSoapComparison.mountFromResult(result);
+      }
+    });
+  } else if (window.MedsumSoapComparison) {
+    window.MedsumSoapComparison.mountFromResult(result);
   }
 
   const translationHost = document.getElementById('case-translation-host');
@@ -5452,6 +5462,9 @@ function backToDashboardFromDetail() {
   detailOpenGeneration += 1;
   if (window.MedsumRecordingDetail && window.MedsumRecordingDetail.clear) {
     window.MedsumRecordingDetail.clear();
+  }
+  if (window.MedsumSoapComparison && window.MedsumSoapComparison.clear) {
+    window.MedsumSoapComparison.clear();
   }
   const dest = lastListView === 'runs' || lastListView === 'load-testing'
     ? lastListView

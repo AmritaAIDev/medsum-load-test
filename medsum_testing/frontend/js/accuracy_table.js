@@ -277,8 +277,8 @@
         <td class="metric-value invented">${esc(formatCount(data.invented))}</td>
         <!--
         <td class="metric-value accuracy">${esc(formatPct(data.accuracy_percent, hasGt))}</td>
-        -->
         <td>${statusBadge(data)}</td>
+        -->
       </tr>
       <!--
       <tr class="detail-row${open ? ' is-open' : ''}" data-detail-for="${esc(key)}" ${open ? '' : 'hidden'}>
@@ -726,8 +726,8 @@
               <th>Invented</th>
               <!--
               <th>Accuracy %</th>
-              -->
               <th>Status</th>
+              -->
             </tr>
           </thead>
           <tbody>
