@@ -3204,6 +3204,11 @@ em.na { color: var(--text-muted); font-style: italic; }
   border-radius: 12px;
   overflow: hidden;
   background: white;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.selected-files-panel.is-back-focus {
+  border-color: #93C5FD;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.22);
 }
 .selected-files-panel .selected-files-scroll {
   flex: 1 1 auto;
@@ -6069,26 +6074,79 @@ em.na { color: var(--text-muted); font-style: italic; }
 .cf-table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
   font-size: 0.88rem;
-  min-width: 980px;
+  min-width: 100%;
 }
 .cf-table th {
+  position: relative;
   padding: 0.65rem 0.75rem;
   text-align: left;
   font-weight: 600;
   color: #475569;
   background: #F8FAFC;
   border-bottom: 1px solid #E2E8F0;
+  border-right: 1px solid #CBD5E1;
   white-space: nowrap;
   font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+.cf-table th:last-child,
+.cf-table td:last-child {
+  border-right: 0;
+}
+.cf-th-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cf-col-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+.cf-col-resizer::after {
+  content: "";
+  position: absolute;
+  top: 20%;
+  bottom: 20%;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: #94A3B8;
+  border-radius: 1px;
+  opacity: 0.85;
+}
+.cf-col-resizer:hover::after,
+.cf-col-resizing .cf-col-resizer::after {
+  background: #1e3a8a;
+  opacity: 1;
+}
+body.cf-col-resizing {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+body.cf-col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 .cf-table td {
   padding: 0.7rem 0.75rem;
   text-align: left;
   vertical-align: top;
   border-bottom: 1px solid #EDF2F7;
+  border-right: 1px solid #E2E8F0;
   color: #0f172a;
   line-height: 1.4;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }
 .cf-table tr.cf-row-wrong td {
   background: #fff1f2;

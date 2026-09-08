@@ -264,13 +264,52 @@
     });
   }
 
+  function uploadAudioName(item) {
+    if (itemSource(item) !== 'upload') return '';
+    return String(
+      (item && (item.audio || item.audio_filename || item.filename)) || ''
+    )
+      .trim()
+      .toLowerCase();
+  }
+
+  function findUploadByAudioName(catalog, filename) {
+    const want = String(filename || '').trim().toLowerCase();
+    if (!want) return null;
+    const rows = Array.isArray(catalog) ? catalog : [];
+    for (let i = 0; i < rows.length; i++) {
+      if (uploadAudioName(rows[i]) === want) return rows[i];
+    }
+    return null;
+  }
+
   function ingestIntoCatalog(catalog, incoming) {
+    // Manual uploads dedupe by filename alone (language may be set later and
+    // must not create a second row for the same audio).
     const next = Array.isArray(catalog) ? catalog.slice() : [];
     const seen = {};
-    next.forEach(item => {
+    const uploadByName = {};
+    next.forEach((item, idx) => {
       seen[catalogId(item)] = true;
+      const uname = uploadAudioName(item);
+      if (uname) uploadByName[uname] = idx;
     });
     (incoming || []).forEach(item => {
+      const uname = uploadAudioName(item);
+      if (uname && uploadByName[uname] != null) {
+        const idx = uploadByName[uname];
+        const prev = next[idx];
+        const prevId = catalogId(prev);
+        // Keep language / manual GT; refresh bytes + upload_id from the drop.
+        next[idx] = Object.assign({}, prev, item, {
+          language: prev.language || item.language || '',
+          folder_label: prev.folder_label || item.folder_label || '',
+          manual_gt: prev.manual_gt != null ? prev.manual_gt : item.manual_gt,
+        });
+        delete seen[prevId];
+        seen[catalogId(next[idx])] = true;
+        return;
+      }
       const id = catalogId(item);
       if (seen[id]) {
         const idx = next.findIndex(row => catalogId(row) === id);
@@ -278,6 +317,7 @@
         return;
       }
       seen[id] = true;
+      if (uname) uploadByName[uname] = next.length;
       next.push(item);
     });
     return next;
@@ -1432,6 +1472,8 @@
     setUploadLanguage,
     clearAllKeys,
     filterMultiAudioItems,
+    uploadAudioName,
+    findUploadByAudioName,
     ingestIntoCatalog,
     excludeFromSelection,
     selectedForExecution,

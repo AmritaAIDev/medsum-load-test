@@ -18,6 +18,7 @@ from medsum_testing.backend.services.batch_identity import allocate_batch_identi
 from medsum_testing.backend.services.config_loader import get_config, get_results_dir
 from medsum_testing.backend.services.drive_service import list_test_cases
 from medsum_testing.backend.services.result_store import has_recent_result
+from medsum_testing.backend.services.user_errors import user_facing_error
 
 logger = logging.getLogger("medsum_scheduler")
 
@@ -143,7 +144,9 @@ def run_all_tests(ai_model: str, skip_recent: bool = True) -> list[dict]:
         )
         if result.status == "complete":
             return {"audio": audio, "status": "complete", "test_id": test_id}
-        error = result.errors[0] if result.errors else "Test failed"
+        error = user_facing_error(
+            result.errors[0] if result.errors else "Test failed"
+        )
         return {"audio": audio, "status": "failed", "error": error, "test_id": test_id}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as executor:

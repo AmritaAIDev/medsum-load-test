@@ -53,10 +53,24 @@
 
   const API_BASE = '/api/batches';
 
+  const TABLE_COLUMNS = [
+    { key: 'category', label: 'Category', minWidth: 96 },
+    { key: 'ground_truth', label: 'Ground truth', minWidth: 120 },
+    { key: 'generated', label: 'MedSum output', minWidth: 120 },
+    { key: 'result', label: 'Result', minWidth: 88 },
+    { key: 'safety', label: 'Safety concern?', minWidth: 110 },
+    { key: 'error_tag', label: 'Error tag', minWidth: 110 },
+  ];
+  const DEFAULT_COL_WIDTHS = [140, 220, 220, 110, 130, 160];
+  const MIN_COL_WIDTH = 72;
+
   let abortController = null;
   let lastPayload = null;
   let filters = { category: '', result: '', errorTag: '' };
   let openFilter = null; // category | result | errorTag | null
+  let columnWidths = DEFAULT_COL_WIDTHS.slice();
+  let columnsUserSized = false;
+  let resizeState = null;
 
   function hostEl() {
     return document.getElementById('recording-clinical-detail')
@@ -324,42 +338,161 @@
     return '';
   }
 
+  function colWidthStyle(index) {
+    const width = Number(columnWidths[index]) || DEFAULT_COL_WIDTHS[index] || 120;
+    return `width:${width}px;min-width:${width}px;max-width:${width}px`;
+  }
+
   function tableHtml(payload) {
     const rows = filteredRows(payload);
+    const colgroup = TABLE_COLUMNS.map((col, index) => (
+      `<col data-cf-col="${esc(col.key)}" style="${colWidthStyle(index)}">`
+    )).join('');
+    const headers = TABLE_COLUMNS.map((col, index) => {
+      const resizer = index < TABLE_COLUMNS.length - 1
+        ? `<span class="cf-col-resizer" data-cf-resize="${index}" role="separator"
+                 aria-orientation="vertical" aria-label="Resize ${esc(col.label)} column"
+                 title="Drag to resize"></span>`
+        : '';
+      return `<th scope="col" data-cf-col="${esc(col.key)}" style="${colWidthStyle(index)}">
+        <span class="cf-th-label">${esc(col.label)}</span>${resizer}
+      </th>`;
+    }).join('');
     const body = rows.length
       ? rows.map((row) => {
         const gt = (row.ground_truth && String(row.ground_truth).trim()) || '—';
         const gen = (row.generated && String(row.generated).trim()) || '—';
         return `
           <tr class="${rowClass(row.result)}">
-            <td>${esc(categoryLabel(row.category || ''))}</td>
-            <td>${esc(gt)}</td>
-            <td>${esc(gen)}</td>
-            <td>${resultBadge(row.result)}</td>
-            <td>${safetyCell(row)}</td>
-            <td>${errorTagCell(row)}</td>
+            <td style="${colWidthStyle(0)}">${esc(categoryLabel(row.category || ''))}</td>
+            <td style="${colWidthStyle(1)}">${esc(gt)}</td>
+            <td style="${colWidthStyle(2)}">${esc(gen)}</td>
+            <td style="${colWidthStyle(3)}">${resultBadge(row.result)}</td>
+            <td style="${colWidthStyle(4)}">${safetyCell(row)}</td>
+            <td style="${colWidthStyle(5)}">${errorTagCell(row)}</td>
           </tr>`;
       }).join('')
-      : `<tr class="cf-empty"><td colspan="6">${filtersActive()
+      : `<tr class="cf-empty"><td colspan="${TABLE_COLUMNS.length}">${filtersActive()
         ? 'No clinical facts match the current filters.'
         : 'No clinical facts available for this recording.'}</td></tr>`;
 
     return `
       <div class="cf-table-wrap">
         <table class="cf-table">
+          <colgroup>${colgroup}</colgroup>
           <thead>
-            <tr>
-              <th>Category</th>
-              <th>Ground truth</th>
-              <th>MedSum output</th>
-              <th>Result</th>
-              <th>Safety concern?</th>
-              <th>Error tag</th>
-            </tr>
+            <tr>${headers}</tr>
           </thead>
           <tbody>${body}</tbody>
         </table>
       </div>`;
+  }
+
+  function columnWidthsTotal() {
+    return columnWidths.reduce((sum, w) => sum + (Number(w) || 0), 0);
+  }
+
+  function fillDefaultColumnWidths(availableWidth) {
+    const base = DEFAULT_COL_WIDTHS.slice();
+    const baseTotal = base.reduce((sum, w) => sum + w, 0);
+    const target = Math.max(baseTotal, Math.floor(Number(availableWidth) || 0));
+    if (target <= baseTotal) {
+      columnWidths = base;
+      return;
+    }
+    // Keep compact columns fixed; give leftover to Ground truth + MedSum output.
+    const flexIndexes = [1, 2];
+    const fixedTotal = base.reduce((sum, w, i) => (
+      flexIndexes.indexOf(i) === -1 ? sum + w : sum
+    ), 0);
+    const flexBudget = Math.max(target - fixedTotal, flexIndexes.length * 120);
+    const flexBase = flexIndexes.reduce((sum, i) => sum + base[i], 0) || 1;
+    columnWidths = base.map((w, i) => {
+      if (flexIndexes.indexOf(i) === -1) return w;
+      return Math.max(
+        (TABLE_COLUMNS[i] && TABLE_COLUMNS[i].minWidth) || MIN_COL_WIDTH,
+        Math.round((w / flexBase) * flexBudget)
+      );
+    });
+    const drift = target - columnWidthsTotal();
+    if (drift !== 0) columnWidths[2] = Math.max(MIN_COL_WIDTH, columnWidths[2] + drift);
+  }
+
+  function ensureTableFillsWidth(el) {
+    if (columnsUserSized) return;
+    const wrap = el.querySelector('.cf-table-wrap');
+    if (!wrap) return;
+    const available = Math.floor(wrap.clientWidth || 0);
+    if (!available) return;
+    fillDefaultColumnWidths(available);
+  }
+
+  function applyColumnWidths(el) {
+    const table = el.querySelector('.cf-table');
+    if (!table) return;
+    ensureTableFillsWidth(el);
+    const total = columnWidthsTotal();
+    table.style.width = '100%';
+    table.style.minWidth = `${total}px`;
+    table.querySelectorAll('col[data-cf-col]').forEach((col, index) => {
+      const width = Number(columnWidths[index]) || DEFAULT_COL_WIDTHS[index] || 120;
+      col.style.width = `${width}px`;
+      col.style.minWidth = `${width}px`;
+      col.style.maxWidth = `${width}px`;
+    });
+    table.querySelectorAll('th[data-cf-col], td').forEach((cell) => {
+      if (cell.closest('tr.cf-empty')) return;
+      const row = cell.parentElement;
+      if (!row) return;
+      const index = Array.prototype.indexOf.call(row.children, cell);
+      if (index < 0 || index >= columnWidths.length) return;
+      const width = Number(columnWidths[index]) || DEFAULT_COL_WIDTHS[index] || 120;
+      cell.style.width = `${width}px`;
+      cell.style.minWidth = `${width}px`;
+      cell.style.maxWidth = `${width}px`;
+    });
+  }
+
+  function bindColumnResize(el) {
+    el.querySelectorAll('[data-cf-resize]').forEach((handle) => {
+      handle.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const index = Number(handle.getAttribute('data-cf-resize'));
+        if (!Number.isFinite(index) || index < 0 || index >= columnWidths.length - 1) return;
+        const minWidth = (TABLE_COLUMNS[index] && TABLE_COLUMNS[index].minWidth) || MIN_COL_WIDTH;
+        resizeState = {
+          index,
+          startX: event.clientX,
+          startWidth: Number(columnWidths[index]) || DEFAULT_COL_WIDTHS[index] || 120,
+          minWidth,
+        };
+        document.body.classList.add('cf-col-resizing');
+      });
+    });
+
+    if (!bindColumnResize._docBound) {
+      bindColumnResize._docBound = true;
+      document.addEventListener('mousemove', (event) => {
+        if (!resizeState) return;
+        columnsUserSized = true;
+        const delta = event.clientX - resizeState.startX;
+        const next = Math.max(resizeState.minWidth, Math.round(resizeState.startWidth + delta));
+        columnWidths[resizeState.index] = next;
+        const host = hostEl();
+        if (host) applyColumnWidths(host);
+      });
+      document.addEventListener('mouseup', () => {
+        if (!resizeState) return;
+        resizeState = null;
+        document.body.classList.remove('cf-col-resizing');
+      });
+      window.addEventListener('resize', () => {
+        if (columnsUserSized) return;
+        const host = hostEl();
+        if (host && host.querySelector('.cf-table')) applyColumnWidths(host);
+      });
+    }
   }
 
   function panelHtml(payload) {
@@ -409,6 +542,8 @@
       });
     }
 
+    bindColumnResize(el);
+
     if (!bind._docBound) {
       bind._docBound = true;
       document.addEventListener('click', (event) => {
@@ -435,6 +570,11 @@
     el.hidden = false;
     el.innerHTML = panelHtml(payload);
     bind(el, payload);
+    applyColumnWidths(el);
+    // Remeasure after layout in case the panel was just shown.
+    requestAnimationFrame(() => {
+      if (hostEl() === el && el.querySelector('.cf-table')) applyColumnWidths(el);
+    });
   }
 
   function renderLoading() {

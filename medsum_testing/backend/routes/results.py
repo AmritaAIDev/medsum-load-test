@@ -23,6 +23,7 @@ from medsum_testing.backend.services.result_store import (
     list_results,
     list_results_by_batch,
 )
+from medsum_testing.backend.services.user_errors import user_facing_errors
 from medsum_testing.backend.services.test_case_view import (
     load_result_by_stable_id,
     prefer_local_batch_runs,
@@ -207,6 +208,8 @@ def get_result(test_id: str):
     data = result.to_dict()
     if stable_test_id(data) != test_id:
         return jsonify({"error": "Test result not found"}), 404
+    if data.get("errors"):
+        data["errors"] = user_facing_errors(data.get("errors"))
     payload = attach_row_display(data)
     payload["soap_gt_comparison_report"] = build_soap_gt_comparison_report(payload)
     return jsonify(payload)

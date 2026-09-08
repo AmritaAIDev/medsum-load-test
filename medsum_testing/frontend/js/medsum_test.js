@@ -20,6 +20,7 @@ let ltServiceEmail = '';
 let accDoctors = [];       // [{phone, password, patients: [id, ...]}, ...]
 let accSetupOpen = true;
 let lastListView = 'dashboard';
+let pendingFocusAudioSelection = false;
 let audioCatalog = [];
 let audioSelectedKeys = [];
 let audioSelectionReady = false;
@@ -1027,9 +1028,35 @@ async function ingestDroppedFiles(files) {
     }
   });
   const audios = [];
+  const seenInBatch = {};
+  const duplicateNames = [];
   for (let i = 0; i < audioFiles.length; i++) {
     const file = audioFiles[i];
     const name = file && file.name ? file.name : '';
+    const nameKey = String(name).trim().toLowerCase();
+    if (!nameKey) continue;
+
+    const existing = api.findUploadByAudioName
+      ? api.findUploadByAudioName(audioCatalog, name)
+      : audioCatalog.find(item =>
+        (item.source || 'drive') === 'upload'
+        && String(item.audio || item.audio_filename || '').trim().toLowerCase() === nameKey
+      );
+    if (existing || seenInBatch[nameKey]) {
+      if (existing) {
+        const id = catalogItemId(existing);
+        if (!audioSelectedKeys.includes(id)) {
+          audioSelectedKeys.push(id);
+        } else {
+          duplicateNames.push(name);
+        }
+      } else {
+        duplicateNames.push(name);
+      }
+      continue;
+    }
+    seenInBatch[nameKey] = true;
+
     try {
       const stored = await uploadManualAudioFile(file);
       audios.push({
@@ -1054,6 +1081,12 @@ async function ingestDroppedFiles(files) {
       const id = catalogItemId(item);
       if (!audioSelectedKeys.includes(id)) audioSelectedKeys.push(id);
     });
+  }
+  if (duplicateNames.length) {
+    const label = duplicateNames.length === 1
+      ? `"${duplicateNames[0]}" is already in this run`
+      : `${duplicateNames.length} audio files were already in this run`;
+    showToast(label, 'warning');
   }
   applyGroundTruthMatches();
   renderRunFileList();
@@ -1664,6 +1697,73 @@ function emptyStateRow(colspan, subtext) {
             </tr>`;
 }
 
+function formatUserErrorMessage(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return 'The test failed. Please try again.';
+  if (/traceback \(most recent call last\)/i.test(text)) {
+    const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      if (/^File "/.test(line) || /^Traceback/i.test(line)) continue;
+      if (/Error|Exception|failed/i.test(line)) {
+        return formatUserErrorMessage(line.replace(/^[A-Za-z0-9_.]+:\s*/, ''));
+      }
+    }
+    return 'The test failed. Please try again.';
+  }
+  const lower = text.toLowerCase();
+  if (lower.includes('language') && (
+    lower.includes('may not be blank')
+    || lower.includes('required')
+    || lower.includes('not be empty')
+  )) {
+    return 'Language is required. Choose a language for this audio file, then run the test again.';
+  }
+  if (lower.includes('audio_upload timeout')) {
+    return 'Audio upload timed out. Please try again.';
+  }
+  if (lower.includes('audio_upload failed')) {
+    return 'Audio upload failed. Check the audio file and try again.';
+  }
+  if (lower.includes('no patient_id') || lower.includes('patient_id is required')) {
+    return 'Patient ID is required. Add a patient in Doctor & Patient Setup.';
+  }
+  if (lower.includes('auth failed') || lower.includes('authentication failed')) {
+    return 'Doctor login failed. Check the phone number and password.';
+  }
+  if (lower.includes('no token provided')) {
+    return 'Doctor session expired. Sign in again and retry the test.';
+  }
+  if (lower.includes('no test case found')) {
+    return 'No matching test case was found for this audio. Check the language and file selection.';
+  }
+  let cleaned = text.replace(/^RuntimeError:\s*/i, '').trim();
+  cleaned = cleaned.replace(/^AUDIO_UPLOAD failed\s+\d+\s*:\s*/i, '').trim();
+  if (/^\{\s*"language"/i.test(cleaned) && /may not be blank/i.test(cleaned)) {
+    return 'Language is required. Choose a language for this audio file, then run the test again.';
+  }
+  if (cleaned.length > 220) return 'The test failed. Please try again.';
+  return cleaned || 'The test failed. Please try again.';
+}
+
+function formatUserErrors(errors) {
+  const list = Array.isArray(errors) ? errors : [];
+  const out = [];
+  const seen = new Set();
+  list.forEach((item) => {
+    const text = String(item || '').trim();
+    if (!text) return;
+    if (/traceback \(most recent call last\)/i.test(text)) return;
+    if (/^\s*File "/m.test(text) && /line \d+/.test(text)) return;
+    const message = formatUserErrorMessage(text);
+    const key = message.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(message);
+  });
+  return out.length ? out : (list.length ? ['The test failed. Please try again.'] : []);
+}
+
 function formatRowStatus(r) {
   if (r && r.execution_display && r.soap_evaluation_display) {
     const status = String(r.status || '').trim().toLowerCase();
@@ -1838,7 +1938,7 @@ function executionChipHtml(r) {
   const shown = formatRowStatus(r);
   const reason = String(
     r?.accuracy_skip_reason
-    || (Array.isArray(r?.errors) ? r.errors[0] : '')
+    || (Array.isArray(r?.errors) ? formatUserErrors(r.errors)[0] : '')
     || ''
   ).trim();
   const chip = shown.execution || {};
@@ -3631,7 +3731,8 @@ function renderDetailPage(result) {
   const errorsSection = document.getElementById('errors-section');
   if (result.errors?.length) {
     errorsSection.style.display = '';
-    document.getElementById('errors-box').textContent = result.errors.join('\n\n');
+    const messages = formatUserErrors(result.errors);
+    document.getElementById('errors-box').textContent = messages.join('\n\n');
   } else if (errorsSection) {
     errorsSection.style.display = 'none';
   }
@@ -5440,12 +5541,16 @@ function handlePageChange(route) {
   if (page === 'runs') onHistoryFilterChange();
   if (page === 'load-testing') ltUpdateRowCount();
   updateDetailBackLabel();
+  if (page === 'runs' && pendingFocusAudioSelection) {
+    pendingFocusAudioSelection = false;
+    focusAudioTestCaseSelection();
+  }
 }
 
 function updateDetailBackLabel() {
   const btn = document.getElementById('back-btn');
   if (!btn) return;
-  btn.textContent = '← Back to recordings';
+  btn.textContent = '← Back to audio selection';
 }
 
 function showDashboard() {
@@ -5458,6 +5563,32 @@ function showDashboard() {
   if (nav.setActiveView) nav.setActiveView('dashboard');
 }
 
+function focusAudioTestCaseSelection() {
+  const panel = document.querySelector('#runs-view .selected-files-panel');
+  const table = document.getElementById('selected-files-table');
+  const target = panel || table
+    || document.querySelector('#runs-view .upload-gt-card')
+    || document.getElementById('runs-view');
+  if (!target || typeof target.scrollIntoView !== 'function') return;
+
+  const highlight = panel || (table && table.closest('.selected-files-panel')) || table;
+  const run = () => {
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (highlight) {
+      highlight.classList.add('is-back-focus');
+      window.setTimeout(() => highlight.classList.remove('is-back-focus'), 1600);
+    }
+    if (table && typeof table.focus === 'function') {
+      try { table.setAttribute('tabindex', '-1'); table.focus({ preventScroll: true }); } catch (_err) { /* ignore */ }
+    }
+  };
+  // Page switch can be async (hash routing); retry once layout is ready.
+  requestAnimationFrame(() => {
+    run();
+    window.setTimeout(run, 80);
+  });
+}
+
 function backToDashboardFromDetail() {
   detailOpenGeneration += 1;
   if (window.MedsumRecordingDetail && window.MedsumRecordingDetail.clear) {
@@ -5466,15 +5597,16 @@ function backToDashboardFromDetail() {
   if (window.MedsumSoapComparison && window.MedsumSoapComparison.clear) {
     window.MedsumSoapComparison.clear();
   }
-  const dest = lastListView === 'runs' || lastListView === 'load-testing'
-    ? lastListView
-    : 'dashboard';
+  // Return to Test Runs so the user can choose audio / test cases again.
+  pendingFocusAudioSelection = true;
   const nav = pageNavApi();
   if (nav.navigate) {
-    nav.navigate(dest);
-    return;
+    nav.navigate('runs');
+  } else {
+    showTestRuns();
+    pendingFocusAudioSelection = false;
+    focusAudioTestCaseSelection();
   }
-  showDashboard();
 }
 
 function showTestRuns() {

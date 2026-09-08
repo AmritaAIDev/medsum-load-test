@@ -53,6 +53,7 @@ from medsum_testing.backend.services.skip_reasons import (
     skipped_comparison,
 )
 from medsum_testing.backend.services.soap_fact_scorer import classify_final_result
+from medsum_testing.backend.services.user_errors import user_facing_error
 
 bp = Blueprint("medsum_test_runner", __name__)
 log = logging.getLogger("medsum_test_runner")
@@ -1023,8 +1024,7 @@ def execute_test_run(
         tb = traceback.format_exc()
         result.status = "failed"
         result.final_result = "failed"
-        result.errors.append(str(exc))
-        result.errors.append(tb)
+        result.errors.append(user_facing_error(exc))
         for step in result.progress_steps:
             if step["status"] == "active":
                 step["status"] = "failed"
@@ -1091,7 +1091,7 @@ def _run_and_store(
                 batch_id=batch_id or "",
                 folder_label=folder_label,
             )
-            result.errors.append(f"Auth failed: {auth_exc}")
+            result.errors.append(user_facing_error(f"Auth failed: {auth_exc}"))
             save_result(result)
             return result
 
@@ -1155,8 +1155,7 @@ def _run_and_store(
         )
         try:
             _ensure_local_refs(result)
-            result.errors.append(str(exc))
-            result.errors.append(tb)
+            result.errors.append(user_facing_error(exc))
             save_result(result)
             log.info("[%s] Failure result saved", test_id)
             if token:

@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from medsum_testing.backend.services.config_loader import clear_runtime, get_runtime
+from medsum_testing.backend.services.user_errors import user_facing_error
 
 log = logging.getLogger("medsum")
 
@@ -422,6 +423,11 @@ def upload_audio(
     """
     url = f"{_django_base(config)}/api/audio-data/"
     lang = normalize_language(language)
+    if not str(lang or "").strip():
+        raise RuntimeError(
+            "Language is required. Choose a language for this audio file, "
+            "then run the test again."
+        )
 
     log.info("AUDIO_UPLOAD → POST %s", url)
     log.info(
@@ -457,7 +463,9 @@ def upload_audio(
 
     if resp.status_code not in (200, 201):
         raise RuntimeError(
-            f"AUDIO_UPLOAD failed {resp.status_code}: {resp.text[:300]}"
+            user_facing_error(
+                f"AUDIO_UPLOAD failed {resp.status_code}: {resp.text[:300]}"
+            )
         )
 
     data_resp = resp.json()
