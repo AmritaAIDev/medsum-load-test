@@ -61,7 +61,7 @@
     { key: 'safety', label: 'Safety concern?', minWidth: 110 },
     { key: 'error_tag', label: 'Error tag', minWidth: 110 },
   ];
-  const DEFAULT_COL_WIDTHS = [140, 220, 220, 110, 130, 160];
+  const DEFAULT_COL_WIDTHS = [130, 200, 200, 96, 120, 140];
   const MIN_COL_WIDTH = 72;
 
   let abortController = null;
@@ -392,48 +392,25 @@
     return columnWidths.reduce((sum, w) => sum + (Number(w) || 0), 0);
   }
 
-  function fillDefaultColumnWidths(availableWidth) {
-    const base = DEFAULT_COL_WIDTHS.slice();
-    const baseTotal = base.reduce((sum, w) => sum + w, 0);
-    const target = Math.max(baseTotal, Math.floor(Number(availableWidth) || 0));
-    if (target <= baseTotal) {
-      columnWidths = base;
-      return;
-    }
-    // Keep compact columns fixed; give leftover to Ground truth + MedSum output.
-    const flexIndexes = [1, 2];
-    const fixedTotal = base.reduce((sum, w, i) => (
-      flexIndexes.indexOf(i) === -1 ? sum + w : sum
-    ), 0);
-    const flexBudget = Math.max(target - fixedTotal, flexIndexes.length * 120);
-    const flexBase = flexIndexes.reduce((sum, i) => sum + base[i], 0) || 1;
-    columnWidths = base.map((w, i) => {
-      if (flexIndexes.indexOf(i) === -1) return w;
-      return Math.max(
-        (TABLE_COLUMNS[i] && TABLE_COLUMNS[i].minWidth) || MIN_COL_WIDTH,
-        Math.round((w / flexBase) * flexBudget)
-      );
-    });
-    const drift = target - columnWidthsTotal();
-    if (drift !== 0) columnWidths[2] = Math.max(MIN_COL_WIDTH, columnWidths[2] + drift);
+  function fillDefaultColumnWidths() {
+    // Content-sized defaults — do not stretch to the panel width (that left
+    // large empty gaps between compact columns like Result / Safety).
+    columnWidths = DEFAULT_COL_WIDTHS.slice();
   }
 
-  function ensureTableFillsWidth(el) {
+  function ensureTableFillsWidth() {
     if (columnsUserSized) return;
-    const wrap = el.querySelector('.cf-table-wrap');
-    if (!wrap) return;
-    const available = Math.floor(wrap.clientWidth || 0);
-    if (!available) return;
-    fillDefaultColumnWidths(available);
+    fillDefaultColumnWidths();
   }
 
   function applyColumnWidths(el) {
     const table = el.querySelector('.cf-table');
     if (!table) return;
-    ensureTableFillsWidth(el);
+    ensureTableFillsWidth();
     const total = columnWidthsTotal();
-    table.style.width = '100%';
+    table.style.width = `${total}px`;
     table.style.minWidth = `${total}px`;
+    table.style.maxWidth = 'none';
     table.querySelectorAll('col[data-cf-col]').forEach((col, index) => {
       const width = Number(columnWidths[index]) || DEFAULT_COL_WIDTHS[index] || 120;
       col.style.width = `${width}px`;

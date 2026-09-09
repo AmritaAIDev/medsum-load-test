@@ -20,7 +20,8 @@ let ltServiceEmail = '';
 let accDoctors = [];       // [{phone, password, patients: [id, ...]}, ...]
 let accSetupOpen = true;
 let lastListView = 'dashboard';
-let pendingFocusAudioSelection = false;
+let detailBackTarget = 'recordings'; // recordings | recent_runs
+let pendingFocusBackTarget = null;
 let audioCatalog = [];
 let audioSelectedKeys = [];
 let audioSelectionReady = false;
@@ -682,7 +683,7 @@ function bindTestCaseViewClicks() {
         return;
       }
       if (kind === 'view' && testId) {
-        openTestDetail(testId);
+        openTestDetail(testId, { from: detailOriginFromEl(actionBtn) });
       }
       return;
     }
@@ -702,8 +703,22 @@ function bindTestCaseViewClicks() {
       : (Boolean(testId) && hostId !== 'detail-view' && hostId !== 'back-btn');
     if (!allowed) return;
     event.preventDefault();
-    openTestDetail(testId);
+    openTestDetail(testId, { from: detailOriginFromEl(opener) });
   });
+}
+
+function detailOriginFromEl(el) {
+  if (!el || !el.closest) return null;
+  if (el.closest('#recordings-table-section, .recordings-table, [data-recordings-table]')) {
+    return 'recordings';
+  }
+  if (el.closest('[data-results-source="history"]')) {
+    return 'recent_runs';
+  }
+  if (el.closest('#selected-files-table, .selected-files-panel, #runs-view')) {
+    return 'recent_runs';
+  }
+  return null;
 }
 
 function bindModelDescription() {
@@ -3588,6 +3603,14 @@ async function openTestDetail(testId, opts) {
   }
 
   const fromRoute = !!(opts && opts.fromRoute);
+  if (opts && opts.from) {
+    detailBackTarget = opts.from === 'recent_runs' ? 'recent_runs' : 'recordings';
+  } else if (!fromRoute) {
+    // Infer from the active list page when caller did not pass an origin.
+    detailBackTarget = lastListView === 'runs' ? 'recent_runs' : 'recordings';
+  }
+  updateDetailBackLabel();
+
   if (!fromRoute && window.MedsumPageNav && window.MedsumPageNav.navigate) {
     window.MedsumPageNav.navigate('detail', { testId: id });
     return;
@@ -5541,16 +5564,21 @@ function handlePageChange(route) {
   if (page === 'runs') onHistoryFilterChange();
   if (page === 'load-testing') ltUpdateRowCount();
   updateDetailBackLabel();
-  if (page === 'runs' && pendingFocusAudioSelection) {
-    pendingFocusAudioSelection = false;
-    focusAudioTestCaseSelection();
+  if (pendingFocusBackTarget
+      && ((page === 'dashboard' && pendingFocusBackTarget === 'recordings')
+        || (page === 'runs' && pendingFocusBackTarget === 'recent_runs'))) {
+    const target = pendingFocusBackTarget;
+    pendingFocusBackTarget = null;
+    focusDetailBackTarget(target);
   }
 }
 
 function updateDetailBackLabel() {
   const btn = document.getElementById('back-btn');
   if (!btn) return;
-  btn.textContent = '← Back to audio selection';
+  btn.textContent = detailBackTarget === 'recent_runs'
+    ? '← Back to Recent Test Runs'
+    : '← Back to Recordings';
 }
 
 function showDashboard() {
@@ -5563,26 +5591,24 @@ function showDashboard() {
   if (nav.setActiveView) nav.setActiveView('dashboard');
 }
 
-function focusAudioTestCaseSelection() {
-  const panel = document.querySelector('#runs-view .selected-files-panel');
-  const table = document.getElementById('selected-files-table');
-  const target = panel || table
-    || document.querySelector('#runs-view .upload-gt-card')
-    || document.getElementById('runs-view');
-  if (!target || typeof target.scrollIntoView !== 'function') return;
+function focusDetailBackTarget(target) {
+  let el = null;
+  if (target === 'recent_runs') {
+    el = document.querySelector('#runs-view .table-panel[data-results-source="history"]')
+      || document.querySelector('#runs-view [data-results-source="history"]')
+      || document.getElementById('runs-view');
+  } else {
+    el = document.getElementById('recordings-table-section')
+      || document.querySelector('#dashboard-view .recordings-table')
+      || document.getElementById('dashboard-view');
+  }
+  if (!el || typeof el.scrollIntoView !== 'function') return;
 
-  const highlight = panel || (table && table.closest('.selected-files-panel')) || table;
   const run = () => {
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    if (highlight) {
-      highlight.classList.add('is-back-focus');
-      window.setTimeout(() => highlight.classList.remove('is-back-focus'), 1600);
-    }
-    if (table && typeof table.focus === 'function') {
-      try { table.setAttribute('tabindex', '-1'); table.focus({ preventScroll: true }); } catch (_err) { /* ignore */ }
-    }
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    el.classList.add('is-back-focus');
+    window.setTimeout(() => el.classList.remove('is-back-focus'), 1600);
   };
-  // Page switch can be async (hash routing); retry once layout is ready.
   requestAnimationFrame(() => {
     run();
     window.setTimeout(run, 80);
@@ -5597,15 +5623,25 @@ function backToDashboardFromDetail() {
   if (window.MedsumSoapComparison && window.MedsumSoapComparison.clear) {
     window.MedsumSoapComparison.clear();
   }
-  // Return to Test Runs so the user can choose audio / test cases again.
-  pendingFocusAudioSelection = true;
+  const target = detailBackTarget === 'recent_runs' ? 'recent_runs' : 'recordings';
+  pendingFocusBackTarget = target;
   const nav = pageNavApi();
+  if (target === 'recent_runs') {
+    if (nav.navigate) {
+      nav.navigate('runs');
+    } else {
+      showTestRuns();
+      pendingFocusBackTarget = null;
+      focusDetailBackTarget(target);
+    }
+    return;
+  }
   if (nav.navigate) {
-    nav.navigate('runs');
+    nav.navigate('dashboard');
   } else {
-    showTestRuns();
-    pendingFocusAudioSelection = false;
-    focusAudioTestCaseSelection();
+    showDashboard();
+    pendingFocusBackTarget = null;
+    focusDetailBackTarget(target);
   }
 }
 

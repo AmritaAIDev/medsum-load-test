@@ -800,7 +800,7 @@
         event.preventDefault();
         const testId = row.getAttribute('data-open-recording') || '';
         if (testId && typeof root.openTestDetail === 'function') {
-          root.openTestDetail(testId);
+          root.openTestDetail(testId, { from: 'recordings' });
         }
       };
       row.addEventListener('click', openRecording);
@@ -816,7 +816,7 @@
         event.stopPropagation();
         const testId = link.getAttribute('data-open-recording') || '';
         if (testId && typeof root.openTestDetail === 'function') {
-          root.openTestDetail(testId);
+          root.openTestDetail(testId, { from: 'recordings' });
         }
       });
     });

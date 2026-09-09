@@ -5160,6 +5160,12 @@ em.na { color: var(--text-muted); font-style: italic; }
 .recordings-table-section {
   margin-top: 0;
 }
+.recordings-table-section.is-back-focus,
+.table-panel[data-results-source="history"].is-back-focus {
+  outline: 3px solid rgba(37, 99, 235, 0.28);
+  outline-offset: 4px;
+  border-radius: 12px;
+}
 .recordings-view-toggle {
   display: inline-flex;
   align-items: center;
@@ -5372,10 +5378,24 @@ em.na { color: var(--text-muted); font-style: italic; }
 .recordings-table tbody tr.recording-row.is-clickable {
   cursor: pointer;
 }
+/* Flag is first-child; override accuracy-table 28% first-column width */
+.accuracy-table-section .recordings-table th.flag-col,
+.accuracy-table-section .recordings-table td.flag-col,
 .recordings-table .flag-col {
-  width: 2.4rem;
+  width: 2.75rem;
+  max-width: 2.75rem;
+  padding-left: 0.35rem;
+  padding-right: 0.35rem;
   text-align: center;
   vertical-align: middle;
+  white-space: nowrap;
+}
+.accuracy-table-section .recordings-table th:nth-child(2),
+.accuracy-table-section .recordings-table td:nth-child(2) {
+  width: 28%;
+  text-align: left;
+  padding-left: 1rem;
+  padding-right: 1.5rem;
 }
 .flag-header-stack {
   display: inline-flex;
@@ -5416,7 +5436,8 @@ em.na { color: var(--text-muted); font-style: italic; }
   line-height: 1;
 }
 .recordings-table-detailed .flag-col {
-  width: 2.1rem;
+  width: 2.5rem;
+  max-width: 2.5rem;
   vertical-align: bottom;
 }
 .recording-name {
@@ -6072,11 +6093,11 @@ em.na { color: var(--text-muted); font-style: italic; }
   border-top: 1px solid #E2E8F0;
 }
 .cf-table {
-  width: 100%;
+  width: auto;
   border-collapse: collapse;
   table-layout: fixed;
   font-size: 0.88rem;
-  min-width: 100%;
+  min-width: 0;
 }
 .cf-table th {
   position: relative;
