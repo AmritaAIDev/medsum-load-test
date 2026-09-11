@@ -23,6 +23,7 @@ from medsum_testing.backend.services.audio_selection import (
     MISSING_LANGUAGE_RUN_MESSAGE,
     apply_gt_override_to_loaded,
     attach_selection_overrides,
+    audio_file_key,
     filter_cases_for_run,
     missing_language_uploads,
 )
@@ -1351,8 +1352,19 @@ def run_all_tests():
             len(all_cases),
         )
         if not test_cases:
+            wanted = sorted({audio_file_key(item) for item in selected_audios})
+            available = sorted({audio_file_key(item) for item in all_cases})
+            log.warning(
+                "run_all: selection mismatch wanted=%s available=%s",
+                wanted[:8],
+                available[:8],
+            )
             return jsonify({
-                "error": "No matching audio files for the current selection"
+                "error": (
+                    "No matching audio files for the current selection. "
+                    "Clear selection, refresh Drive files, and re-select "
+                    "(language/folder labels must match, e.g. English not 01_English)."
+                )
             }), 400
     else:
         test_cases = all_cases

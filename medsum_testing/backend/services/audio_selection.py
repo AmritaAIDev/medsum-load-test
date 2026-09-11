@@ -25,6 +25,7 @@ from urllib.parse import quote
 
 from medsum_testing.backend.services.drive_service import (
     _match_key,
+    extract_language,
     get_soap_base,
     get_translation_base,
     is_soap_gt,
@@ -133,9 +134,24 @@ FILE_FLAG_KEYS = (
 )
 
 
+def normalize_selection_language(raw: Any) -> str:
+    """Normalize folder labels / codes onto the Drive language key.
+
+    ``01_English`` and ``English`` and ``en`` all become ``english``.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    extracted = extract_language(text)
+    canon = canonical_language_label(extracted) or canonical_language_label(text)
+    return (canon or extracted or text).strip().lower()
+
+
 def audio_file_key(item: dict | None) -> tuple[str, str]:
     data = item or {}
-    language = str(data.get("language") or data.get("folder_label") or "").strip().lower()
+    language = normalize_selection_language(
+        data.get("language") or data.get("folder_label") or ""
+    )
     audio = str(
         data.get("audio") or data.get("audio_filename") or data.get("filename") or ""
     ).strip().lower()
@@ -165,7 +181,7 @@ def upload_needs_language(item: dict | None) -> bool:
     data = item or {}
     if item_source(data) != "upload":
         return False
-    return not canonical_language_label(
+    return not normalize_selection_language(
         data.get("language") or data.get("folder_label") or ""
     )
 
@@ -260,12 +276,28 @@ def filter_cases_for_run(
     """Execution set: selected files only. None means the full discovery list.
 
     An empty selected list means run nothing — never fall back to all files.
+    Language is normalized (01_English → english) so folder labels match Drive.
     """
     if selected is None:
         return list(discovered or [])
     wanted = {audio_file_key(item) for item in selected}
     wanted.discard(("", ""))
-    return [case for case in (discovered or []) if audio_file_key(case) in wanted]
+    matched = [case for case in (discovered or []) if audio_file_key(case) in wanted]
+    if matched or not wanted:
+        return matched
+
+    # Fallback: selection language empty/stale but audio name still unique.
+    wanted_audio = {audio for _lang, audio in wanted if audio}
+    by_audio: dict[str, list[dict]] = {}
+    for case in discovered or []:
+        _lang, audio = audio_file_key(case)
+        if audio in wanted_audio:
+            by_audio.setdefault(audio, []).append(case)
+    fallback: list[dict] = []
+    for _audio, cases in by_audio.items():
+        if len(cases) == 1:
+            fallback.append(cases[0])
+    return fallback
 
 
 def results_include_failures(results: list[dict]) -> list[dict]:
@@ -283,11 +315,13 @@ def run_payload(selected: list[dict] | None) -> list[dict]:
         if not audio:
             continue
         source = str(item.get("source") or "drive")
-        language = str(item.get("language") or item.get("folder_label") or "").strip()
+        language = normalize_selection_language(
+            item.get("language") or item.get("folder_label") or ""
+        )
         if source == "upload":
             language = canonical_language_label(language) or language
         row = {
-            "language": language,
+            "language": language.capitalize() if language else "",
             "audio": audio,
             "source": source,
         }

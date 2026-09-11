@@ -12,3 +12,5 @@ reportlab
 openpyxl
 flask>=3.0
 requests>=2.31
+# Optional: Fix #4 semantic narrative matching (falls back to SequenceMatcher)
+sentence-transformers>=2.2.0

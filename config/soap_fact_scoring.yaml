@@ -155,11 +155,21 @@ critical_fact_metric_fields:
 # null = no tolerance; any extracted-number mismatch is Incorrect.
 numeric_tolerance: null
 
+# Not-established / empty. Never treat established negatives (NKA) as NA.
+# Bare "none" is NOT listed here — it often means an explicit clinical negative
+# (see established_none_markers / equivalent_established_absence).
 na_markers:
   - "NA"
   - "N/A"
   - "n/a"
   - "na"
+  - "null"
+  - "Null"
+  - "Unknown"
+  - "Not known"
+  - "Not specified"
+  - "Not measured"
+  - "Did not measure"
   - "Not applicable"
   - "not applicable"
   - "Nothing to report"
@@ -174,13 +184,39 @@ absence_markers:
   - "no cough"
   - "none present"
 
-# Established negative VALUES (still applicable facts). A different generated
-# value is Incorrect, not NA. Empty generated is Missing.
+# Established negative VALUES (still applicable facts). Empty generated is Missing.
+# When BOTH sides match any of these, treat as Correct (phrasing variants).
 established_negative_markers:
   - "no known allergies"
+  - "no known allergy"
+  - "no known medication allergies"
+  - "no known drug allergies"
+  - "no known allergies to any medicines"
+  - "no allergy to medicines"
+  - "not allergic to any medicines"
+  - "not allergic to any medicine"
+  - "no allergies"
   - "nka"
   - "nkda"
-  - "no known drug allergies"
+
+# Optional none-of-X phrases (medications / investigations). Both-sides match → Correct.
+established_none_markers:
+  - "none"
+  - "nil"
+  - "no current medications"
+  - "not on any medication"
+  - "not on any medications"
+  - "no medications"
+  - "no medication"
+  - "nil medications"
+  - "no investigations needed"
+  - "no investigation needed"
+  - "no investigations"
+  - "investigations not needed"
+
+# Word-subset match: shorter side must cover at least this fraction of the longer
+# side. Stops "Fever" matching a full multi-symptom chief complaint.
+subset_coverage_min: 0.75
 
 section_labels:
   subjective: Subjective
