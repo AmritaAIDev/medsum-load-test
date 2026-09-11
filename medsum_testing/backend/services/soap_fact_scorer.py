@@ -14,7 +14,16 @@ LLM `section_details[].differences[]` types remap:
     missing → Missing, incorrect → Incorrect, extra → Hallucination
 Correct is explicit (catalog field with no diff, or type=Correct).
 NA vs Missing: empty/NA GT is NA; established GT (incl. “No known allergies”)
-with empty generated is Missing. NA is never scored as Missing.
+with empty generated is Missing — unless field_path is in the Fix #1 empty-norm
+set (allergies/medications/investigations/physical_exam), where NKA/NA/None
+collapse together. NA is never scored as Missing.
+LLM overlays never rewrite deterministic NA into Incorrect/Missing/Hallucination.
+
+Established negatives (NKA / no known allergies / …) match each other as Correct.
+Numerical/vital fields match on equal extracted numbers (units/labels ignored).
+Word-subset matches require config subset_coverage_min (default 0.75).
+Medication arrays rematch order-independently by drug name (Fix #0).
+Narrative fields may match via semantic similarity thresholds (Fix #4/#6).
 
 4-level LLM severity → 3-level MOM criticality (config severity_to_criticality):
     critical → Critical (5), high → High (3),
@@ -31,6 +40,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +51,13 @@ from medsum_testing.backend.services.accuracy_thresholds import (
     get_accuracy_thresholds,
 )
 from medsum_testing.backend.services.config_loader import get_repo_root
+from medsum_testing.backend.services.medication_comparison import (
+    ScoringComparator,
+    compare_medication_arrays,
+    drug_names_match,
+    match_medication_indices,
+    normalize_drug_name,
+)
 
 CORRECT = "Correct"
 INCORRECT = "Incorrect"
@@ -48,10 +65,108 @@ MISSING = "Missing"
 HALLUCINATION = "Hallucination"
 NA = "NA"
 CONTRADICTORY = "Contradictory"
+PARTIAL = "Partial"
 
-EXTERNAL_RESULTS = (CORRECT, INCORRECT, MISSING, HALLUCINATION, NA)
-GENERATED_RESULTS = (CORRECT, INCORRECT, HALLUCINATION)
+EXTERNAL_RESULTS = (CORRECT, INCORRECT, MISSING, HALLUCINATION, NA, PARTIAL)
+GENERATED_RESULTS = (CORRECT, INCORRECT, HALLUCINATION, PARTIAL)
 ERROR_RESULTS = (INCORRECT, MISSING, HALLUCINATION)
+
+# Fields where empty/absence tokens normalize together (Fix #1).
+_EMPTY_NORM_FIELDS = frozenset(
+    {
+        "allergies",
+        "allergy",
+        "medications",
+        "current medications",
+        "investigations",
+        "physical_exam",
+        "physical exam",
+        "other findings",
+        "heart exam",
+        "subjective.allergies",
+        "subjective.medications",
+        "plan.medications",
+        "plan.investigations",
+        "objective.physical_exam",
+    }
+)
+
+NORMALIZED_EMPTY = {
+    "",
+    None,
+    "NA",
+    "N/A",
+    "None",
+    "none",
+    "null",
+    "Not applicable",
+    "Not known",
+    "Unknown",
+    "not applicable",
+    "not known",
+    "unknown",
+    "na",
+    "n/a",
+}
+
+# Fix #5 — per-field pass bars (similarity / accuracy).
+FIELD_PASS_THRESHOLDS = {
+    "assessment.diagnosis": 0.95,
+    "plan.medications.drug_name": 0.95,
+    "subjective.allergies": 0.95,
+    "objective.vitals": 0.85,
+    "plan.medications.dose": 0.90,
+    "subjective.chief_complaint": 0.70,
+    "assessment.reasoning": 0.70,
+    "plan.education": 0.70,
+}
+
+# Fix #4 — semantic thresholds by field path (also covers Fix #6 reasoning).
+SEMANTIC_THRESHOLDS = {
+    "assessment.diagnosis": 0.95,
+    "plan.medications.drug_name": 0.95,
+    "plan.medications.dose": 0.95,
+    "plan.medications.snomed_ct_id": 0.95,
+    "subjective.allergies": 0.95,
+    "objective.vitals.blood_pressure": 0.85,
+    "objective.vitals.heart_rate": 0.85,
+    "objective.vitals.respiratory_rate": 0.85,
+    "objective.vitals.temperature": 0.85,
+    "plan.medications.schedule": 0.85,
+    "assessment.status": 0.85,
+    "subjective.chief_complaint": 0.75,
+    "subjective.history_of_present_illness": 0.75,
+    "subjective.past_medical_history": 0.75,
+    "subjective.current_medications": 0.75,
+    "objective.physical_exam": 0.75,
+    "assessment.reasoning": 0.75,
+    "plan.activity": 0.75,
+    "plan.investigations": 0.75,
+    "plan.education": 0.75,
+    "plan.follow_up": 0.75,
+    "summary": 0.70,
+}
+
+_SEMANTIC_MODEL = None
+_SEMANTIC_MODEL_FAILED = False
+
+_VITAL_FIELD_PATHS = frozenset(
+    {
+        "objective.vitals.blood_pressure",
+        "objective.vitals.heart_rate",
+        "objective.vitals.respiratory_rate",
+        "objective.vitals.temperature",
+        "blood pressure",
+        "heart rate",
+        "pulse",
+        "respiratory rate",
+        "temperature",
+    }
+)
+
+_MED_LEAF_FIELDS = frozenset(
+    {"drug name", "dose", "schedule", "duration", "instructions", "snomed ct id"}
+)
 
 _SCORING_CACHE: dict[str, Any] | None = None
 _NUMBER_RE = re.compile(
@@ -75,6 +190,39 @@ _FILLER = frozenset(
         "please",
         "tab",
         "tablet",
+    }
+)
+# Labels/units stripped before word compare on vitals / numeric fields.
+_VITAL_NOISE = frozenset(
+    {
+        "bp",
+        "blood",
+        "pressure",
+        "mmhg",
+        "hr",
+        "heart",
+        "rate",
+        "pulse",
+        "bpm",
+        "beats",
+        "min",
+        "rr",
+        "respiratory",
+        "resp",
+        "breaths",
+        "breathing",
+        "temp",
+        "temperature",
+        "c",
+        "f",
+        "celsius",
+        "fahrenheit",
+        "deg",
+        "degree",
+        "degrees",
+        "spo2",
+        "oxygen",
+        "saturation",
     }
 )
 
@@ -184,11 +332,50 @@ def is_established_negative(value: Any, scoring_config: dict | None = None) -> b
     return _matches_marker(value, _markers(cfg, "established_negative_markers"))
 
 
+def is_established_none(value: Any, scoring_config: dict | None = None) -> bool:
+    """Explicit 'none/no medications/no investigations' (still an established fact)."""
+    cfg = scoring_config or load_scoring_config()
+    return _matches_marker(value, _markers(cfg, "established_none_markers"))
+
+
 def is_established_gt(value: Any, scoring_config: dict | None = None) -> bool:
     """GT establishes a fact, including explicit negatives. Empty/NA does not."""
     if is_na_value(value, scoring_config):
         return False
     return True
+
+
+def equivalent_established_absence(
+    left: Any, right: Any, scoring_config: dict | None = None
+) -> bool:
+    """True when both sides state the same kind of established absence.
+
+    Explicit tokens like 'none' / 'nil' count as absence companions for either
+    allergy negatives or none-of-X phrases. Empty string does not — that stays
+    Missing when GT established (safety).
+    """
+    cfg = scoring_config or load_scoring_config()
+    left_neg = is_established_negative(left, cfg)
+    right_neg = is_established_negative(right, cfg)
+    left_none = is_established_none(left, cfg)
+    right_none = is_established_none(right, cfg)
+    if left_neg and right_neg:
+        return True
+    if left_none and right_none:
+        return True
+    # Cross-family only for bare none/nil tokens (shared vocabulary).
+    bare = frozenset({"none", "nil"})
+    left_bare = _norm_name(left) in bare
+    right_bare = _norm_name(right) in bare
+    if left_neg and right_bare:
+        return True
+    if right_neg and left_bare:
+        return True
+    if left_none and right_bare:
+        return True
+    if right_none and left_bare:
+        return True
+    return False
 
 
 def _spec_name_keys(spec: dict, catalog_key: str = "") -> set[str]:
@@ -263,7 +450,287 @@ def numbers_conflict(left: Any, right: Any) -> bool:
     return a != b
 
 
-def values_match(left: Any, right: Any) -> bool:
+def numbers_equal(left: Any, right: Any) -> bool:
+    a = extract_numeric_tokens(left)
+    b = extract_numeric_tokens(right)
+    return bool(a) and a == b
+
+
+def normalize_vital_text(value: Any) -> str:
+    """Strip common vital labels/units so 'BP 140/90' aligns with '140/90 mmHg'."""
+    words = [
+        w
+        for w in _WORD_RE.findall(_norm_name(value))
+        if w not in _FILLER and w not in _VITAL_NOISE
+    ]
+    return " ".join(words)
+
+
+# --- Fix #0: order-independent medication array comparison --------------------
+# Implemented in medication_comparison.ScoringComparator / compare_medication_arrays.
+
+
+# --- Fix #1: empty / null normalization --------------------------------------
+
+
+def normalize_for_comparison(value: Any, *, collapse_established: bool = False) -> Any:
+    """Convert common empty/absence representations to empty string."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        normalized = stripped.lower()
+        empty_tokens = {
+            str(x).lower() for x in NORMALIZED_EMPTY if x is not None
+        } | {""}
+        if normalized in empty_tokens:
+            return ""
+        if is_na_value(stripped):
+            return ""
+        # Scoped fields (allergies/meds/investigations/exam): NKA / none → empty.
+        if collapse_established and (
+            is_established_negative(stripped) or is_established_none(stripped)
+        ):
+            return ""
+        return stripped
+    if value is None or value == "":
+        return ""
+    return value
+
+
+def _field_allows_empty_norm(field_path: str | None) -> bool:
+    if not field_path:
+        return False
+    key = _norm_name(field_path)
+    return key in {_norm_name(f) for f in _EMPTY_NORM_FIELDS} or any(
+        key.endswith(_norm_name(tail))
+        for tail in ("allergies", "allergy", "medications", "investigations", "physical exam")
+    )
+
+
+# --- Fix #2: vitals format standardization -----------------------------------
+
+
+def is_vital_field(field_path: str | None) -> bool:
+    """Check if field is a vital sign."""
+    if not field_path:
+        return False
+    key = _norm_name(field_path)
+    return key in {_norm_name(p) for p in _VITAL_FIELD_PATHS} or key.endswith(
+        ("blood pressure", "heart rate", "pulse", "respiratory rate", "temperature")
+    )
+
+
+def extract_vital_name(field_path: str) -> str:
+    """Extract vital name from field path."""
+    tail = field_path.split(".")[-1]
+    key = _norm_name(tail)
+    if key in {"pulse", "heart rate"}:
+        return "heart_rate"
+    if key == "blood pressure":
+        return "blood_pressure"
+    if key == "respiratory rate":
+        return "respiratory_rate"
+    return key.replace(" ", "_")
+
+
+def _normalize_bp(value: str) -> str:
+    """Normalize BP to SYS/DIA mmHg format."""
+    if "mmhg" in value.lower():
+        return value if value.endswith("mmHg") or "mmHg" in value else f"{value}"
+    if "/" in value:
+        return f"{value} mmHg" if not value.lower().endswith("mmhg") else value
+    return value
+
+
+def _add_unit(value: str, unit: str) -> str:
+    """Add unit if missing."""
+    if unit.lower() in value.lower():
+        return value
+    clean = re.sub(
+        r"\s*(bpm|breaths/min|°C|beats/min|c|f)\s*$",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return f"{clean} {unit}".strip()
+
+
+def normalize_vital(vital_name: str, value: Any) -> str:
+    """Standardize vital sign formats for comparison."""
+    if value in ("", None, "NA", "N/A") or value is None:
+        return ""
+    if isinstance(value, str) and not value.strip():
+        return ""
+    value_str = str(value).strip()
+    templates = {
+        "blood_pressure": _normalize_bp,
+        "heart_rate": lambda v: _add_unit(v, "bpm"),
+        "pulse": lambda v: _add_unit(v, "bpm"),
+        "respiratory_rate": lambda v: _add_unit(v, "breaths/min"),
+        "temperature": lambda v: _add_unit(v, "°C"),
+    }
+    normalizer = templates.get(vital_name, lambda x: x)
+    return normalizer(value_str)
+
+
+# --- Fix #4 / #6: semantic matching for narrative fields ---------------------
+
+
+def _get_semantic_model():
+    global _SEMANTIC_MODEL, _SEMANTIC_MODEL_FAILED
+    if _SEMANTIC_MODEL_FAILED:
+        return None
+    if _SEMANTIC_MODEL is not None:
+        return _SEMANTIC_MODEL
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        _SEMANTIC_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+        return _SEMANTIC_MODEL
+    except Exception:
+        _SEMANTIC_MODEL_FAILED = True
+        return None
+
+
+def semantic_similarity(text1: str, text2: str) -> float:
+    """Calculate semantic similarity between two texts (0-1 scale)."""
+    if not text1 or not text2:
+        return 0.0
+    model = _get_semantic_model()
+    if model is not None:
+        try:
+            from sentence_transformers import util
+
+            embeddings1 = model.encode(text1, convert_to_tensor=True)
+            embeddings2 = model.encode(text2, convert_to_tensor=True)
+            similarity = util.pytorch_cos_sim(embeddings1, embeddings2)
+            return float(similarity[0][0])
+        except Exception:
+            pass
+    # Lightweight fallback: max(sequence ratio, stemmed-token Jaccard/recall).
+    a = _norm_name(text1)
+    b = _norm_name(text2)
+    seq = SequenceMatcher(None, a, b).ratio()
+    words_a = {_stem_token(w) for w in _WORD_RE.findall(a) if w not in _FILLER}
+    words_b = {_stem_token(w) for w in _WORD_RE.findall(b) if w not in _FILLER}
+    if not words_a or not words_b:
+        return seq
+    inter = words_a & words_b
+    union = words_a | words_b
+    jaccard = len(inter) / len(union)
+    soft_recall = len(inter) / min(len(words_a), len(words_b))
+    return max(seq, jaccard, soft_recall)
+
+
+def _stem_token(word: str) -> str:
+    """Very light stem so day/days and fever variants align in the fallback."""
+    if word in {"days", "day"}:
+        return "day"
+    if len(word) > 4 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    if word.endswith("ed") and len(word) > 5:
+        return word[:-2]
+    return word
+
+
+def _semantic_field_key(field_path: str | None) -> str | None:
+    if not field_path:
+        return None
+    raw = str(field_path).strip()
+    if raw in SEMANTIC_THRESHOLDS:
+        return raw
+    key = _norm_name(raw)
+    aliases = {
+        "chief complaint": "subjective.chief_complaint",
+        "history of present illness": "subjective.history_of_present_illness",
+        "past medical history": "subjective.past_medical_history",
+        "current medications": "subjective.current_medications",
+        "allergy": "subjective.allergies",
+        "allergies": "subjective.allergies",
+        "physical exam": "objective.physical_exam",
+        "other findings": "objective.physical_exam",
+        "assessment reasoning": "assessment.reasoning",
+        "reasoning": "assessment.reasoning",
+        "diagnosis": "assessment.diagnosis",
+        "activity": "plan.activity",
+        "investigations": "plan.investigations",
+        "education": "plan.education",
+        "follow up": "plan.follow_up",
+        "follow-up": "plan.follow_up",
+        "summary": "summary",
+        "drug name": "plan.medications.drug_name",
+        "dose": "plan.medications.dose",
+        "schedule": "plan.medications.schedule",
+        "blood pressure": "objective.vitals.blood_pressure",
+        "heart rate": "objective.vitals.heart_rate",
+        "pulse": "objective.vitals.heart_rate",
+        "respiratory rate": "objective.vitals.respiratory_rate",
+        "temperature": "objective.vitals.temperature",
+    }
+    return aliases.get(key)
+
+
+def _content_words(value: Any, *, strip_vital_noise: bool = False) -> list[str]:
+    text = normalize_vital_text(value) if strip_vital_noise else _norm_name(value)
+    return [w for w in _WORD_RE.findall(text) if w not in _FILLER]
+
+
+def _subset_coverage_ok(
+    shorter: list[str], longer: list[str], min_ratio: float
+) -> bool:
+    if not shorter or not longer:
+        return False
+    if set(shorter) <= set(longer):
+        return (len(set(shorter)) / len(set(longer))) >= min_ratio
+    return False
+
+
+def values_match(
+    left: Any,
+    right: Any,
+    scoring_config: dict | None = None,
+    *,
+    numerical: bool = False,
+    field_path: str | None = None,
+) -> bool:
+    """True when values are equivalent under SOAP fact rules.
+
+    Established negatives / none-phrases are handled in classify_pair.
+    For numerical/vital fields, equal extracted numbers win (units/labels ignored).
+    Word-subset matches require coverage >= config subset_coverage_min so a
+    short fragment cannot pass against a long ground-truth narrative.
+    """
+    cfg = scoring_config or load_scoring_config()
+
+    # FIX #1: empty/null normalization (scoped fields, or always for token empties)
+    if _field_allows_empty_norm(field_path):
+        left = normalize_for_comparison(left, collapse_established=True)
+        right = normalize_for_comparison(right, collapse_established=True)
+    else:
+        # Still normalize bare NA/null tokens globally for equality of empties.
+        if (
+            normalize_for_comparison(left) == ""
+            and normalize_for_comparison(right) == ""
+            and (
+                is_na_value(left, cfg)
+                or left in ("", None)
+                or is_na_value(right, cfg)
+                or right in ("", None)
+            )
+        ):
+            # Only when both are true NA/empty — not established negatives.
+            left_emptyish = is_na_value(left, cfg) or left in ("", None)
+            right_emptyish = is_na_value(right, cfg) or right in ("", None)
+            if left_emptyish and right_emptyish:
+                return True
+
+    # FIX #2: normalize vitals format
+    if is_vital_field(field_path) or numerical:
+        vital_name = extract_vital_name(field_path or "temperature")
+        if is_vital_field(field_path):
+            left = normalize_vital(vital_name, left)
+            right = normalize_vital(vital_name, right)
+            numerical = True
+
     a = _norm_name(left)
     b = _norm_name(right)
     if not a and not b:
@@ -272,14 +739,30 @@ def values_match(left: Any, right: Any) -> bool:
         return True
     if numbers_conflict(left, right):
         return False
-    words_a = [w for w in _WORD_RE.findall(a) if w not in _FILLER]
-    words_b = [w for w in _WORD_RE.findall(b) if w not in _FILLER]
+    if numerical and numbers_equal(left, right):
+        return True
+
+    words_a = _content_words(left, strip_vital_noise=numerical)
+    words_b = _content_words(right, strip_vital_noise=numerical)
     if words_a and words_a == words_b:
         return True
-    if words_a and words_b and set(words_a) <= set(words_b):
+    if words_a and words_b and set(words_a) == set(words_b):
         return True
-    if words_a and words_b and set(words_b) <= set(words_a):
+
+    min_cov = float(cfg.get("subset_coverage_min") or 0.75)
+    if _subset_coverage_ok(words_a, words_b, min_cov):
         return True
+    if _subset_coverage_ok(words_b, words_a, min_cov):
+        return True
+
+    # FIX #4 / #6: semantic matching for narrative fields after exact match fails
+    sem_key = _semantic_field_key(field_path)
+    left_s, right_s = str(left or "").strip(), str(right or "").strip()
+    if sem_key and len(left_s) > 10 and len(right_s) > 10:
+        threshold = SEMANTIC_THRESHOLDS.get(sem_key, 0.80)
+        similarity = semantic_similarity(left_s, right_s)
+        if similarity >= threshold:
+            return True
     return False
 
 
@@ -289,30 +772,88 @@ def classify_pair(
     scoring_config: dict | None = None,
     *,
     gt_applicable: bool | None = None,
+    numerical: bool = False,
+    field_path: str | None = None,
 ) -> dict[str, str]:
-    """Return external result plus optional internal tag (contradictory)."""
-    cfg = scoring_config or load_scoring_config()
-    gt_text = _text(gt_value)
-    gen_text = _text(gen_value)
-    gt_empty = is_na_value(gt_text, cfg)
-    gen_empty = is_na_value(gen_text, cfg)
+    """Return external result plus optional internal tag (contradictory).
 
-    if gt_applicable is False or (gt_empty and gen_empty):
+    Empty/NA markers (including None/null/Not measured) are not-established.
+    Established negatives (NKA, no known allergies, …) are never treated as empty
+    unless field_path is in the Fix #1 empty-norm set (allergies/meds/etc.).
+    """
+    cfg = scoring_config or load_scoring_config()
+
+    # SPECIAL HANDLING FOR MEDICATION ARRAYS (Fix #0)
+    if field_path == "plan.medications" and isinstance(gt_value, list):
+        med_comparison = ScoringComparator().compare(
+            gt_value, gen_value if isinstance(gen_value, list) else []
+        )
+        if med_comparison.get("match"):
+            return {"result": CORRECT, "internal": CORRECT}
+        if float(med_comparison.get("accuracy") or 0) >= 0.6:
+            return {"result": PARTIAL, "internal": PARTIAL}
+        return {"result": INCORRECT, "internal": INCORRECT}
+
+    allow_empty_norm = _field_allows_empty_norm(field_path)
+    if allow_empty_norm:
+        gt_norm = normalize_for_comparison(gt_value, collapse_established=True)
+        gen_norm = normalize_for_comparison(gen_value, collapse_established=True)
+        gt_blank = gt_value is None or (
+            isinstance(gt_value, str) and not gt_value.strip()
+        )
+        gen_blank = gen_value is None or (
+            isinstance(gen_value, str) and not gen_value.strip()
+        )
+        # Truly blank both sides → NA (not established).
+        # Explicit tokens (NA/None/NKA/…) that normalize empty → Correct.
+        if gt_norm == "" and gen_norm == "":
+            if gt_blank and gen_blank:
+                return {"result": NA, "internal": NA}
+            return {"result": CORRECT, "internal": CORRECT}
+        if not isinstance(gt_value, (dict, list)):
+            gt_value = gt_norm
+        if not isinstance(gen_value, (dict, list)):
+            gen_value = gen_norm
+        gt_text = _text(gt_value)
+        gen_text = _text(gen_value)
+        gt_empty = gt_norm == ""
+        gen_empty = gen_norm == ""
+    else:
+        gt_text = _text(gt_value)
+        gen_text = _text(gen_value)
+        gt_empty = is_na_value(gt_text, cfg)
+        gen_empty = is_na_value(gen_text, cfg)
+
+    if gt_applicable is False or (gt_empty and gen_empty and not allow_empty_norm):
         return {"result": NA, "internal": NA}
+
+    if gt_empty and gen_empty and allow_empty_norm:
+        return {"result": CORRECT, "internal": CORRECT}
 
     if gt_empty and not gen_empty:
         return {"result": HALLUCINATION, "internal": HALLUCINATION}
 
     if not gt_empty and gen_empty:
+        # Fix #1 scoped: established-negative GT vs empty already collapsed above.
         return {"result": MISSING, "internal": MISSING}
 
-    if values_match(gt_text, gen_text):
+    if equivalent_established_absence(gt_text, gen_text, cfg):
+        return {"result": CORRECT, "internal": CORRECT}
+
+    if values_match(
+        gt_text, gen_text, cfg, numerical=numerical, field_path=field_path
+    ):
         return {"result": CORRECT, "internal": CORRECT}
 
     if is_absence_value(gt_text, cfg) and not is_absence_value(gen_text, cfg):
         return {"result": HALLUCINATION, "internal": HALLUCINATION}
 
-    if is_established_negative(gt_text, cfg) and not is_established_negative(gen_text, cfg):
+    if is_established_negative(gt_text, cfg) and not is_established_negative(
+        gen_text, cfg
+    ):
+        return {"result": INCORRECT, "internal": CONTRADICTORY}
+
+    if is_established_none(gt_text, cfg) and not is_established_none(gen_text, cfg):
         return {"result": INCORRECT, "internal": CONTRADICTORY}
 
     if numbers_conflict(gt_text, gen_text):
@@ -596,18 +1137,85 @@ def _align_key(fact: dict, scoring_config: dict | None = None) -> tuple[str, int
     return (base, int(idx or 0))
 
 
+def _is_medication_leaf(fact: dict) -> bool:
+    base = _norm_name(fact.get("base_field") or fact.get("field"))
+    cats = {_norm_name(c) for c in (fact.get("categories") or [])}
+    return base in {_norm_name(x) for x in _MED_LEAF_FIELDS} or "medication" in cats
+
+
+def _medication_group_maps(
+    facts: list[dict],
+) -> dict[int, dict[str, dict]]:
+    """index → {drug_name/dose/... → fact} for medication leaf facts."""
+    groups: dict[int, dict[str, dict]] = {}
+    for fact in facts:
+        if not _is_medication_leaf(fact):
+            continue
+        idx = fact.get("index")
+        if idx is None:
+            match = re.search(r"\[(\d+)\]$", _text(fact.get("field")))
+            idx = int(match.group(1)) - 1 if match else 0
+        leaf = _norm_name(fact.get("base_field") or fact.get("field"))
+        groups.setdefault(int(idx or 0), {})[leaf] = fact
+    return groups
+
+
+def _drug_name_from_group(group: dict[str, dict]) -> str:
+    for key in ("drug name", "drug_name"):
+        fact = group.get(_norm_name(key))
+        if fact:
+            return _text(fact.get("value"))
+    return ""
+
+
 def align_facts(
     gt_facts: list[dict],
     gen_facts: list[dict],
     scoring_config: dict | None = None,
 ) -> list[tuple[dict | None, dict | None]]:
+    """Align GT/Gen facts. Medication leaves rematch by drug name (Fix #0)."""
     cfg = scoring_config or load_scoring_config()
+
+    gt_med = _medication_group_maps(gt_facts)
+    gen_med = _medication_group_maps(gen_facts)
+    med_index_pairs: list[tuple[int | None, int | None]] = []
+    if gt_med or gen_med:
+        gt_stub = [
+            {"drug_name": _drug_name_from_group(gt_med[i])} for i in sorted(gt_med)
+        ]
+        gen_stub = [
+            {"drug_name": _drug_name_from_group(gen_med[i])} for i in sorted(gen_med)
+        ]
+        gt_keys = sorted(gt_med)
+        gen_keys = sorted(gen_med)
+        raw_pairs = match_medication_indices(gt_stub, gen_stub)
+        for gt_i, gen_i in raw_pairs:
+            med_index_pairs.append(
+                (
+                    gt_keys[gt_i] if gt_i is not None else None,
+                    gen_keys[gen_i] if gen_i is not None else None,
+                )
+            )
+
+    # Remap gen medication fact indices onto GT order for leaf alignment.
+    gen_index_remap: dict[int, int] = {}
+    synthetic = 10_000
+    for gt_i, gen_i in med_index_pairs:
+        if gt_i is not None and gen_i is not None:
+            gen_index_remap[gen_i] = gt_i
+        elif gen_i is not None:
+            gen_index_remap[gen_i] = synthetic
+            synthetic += 1
+
     gt_map: dict[tuple[str, int], dict] = {}
     gen_map: dict[tuple[str, int], dict] = {}
     for fact in gt_facts:
         gt_map[_align_key(fact, cfg)] = fact
     for fact in gen_facts:
-        gen_map[_align_key(fact, cfg)] = fact
+        key = _align_key(fact, cfg)
+        if _is_medication_leaf(fact) and key[1] in gen_index_remap:
+            key = (key[0], gen_index_remap[key[1]])
+        gen_map[key] = fact
     keys = sorted(set(gt_map) | set(gen_map), key=lambda item: (item[0], item[1]))
     return [(gt_map.get(key), gen_map.get(key)) for key in keys]
 
@@ -641,8 +1249,27 @@ def evaluate_aligned(
                 "internal": template.get("internal") or template["result"],
             }
         else:
+            preview_spec = resolve_field_spec(
+                template.get("base_field") or template.get("field") or "", cfg
+            )
+            categories = list(
+                template.get("categories") or preview_spec.get("categories") or []
+            )
+            numerical = "numerical" in {_norm_name(c) for c in categories}
+            field_path = _text(
+                template.get("base_field") or template.get("field") or ""
+            )
+            # Prefer catalog path when available for vitals / semantic keys.
+            paths = list(preview_spec.get("paths") or [])
+            if paths:
+                field_path = str(paths[0]).replace(".*", "")
             classified = classify_pair(
-                gt_value, gen_value, cfg, gt_applicable=gt_applicable
+                gt_value,
+                gen_value,
+                cfg,
+                gt_applicable=gt_applicable,
+                numerical=numerical,
+                field_path=field_path,
             )
         result = classified["result"]
         if gt_applicable is False and result != HALLUCINATION:
@@ -718,7 +1345,12 @@ def apply_section_details(
     section_details: Any,
     scoring_config: dict | None = None,
 ) -> list[dict]:
-    """Overlay LLM diffs onto aligned facts. NA is never overwritten to Missing."""
+    """Overlay LLM diffs onto aligned facts.
+
+    Deterministic NA (empty/not-established both sides, or expanded NA markers)
+    is never overwritten to Missing/Incorrect/Hallucination — the LLM often
+    mislabels '' vs 'NA' as Incorrect.
+    """
     cfg = scoring_config or load_scoring_config()
     diffs = iter_section_diffs(section_details)
     if not diffs:
@@ -742,7 +1374,8 @@ def apply_section_details(
         if row is None:
             continue
         used.add(idx)
-        if row.get("result") == NA and mapped == MISSING:
+        # Never let the LLM turn not-established into an error.
+        if row.get("result") == NA and mapped in ERROR_RESULTS:
             continue
         row["result"] = mapped
         if mapped == INCORRECT:
@@ -777,7 +1410,9 @@ def compute_metrics(
     """Formula layer used by the worked-example fixtures."""
     cfg = scoring_config or load_scoring_config()
     applicable = [row for row in evaluated if row.get("result") != NA]
-    correct = [row for row in applicable if row.get("result") == CORRECT]
+    correct = [
+        row for row in applicable if row.get("result") in (CORRECT, PARTIAL)
+    ]
     missing = [row for row in applicable if row.get("result") == MISSING]
     captured = [row for row in applicable if row.get("result") in GENERATED_RESULTS]
     hallucinations = [
@@ -797,7 +1432,9 @@ def compute_metrics(
         rows = [row for row in applicable if predicate(row)]
         if not rows:
             return None
-        hits = [row for row in rows if row.get("result") == CORRECT]
+        hits = [
+            row for row in rows if row.get("result") in (CORRECT, PARTIAL)
+        ]
         return _percent(len(hits), len(rows), places=1)
 
     names = _critical_metric_names(cfg)
@@ -810,7 +1447,9 @@ def compute_metrics(
         if id(row) not in denom_ids:
             critical_denom.append(row)
             denom_ids.add(id(row))
-    critical_correct = [row for row in critical_denom if row.get("result") == CORRECT]
+    critical_correct = [
+        row for row in critical_denom if row.get("result") in (CORRECT, PARTIAL)
+    ]
     critical_errors = [
         row
         for row in core_critical
@@ -822,6 +1461,26 @@ def compute_metrics(
     n_ok = len(correct)
     n_hall = len(hallucinations)
     num_tol = cfg.get("numeric_tolerance")
+
+    # Fix #5: field-threshold section accuracies (similarity-aware).
+    field_threshold_scores: dict[str, float] = {}
+    for section_key in ("subjective", "objective", "assessment", "plan"):
+        section_rows = [
+            row
+            for row in evaluated
+            if _norm_name(row.get("section")) == section_key and row.get("result") != NA
+        ]
+        section_map = {
+            _text(row.get("base_field") or row.get("field")): {
+                "similarity": _row_similarity(row),
+                "result": row.get("result"),
+            }
+            for row in section_rows
+        }
+        if section_map:
+            field_threshold_scores[section_key] = round(
+                calculate_section_accuracy(section_map) * 100.0, 2
+            )
 
     return {
         "overall_weighted_clinical_score": overall,
@@ -850,14 +1509,70 @@ def compute_metrics(
         "hallucination_count": n_hall,
         "numeric_tolerance": num_tol,
         "section_weight_breakdown": section_weight_breakdown,
+        "field_threshold_section_scores": field_threshold_scores,
     }
 
 
 def _section_score_for_rows(rows: list[dict]) -> float | None:
     applicable = [r for r in rows if r.get("result") != NA]
     denom = sum(int(r["weight"]) for r in applicable)
-    numer = sum(int(r["weight"]) for r in applicable if r.get("result") == CORRECT)
+    numer = sum(
+        int(r["weight"])
+        for r in applicable
+        if r.get("result") in (CORRECT, PARTIAL)
+    )
     return _percent(numer, denom, places=2)
+
+
+def calculate_section_accuracy(section_results: dict) -> float:
+    """Calculate accuracy respecting per-field thresholds (Fix #5).
+
+    section_results values may be dicts with ``similarity`` (0-1) or a result
+    label (Correct/Partial/Incorrect/…).
+    """
+    total_weight = 0.0
+    weighted_score = 0.0
+    for field, result in (section_results or {}).items():
+        threshold = FIELD_PASS_THRESHOLDS.get(field, 0.80)
+        # Also try catalog / display aliases
+        if field not in FIELD_PASS_THRESHOLDS:
+            sem = _semantic_field_key(field)
+            if sem and sem in FIELD_PASS_THRESHOLDS:
+                threshold = FIELD_PASS_THRESHOLDS[sem]
+        weight = 1.0
+        if isinstance(result, dict):
+            similarity = float(result.get("similarity") or 0.0)
+            if "similarity" not in result:
+                label = str(result.get("result") or "")
+                if label in (CORRECT, PARTIAL):
+                    similarity = 1.0
+                elif label == NA:
+                    continue
+                else:
+                    similarity = 0.0
+        else:
+            label = str(result or "")
+            if label in (CORRECT, PARTIAL):
+                similarity = 1.0
+            elif label == NA:
+                continue
+            else:
+                similarity = 0.0
+        if similarity >= threshold:
+            weighted_score += weight
+        total_weight += weight
+    return weighted_score / total_weight if total_weight > 0 else 0.0
+
+
+def _row_similarity(row: dict) -> float:
+    if row.get("similarity") is not None:
+        return float(row["similarity"])
+    result = row.get("result")
+    if result in (CORRECT, PARTIAL):
+        return 1.0 if result == CORRECT else 0.7
+    if result == NA:
+        return 0.0
+    return 0.0
 
 
 def _section_scores(
@@ -867,6 +1582,7 @@ def _section_scores(
     scores: dict[str, float | None] = {}
     for key in section_keys:
         rows = [row for row in evaluated if _norm_name(row.get("section")) == key]
+        # Prefer weight-based MOM score; expose field-threshold score in metrics.
         scores[key] = _section_score_for_rows(rows)
     return scores
 
@@ -921,7 +1637,7 @@ def _section_details(evaluated: list[dict]) -> dict[str, Any]:
         applicable = [r for r in rows if r.get("result") != NA]
         diffs = []
         for row in applicable:
-            if row.get("result") in (CORRECT, NA):
+            if row.get("result") in (CORRECT, NA, PARTIAL):
                 continue
             diffs.append(
                 {

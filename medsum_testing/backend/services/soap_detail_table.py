@@ -17,9 +17,13 @@ from medsum_testing.backend.services.soap_fact_scorer import (
     INCORRECT,
     MISSING,
     NA,
+    PARTIAL,
     classify_pair,
     is_na_value,
     resolve_field_spec,
+)
+from medsum_testing.backend.services.medication_comparison import (
+    match_medication_indices,
 )
 
 SOAP_DETAIL_COLUMNS = (
@@ -31,7 +35,7 @@ SOAP_DETAIL_COLUMNS = (
 
 SOAP_SECTION_ORDER = ("Subjective", "Objective", "Assessment", "Plan")
 
-RESULT_LABELS = (CORRECT, INCORRECT, MISSING, HALLUCINATION, NA)
+RESULT_LABELS = (CORRECT, INCORRECT, MISSING, HALLUCINATION, NA, PARTIAL)
 
 _RESULT_CSS = {
     CORRECT: "soap-result-correct",
@@ -39,6 +43,7 @@ _RESULT_CSS = {
     MISSING: "soap-result-missing",
     HALLUCINATION: "soap-result-hallucination",
     NA: "soap-result-na",
+    PARTIAL: "soap-result-correct",
 }
 
 _TYPE_TO_RESULT = {
@@ -51,6 +56,7 @@ _TYPE_TO_RESULT = {
     "extra": HALLUCINATION,
     "added in final": HALLUCINATION,
     "field changed": INCORRECT,
+    "partial": PARTIAL,
     "na": NA,
     "n/a": NA,
     "n a": NA,
@@ -153,10 +159,18 @@ def _emit_nested_fact(
     *,
     index: int | None = None,
 ) -> None:
-    classified = classify_pair(gt_val, gen_val)
+    spec = resolve_field_spec(field)
+    categories = {
+        str(c or "").strip().lower() for c in (spec.get("categories") or [])
+    }
+    classified = classify_pair(
+        gt_val,
+        gen_val,
+        numerical="numerical" in categories,
+        field_path=field,
+    )
     if classified["result"] == NA:
         return
-    spec = resolve_field_spec(field)
     section_label = _text(spec.get("section")) or (
         section[:1].upper() + section[1:] if section else "Other"
     )
@@ -194,6 +208,34 @@ def _walk_nested_pair(
     if isinstance(gt_node, list) or isinstance(gen_node, list):
         gt_list = gt_node if isinstance(gt_node, list) else []
         gen_list = gen_node if isinstance(gen_node, list) else []
+        # Fix #0: order-independent medication pairing by drug name
+        dict_pairs = (
+            isinstance(gt_list[0], dict)
+            if gt_list
+            else (isinstance(gen_list[0], dict) if gen_list else False)
+        )
+        if dict_pairs and (
+            any(isinstance(x, dict) and "drug_name" in x for x in gt_list)
+            or any(isinstance(x, dict) and "drug_name" in x for x in gen_list)
+        ):
+            gt_dicts = [x if isinstance(x, dict) else {} for x in gt_list]
+            gen_dicts = [x if isinstance(x, dict) else {} for x in gen_list]
+            pairs = match_medication_indices(gt_dicts, gen_dicts)
+            for display_i, (gt_i, gen_i) in enumerate(pairs):
+                left = gt_dicts[gt_i] if gt_i is not None else {}
+                right = gen_dicts[gen_i] if gen_i is not None else {}
+                for med_key in _MED_LEAF_KEYS:
+                    if med_key not in left and med_key not in right:
+                        continue
+                    _emit_nested_fact(
+                        section,
+                        med_key,
+                        left.get(med_key),
+                        right.get(med_key),
+                        out,
+                        index=display_i,
+                    )
+            return
         n = max(len(gt_list), len(gen_list))
         for i in range(n):
             left = gt_list[i] if i < len(gt_list) else None

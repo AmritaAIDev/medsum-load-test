@@ -253,6 +253,15 @@ digit-vs-words of the SAME number (150 vs one hundred fifty).
 DO FLAG a different number (101 vs 100.4) as Incorrect. There is no numeric
 tolerance unless stated.
 
+NA markers (treat as not-established, same as empty): NA, N/A, None, null,
+Unknown, Not known, Not specified, Not measured, Did not measure, Nothing to
+report. Empty GT + any of these generated → NA (not Incorrect, not Hallucination).
+Established negatives are NOT NA: "No known allergies" / NKA / NKDA with empty
+generated → Missing.
+
+Paraphrase of the SAME clinical facts (word order, mild synonymy) → Correct.
+Incomplete capture that drops clinically material facts → Incorrect.
+
 Schema:
 {
   "similarity_score": <0-100>,
@@ -712,13 +721,81 @@ def _as_med_dict(item: Any) -> dict:
     return {"drug_name": str(item)}
 
 
-def _med_identity(med: dict) -> str:
-    """Normalized drug identity for matching across reordered lists."""
-    for field in ("matched_drug_name", "generic_name", "drug_name"):
-        val = str(med.get(field) or "").strip().lower()
-        if val and val not in ("na", "n/a", "none"):
-            return val
-    return ""
+def _validation_differences(
+    raw_meds: list[dict],
+    final_meds: list[dict],
+    validation_result: dict,
+) -> list[dict]:
+    """Map ValidationComparator buckets onto the legacy differences schema."""
+    differences: list[dict] = []
+
+    for raw in validation_result.get("removed") or []:
+        differences.append(
+            {
+                "type": "removed_in_final",
+                "raw_drug": raw.get("drug_name", ""),
+                "severity": "high",
+                "detail": (
+                    f"Drug '{raw.get('drug_name')}' present in raw "
+                    "but missing in final output"
+                ),
+            }
+        )
+
+    for final in validation_result.get("added") or []:
+        differences.append(
+            {
+                "type": "added_in_final",
+                "final_drug": final.get("drug_name", ""),
+                "severity": "medium",
+                "detail": (
+                    f"Drug '{final.get('drug_name')}' added in final but not in raw"
+                ),
+            }
+        )
+
+    severity_map = {
+        "CRITICAL": "high",
+        "IMPORTANT": "medium",
+        "NORMAL": "low",
+    }
+    for changed in validation_result.get("changed") or []:
+        drug = changed.get("drug_name") or ""
+        for diff in changed.get("differences") or []:
+            field = diff.get("field") or ""
+            if diff.get("type") == "name_normalized" or field == "matched_drug_name":
+                differences.append(
+                    {
+                        "type": "name_normalized",
+                        "drug": drug,
+                        "matched_to": diff.get("gen", ""),
+                        "severity": "low",
+                        "detail": (
+                            f"Drug name normalized: '{diff.get('gt')}' "
+                            f"→ '{diff.get('gen')}'"
+                        ),
+                    }
+                )
+                continue
+            sev = severity_map.get(str(diff.get("severity") or ""), "medium")
+            if field in ("drug_name", "dose"):
+                sev = "high"
+            differences.append(
+                {
+                    "type": "field_changed",
+                    "drug": drug,
+                    "field": field,
+                    "raw_value": diff.get("gt", ""),
+                    "final_value": diff.get("gen", ""),
+                    "severity": sev,
+                    "detail": (
+                        f"{field}: raw='{diff.get('gt')}' → final='{diff.get('gen')}'"
+                    ),
+                }
+            )
+
+    _ = raw_meds, final_meds
+    return differences
 
 
 def validate_medications(transcription_result: dict) -> dict:
@@ -726,6 +803,10 @@ def validate_medications(transcription_result: dict) -> dict:
     Cross-check plan.medications vs debug.raw_soap.plan.medications.
     Entries are paired by drug identity, not list index.
     """
+    from medsum_testing.backend.services.medication_comparison import (
+        ValidationComparator,
+    )
+
     final_meds: list = []
     raw_meds: list = []
 
@@ -749,67 +830,8 @@ def validate_medications(transcription_result: dict) -> dict:
     final_meds = [_as_med_dict(m) for m in (final_meds or [])]
     raw_meds = [_as_med_dict(m) for m in (raw_meds or [])]
 
-    differences = []
-    used_final: set[int] = set()
-
-    def _compare_fields(raw: dict, final: dict) -> None:
-        for field in ("drug_name", "dose", "schedule", "duration", "generic_name", "instructions"):
-            raw_val = raw.get(field, "NA")
-            final_val = final.get(field, "NA")
-            if str(raw_val).strip() != str(final_val).strip():
-                differences.append({
-                    "type": "field_changed",
-                    "drug": final.get("drug_name", raw.get("drug_name", "")),
-                    "field": field,
-                    "raw_value": raw_val,
-                    "final_value": final_val,
-                    "severity": "high" if field in ("drug_name", "dose") else "medium",
-                    "detail": f"{field}: raw='{raw_val}' → final='{final_val}'",
-                })
-
-        if final.get("matched_drug_name") and final.get("drug_name"):
-            if final["matched_drug_name"] != final["drug_name"]:
-                differences.append({
-                    "type": "name_normalized",
-                    "drug": final["drug_name"],
-                    "matched_to": final["matched_drug_name"],
-                    "severity": "low",
-                    "detail": (
-                        f"Drug name normalized: '{final['drug_name']}' "
-                        f"→ '{final['matched_drug_name']}'"
-                    ),
-                })
-
-    for raw in raw_meds:
-        key = _med_identity(raw)
-        match_idx = None
-        if key:
-            for i, final in enumerate(final_meds):
-                if i in used_final:
-                    continue
-                if _med_identity(final) == key:
-                    match_idx = i
-                    break
-        if match_idx is None:
-            differences.append({
-                "type": "removed_in_final",
-                "raw_drug": raw.get("drug_name", ""),
-                "severity": "high",
-                "detail": f"Drug '{raw.get('drug_name')}' present in raw but missing in final output",
-            })
-            continue
-        used_final.add(match_idx)
-        _compare_fields(raw, final_meds[match_idx])
-
-    for i, final in enumerate(final_meds):
-        if i in used_final:
-            continue
-        differences.append({
-            "type": "added_in_final",
-            "final_drug": final.get("drug_name", ""),
-            "severity": "medium",
-            "detail": f"Drug '{final.get('drug_name')}' added in final but not in raw",
-        })
+    validation_result = ValidationComparator().compare(raw_meds, final_meds)
+    differences = _validation_differences(raw_meds, final_meds, validation_result)
 
     return {
         "raw_medications": raw_meds,
@@ -819,6 +841,10 @@ def validate_medications(transcription_result: dict) -> dict:
         "differences": differences,
         "has_critical_differences": any(d["severity"] == "high" for d in differences),
         "difference_count": len(differences),
+        "added_medicines": validation_result.get("added") or [],
+        "removed_medicines": validation_result.get("removed") or [],
+        "changed_medicines": validation_result.get("changed") or [],
+        "unchanged_medicines": validation_result.get("unchanged") or [],
     }
 
 
