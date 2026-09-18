@@ -309,202 +309,95 @@ def extract_soap_from_result(tr: dict, allow_raw_fallback: bool = True) -> dict 
 
 
 SOAP_COMPARE_PROMPT = """
-You are a medical AI evaluator comparing a Ground Truth SOAP note with a Generated SOAP note.
-Return ONLY valid JSON. No markdown, no preamble. Compare facts by semantic meaning, not word-to-word matching. Do not use SOAP section weights.
+You are a meticulous clinical QA reviewer comparing a model-generated SOAP note field-by-field against a ground-truth SOAP note.
+For EACH field, classify the model's value against the ground truth using EXACTLY ONE of these categories:
 
-### NA vs Missing
-NA: Ground Truth does not establish the fact. Do not report it as Missing.
-Missing: Ground Truth establishes the fact, but Generated does not capture it.
-Explicit positive and negative findings are established facts.
+- "correct":
+  The model communicates the same clinically meaningful information as the ground truth. Different wording, synonyms, medical terminology, abbreviations,
+  unit formatting, sentence order, verbosity, or paraphrasing do not change the classification when the complete clinical meaning is preserved.
 
-### Semantic Matching
-Mark Correct when the Generated text conveys the same clinical meaning as the Ground Truth, even when wording, synonyms, abbreviations, sentence structure, terminology, or level of detail differs.
-Do not mark a fact Incorrect only because the wording, certainty wording, or phrasing is different when the clinical meaning is unchanged.
-Do not require Generated to reproduce the exact wording of Ground Truth.
+- "partial_match":
+  The model captures the main clinical information but omits or changes one or more clinically meaningful components without directly contradicting the ground truth.
 
-### Fact-Level Comparison
-Break each field into individual clinical facts before comparing.
-If a field contains multiple facts:
-captured fact → Correct
-omitted fact → Missing
-conflicting fact → Incorrect
-unsupported added fact → Hallucination
-Do not mark an entire field Incorrect because some facts are missing.
-When only part of a compound fact is captured, mark the captured portion Correct and the omitted portion Missing.
+  Clinically meaningful components include symptoms, associated symptoms, severity, location, laterality, duration, timing, frequency, progression,
+  triggers, negative findings, relevant modifiers, diagnosis status, medication dose, route, frequency, duration, instructions, safety-net advice, and other
+  clinically relevant qualifiers.
 
-### Incorrect
-Use Incorrect only when the Generated fact conflicts with or materially changes the Ground Truth.
-Examples include a different number, medicine, dose, frequency, duration, body side/site, positive or negative finding, or materially different diagnosis.
-Do not use Incorrect for differences in wording, synonyms, paraphrasing, abbreviations, shorter wording, or omitted details.
+- "wrong":
+  The model gives information that contradicts, changes, or is factually different from the ground truth. This includes incorrect numerical values,
+  different medications or doses, opposite findings, incorrect laterality, incorrect diagnosis, changed negation, or materially different clinical meaning.
 
-### Hallucination
-Use Hallucination when Generated adds a clinical fact that is not supported anywhere in the complete Ground Truth.
-Before marking a fact as Hallucination, check the entire Ground Truth, including subjective, objective, assessment, plan, and summary.
-A fact supported anywhere in the Ground Truth is not a Hallucination, even if it appears under a different field in Generated.
-Do not restrict hallucination detection to the same field.
+- "missing":
+  The ground truth contains a clinically meaningful value, but the model field is empty or contains no corresponding information.
 
-### Per-Fact Type
-Each fact must be exactly one of:
-Correct
-Incorrect
-Missing
-Hallucination
-NA
-Do not emit "Wrong", "Invented", "Extra", or "Partial".
+- "hallucination":
+  The ground-truth field has no value, but the model provides a clinical value that is unsupported by the ground-truth value for that field.
 
-### Partial Capture
-There is no "Partial" type.
-When Generated captures only some facts from a compound Ground Truth field:
-captured facts → Correct
-uncaptured Ground Truth facts → Missing
-Do not mark the captured facts Incorrect merely because other facts are omitted.
+EMPTY-VALUE RULES:
+- Treat "", null, "NA", "N/A", and equivalent no-value markers as EMPTY when they represent absence of a ground-truth value.
+- GT empty + Model empty -> correct.
+- GT empty + Model non-empty -> hallucination.
+- GT non-empty + Model empty -> missing.
+- Clinically meaningful negative findings are NOT empty values.
 
-### Clinical Meaning
-Compare clinical meaning while preserving clinical context, negation, certainty, timing, quantity, and attribution.
-Equivalent medical terms, synonyms, paraphrases, abbreviations, and clinically equivalent diagnostic wording are Correct when the underlying meaning is unchanged.
-A shorter statement is Correct when it preserves the same clinical fact.
-Loss of additional details should be reported as Missing rather than Incorrect when the remaining statement is not contradictory.
+SEMANTIC EQUIVALENCE:
+- Preserve semantic equivalence across paraphrasing, synonyms, medical terminology, abbreviations, unit representations, sentence restructuring, and different levels of verbosity.
+- Do not downgrade a semantically equivalent value because it is shorter or differently worded.
+- A shorter value that omits clinically meaningful information should be classified as partial_match.
 
-### Negation
-Explicit positive and negative findings must be compared separately.
-A missing explicit negative finding is Missing.
-A generated statement that reverses the Ground Truth positive or negative finding is Incorrect.
-Do not infer a negative finding from absence of documentation.
+NUMERICAL AND QUANTITATIVE VALUES:
+- Numerical, dosage, frequency, duration, age, measurement, and quantitative clinical values must match semantically.
+- Different numerical values are wrong.
+- Equivalent numerical representations and units are correct (e.g., "5 days" vs "five days", ">101°F" vs "above 101", "ER" vs "emergency room").
 
-### Certainty
-Do not mark a fact Incorrect solely because certainty wording differs when the clinical meaning remains equivalent.
-Preserve meaningful distinctions between confirmed, provisional, suspected, possible, and ruled-out findings when the distinction materially changes the clinical meaning.
+NEGATION:
+- Preserve the meaning of positive and negative findings.
+- A changed or reversed negation is wrong.
 
-### Field Placement
-Do not mark a supported clinical fact as Hallucination merely because it appears in a different SOAP field.
-Use the complete Ground Truth when determining whether a generated fact is supported.
-Do not treat field relocation as a clinical error unless it materially changes the meaning of the fact.
+CLINICAL QUALIFIERS:
+- Duration, timing, frequency, severity, location, laterality, progression, triggers, associated findings, and other clinically meaningful qualifiers must be considered.
+- Omission of a clinically meaningful qualifier without contradiction is partial_match.
+- A changed qualifier that alters the clinical meaning is wrong.
 
-### Vitals
-Use these exact field names in differences[].field:
-Blood pressure, Pulse, Respiratory rate, Temperature, SpO2, Heart exam, Height, Weight.
+SAFETY-NET AND FOLLOW-UP INSTRUCTIONS:
+- Compare all clinically meaningful components: timing of return visit, trigger conditions (symptoms, lab values, thresholds), action instructions (seek care, return immediately, go to ER), severity thresholds, and secondary actions.
+- Different phrasings of equivalent actions are correct if clinical meaning is preserved (e.g., "seek immediate medical attention" vs "come back immediately", "high fever (>101°F)" vs "fever above 101").
+- Abbreviated and expanded forms of equivalent terms are correct (e.g., "ER" vs "emergency room", "antibiotics" vs "antibiotic course").
+- Omission of a specific trigger condition or action instruction is partial_match or missing, depending on clinical significance.
+- Addition of unsupported warnings or triggers not in the ground truth is hallucination.
 
-Treat heart_rate as Pulse.
+DECISION ORDER:
+1. Determine whether the ground-truth field is empty.
+2. If GT is empty and Model is empty, classify as correct.
+3. If GT is empty and Model contains unsupported information, classify as hallucination.
+4. If GT is non-empty and Model is empty, classify as missing.
+5. Determine whether the Model contradicts or factually changes the GT.
+6. If there is a contradiction or factual difference, classify as wrong.
+7. Determine whether all clinically meaningful information is preserved.
+8. If all information is preserved, classify as correct.
+9. If some information is preserved but clinically meaningful information is omitted or altered without contradiction, classify as partial_match.
 
-Ignore punctuation, capitalization of non-medical terms, and digit-vs-words representing the same number.
-Different numeric values are Incorrect.
-No numeric tolerance unless explicitly stated.
+IMPORTANT:
+Do not classify a value as wrong merely because it is shorter, more concise, differently worded, paraphrased, or uses different terminology.
+Use partial_match for genuine omissions of clinically meaningful components. Use wrong only for factual differences, contradictions, or clinically
+meaningful changes in information. For safety-net instructions, verify that all trigger conditions and action
+directives are present and semantically equivalent before classifying as correct.
 
-For objective measurements, ignore standard unit differences when the numeric value is the same and the unit is implied by the field.
-GT numeric value present and Generated absent → Missing.
-Generated numeric value unsupported by Ground Truth → Hallucination.
-Generated numeric value different from Ground Truth → Incorrect.
+Return ONLY a valid JSON object of exactly this shape:
 
-### Medications
-Compare medication facts individually, including:
-drug name
-generic or brand identity
-dose
-schedule
-duration
-route when present
-indication when explicitly documented
-administration instructions when explicitly documented
-
-Equivalent formatting and standard terminology are Correct.
-Different medication identity is Incorrect.
-Different dose, frequency, duration, or route is Incorrect when clinically established in Ground Truth.
-A medication instruction or purpose that is not supported anywhere in Ground Truth is Hallucination.
-
-### Medication Instructions
-Compare each medication instruction as an individual fact.
-Do not infer instructions from medication name, pharmacological knowledge, standard prescribing practice, dose, schedule, or common clinical conventions.
-If Ground Truth does not document an administration instruction, a Generated administration instruction is Hallucination.
-If only part of an instruction is captured, captured information is Correct and omitted information is Missing.
-
-### Diagnosis
-Compare diagnosis by clinical meaning, not exact wording.
-Equivalent diagnostic terminology is Correct when the clinical meaning is unchanged.
-Evaluate diagnosis, type, status, and reasoning according to the meaning established by the supplied Ground Truth and Generated values.
-Do not mark a diagnosis Incorrect solely because equivalent certainty or terminology is expressed differently.
-
-### Clinical Reasoning
-Compare the individual clinical facts and reasoning supported by Ground Truth.
-Do not require Generated reasoning to reproduce the exact Ground Truth wording.
-If Generated correctly captures part of the reasoning and omits other established reasoning, captured reasoning is Correct and omitted reasoning is Missing.
-Use Incorrect only when Generated reasoning contradicts or materially changes the Ground Truth.
-
-### Summary
-Evaluate the summary using the same fact-level semantic comparison rules.
-Correctly summarized facts are Correct.
-Omitted established facts are Missing.
-Contradictory facts are Incorrect.
-Unsupported additional clinical facts are Hallucination.
-
-### Comparison Order
-For every Generated clinical fact, apply this order:
-
-1. Determine whether the fact is supported anywhere in the complete Ground Truth.
-2. If unsupported → Hallucination.
-3. If supported, determine whether Generated conveys the same clinical meaning.
-4. If meaning is equivalent → Correct.
-5. If Generated contradicts or materially changes the supported Ground Truth fact → Incorrect.
-6. For any established Ground Truth fact not captured by Generated → Missing.
-
-Do not classify a semantically equivalent fact as Incorrect.
-Do not classify a supported fact as Hallucination.
-Do not classify an omitted detail as Incorrect.
-
-### Scoring
-Calculate each section score from the underlying fact-level comparison.
-Correct facts increase the score.
-Missing facts reduce the score.
-Incorrect facts receive a stronger penalty than ordinary omissions.
-Hallucinations receive a strong penalty.
-Do not make an entire section incorrect because of one incorrect or missing fact.
-
-similarity_score must represent overall semantic similarity between Ground Truth and Generated SOAP.
-
-overall_severity must reflect the clinical importance of the identified errors:
-none
-low
-medium
-high
-critical
-
-### Output Schema
-Schema:
 {
-  "similarity_score": <0-100>,
-  "overall_severity": "none|low|medium|high|critical",
-  "summary": "<2 sentence verdict>",
-  "section_details": {
-    "subjective": {
-      "score": <0-100>,
-      "differences": [
-        {
-          "field": "chief_complaint",
-          "ground_truth": "<value>",
-          "generated": "<value>",
-          "type": "Correct|Incorrect|Missing|Hallucination|NA",
-          "severity": "low|medium|high|critical"
-        }
-      ]
-    },
-    "objective":  { "score": <0-100>, "differences": [] },
-    "assessment": { "score": <0-100>, "differences": [] },
-    "plan":       { "score": <0-100>, "differences": [] }
-  }
+  "results": [
+    {
+      "field": "<field path exactly as given>",
+      "category": "correct|partial_match|wrong|missing|hallucination",
+      "reason": "<one short sentence>"
+    }
+  ]
 }
 
-### Final Verification
-Before returning the JSON, silently verify:
+Include exactly one result per field given, in the same order, using the exact field values provided.
+No markdown and no extra text outside the JSON object.
 
-1. Every Hallucination is unsupported by the entire Ground Truth.
-2. Every Incorrect is a genuine clinical conflict or material change.
-3. Every omitted established Ground Truth fact is Missing.
-4. Semantic equivalents are Correct.
-5. Compound fields are evaluated at fact level.
-6. Supported facts are not labeled Hallucination because of field differences.
-7. Omitted details are not labeled Incorrect.
-8. Only the allowed output types are used.
-9. No "Wrong", "Invented", "Extra", or "Partial" labels are used.
-10. Return only valid JSON.
 """
 
 
@@ -1036,7 +929,6 @@ Before returning the JSON, silently verify:
 # """
 
 
-
 def _looks_nested_soap(payload: Any) -> bool:
     if not isinstance(payload, dict) or isinstance(payload.get("facts"), list):
         return False
@@ -1088,6 +980,81 @@ def _llm_compare_soap(
     }
 
 
+def llm_verify_text_matches(
+    pairs: list[dict[str, str]],
+    model: str,
+    config: dict | None = None,
+) -> list[bool]:
+    """Semantic correct/wrong verdict for free-text SOAP fields.
+
+    Used by soap_fact_scorer.score_soap_simple_key_match() to re-check
+    long narrative fields (HPI, histories, reasoning, ...) that the
+    deterministic word-overlap matcher flagged as different — two SOAP
+    notes can describe the same clinical facts in very different words.
+
+    pairs: [{"field", "ground_truth", "generated"}, ...]. Returns one bool
+    per pair, same order/length (True = same clinical meaning). All models
+    failing returns all-False, so callers keep the deterministic verdict.
+    """
+    if not pairs:
+        return []
+    config = config or get_config()
+    prompt = (
+        "Each numbered pair below is a free-text SOAP field (chief complaint, "
+        "history of present illness, past/social/family history, current "
+        "medications, diagnosis, assessment reasoning, education, "
+        "investigations, follow-up, other findings, or medication "
+        "instructions). These fields are written in prose and are almost "
+        "never worded identically between Ground Truth and Generated even "
+        "when they describe the exact same clinical facts — judge them by "
+        "SEMANTIC / CLINICAL MEANING ONLY, never by exact wording.\n\n"
+        "Decide whether Generated conveys the same clinical meaning as "
+        "Ground Truth. Treat different phrasing, synonyms, sentence order, "
+        "reordered details, abbreviations, and differences in verbosity or "
+        "level of detail as a MATCH as long as no clinical fact actually "
+        "conflicts. Only mark it not-a-match when Generated contradicts, "
+        "omits, or changes a clinically meaningful fact from Ground Truth "
+        "(different symptom, timing, severity, cause, diagnosis, or "
+        "finding).\n\n"
+        + "\n\n".join(
+            f"{i + 1}. Field: {p['field']}\n"
+            f"Ground Truth: {p['ground_truth']}\n"
+            f"Generated: {p['generated']}"
+            for i, p in enumerate(pairs)
+        )
+        + '\n\nReturn ONLY JSON of exactly this shape: '
+        '{"results": [{"index": 1, "match": true|false}, ...]} '
+        "with exactly one entry per numbered pair, in order, no extra text."
+    )
+    for attempt_model in _models_to_try(model):
+        try:
+            client, model_name = _get_client(attempt_model, config)
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a precise clinical QA reviewer. Return only JSON.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=1500,
+                temperature=0,
+            )
+            raw = resp.choices[0].message.content or "{}"
+            data = parse_ai_json(raw)
+            by_index = {
+                int(r["index"]): bool(r.get("match"))
+                for r in (data.get("results") or [])
+                if isinstance(r, dict) and r.get("index") is not None
+            }
+            return [by_index.get(i + 1, False) for i in range(len(pairs))]
+        except Exception as exc:
+            log.warning("SOAP_TEXT_VERIFY failed with %s: %s", attempt_model, exc)
+            continue
+    return [False] * len(pairs)
+
+
 def compare_soap(
     soap_ground_truth: dict,
     soap_generated: dict,
@@ -1100,12 +1067,16 @@ def compare_soap(
     Flat {facts: [...]} skips the LLM so fixture tests stay deterministic.
     The weighted score always comes from soap_fact_scorer, not the LLM percent.
     """
-    from medsum_testing.backend.services.soap_fact_scorer import score_soap
+    from medsum_testing.backend.services.soap_fact_scorer import (
+        SCORING_METHOD,
+        score_soap,
+    )
 
     config = config or get_config()
     section_details = None
     llm_error = ""
-    if _looks_nested_soap(soap_ground_truth) or _looks_nested_soap(soap_generated):
+    is_nested = _looks_nested_soap(soap_ground_truth) or _looks_nested_soap(soap_generated)
+    if is_nested and SCORING_METHOD != "simple_key_match":
         llm = _llm_compare_soap(
             soap_ground_truth or {}, soap_generated or {}, model, config
         )
@@ -1115,6 +1086,8 @@ def compare_soap(
         soap_ground_truth,
         soap_generated,
         section_details=section_details,
+        model=model,
+        app_config=config,
     )
     if llm_error and not scored.get("facts"):
         scored["error"] = llm_error

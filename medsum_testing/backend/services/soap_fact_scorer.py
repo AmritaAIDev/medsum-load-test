@@ -29,12 +29,15 @@ Dose is medication, not numerical, so Numerical/Unit Accuracy is BP + Temperatur
 
 from __future__ import annotations
 
+import logging
 import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+log = logging.getLogger("medsum_ai")
 
 from medsum_testing.backend.services.accuracy_thresholds import (
     accuracy_band_from_score,
@@ -57,7 +60,11 @@ _SCORING_CACHE: dict[str, Any] | None = None
 _NUMBER_RE = re.compile(
     r"(\d+(?:\.\d+)?)(?:\s*/\s*(\d+(?:\.\d+)?))?",
 )
-_WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
+# Digits and letters are separate alternatives (not one [a-z0-9]+ class) so a
+# unit glued to its number tokenizes the same as when it's spaced out —
+# "100mg" -> ["100", "mg"], same as "100 mg" -> ["100", "mg"]. Otherwise
+# "100mg" was one token ("100mg") that never matched "100 mg"'s two tokens.
+_WORD_RE = re.compile(r"\d+|[a-z]+(?:'[a-z]+)?")
 _FILLER = frozenset(
     {
         "a",
@@ -75,8 +82,65 @@ _FILLER = frozenset(
         "please",
         "tab",
         "tablet",
+        "it",
+        "this",
+        "that",
+        "these",
+        "those",
+        "about",
+        "approximately",
+        "currently",
     }
 )
+
+# Spelled-out numbers, so "Four weeks" matches "4 weeks". Compound forms like
+# "twenty-five" tokenize as two words ("twenty", "five") and normalize to two
+# separate digit tokens rather than "25" — an accepted gap for durations/doses,
+# which are almost always small standalone numbers in practice.
+_WORD_TO_NUM = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+    "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
+    "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
+    "nineteen": "19", "twenty": "20", "thirty": "30", "forty": "40",
+    "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80",
+    "ninety": "90", "hundred": "100",
+}
+
+# Clinical wording variants that mean the same thing, so free-text fields
+# (diagnosis, allergy reaction, exam findings) aren't marked Incorrect just
+# because the generated note used a different but equivalent word.
+_WORD_SYNONYMS = {
+    "allergic": "allergy",
+    "allergies": "allergy",
+    "causing": "cause",
+    "causes": "cause",
+    "caused": "cause",
+    "regular": "normal",
+    "heartbeat": "heart",
+    "heartbeats": "heart",
+    "difficulty": "problem",
+    "difficulties": "problem",
+    "problems": "problem",
+    "milligram": "mg",
+    "milligrams": "mg",
+    "microgram": "mcg",
+    "micrograms": "mcg",
+    "milliliter": "ml",
+    "milliliters": "ml",
+    "millilitre": "ml",
+    "millilitres": "ml",
+    "kilogram": "kg",
+    "kilograms": "kg",
+    "gram": "g",
+    "grams": "g",
+}
+
+
+def _canon_word(word: str) -> str:
+    if word in _WORD_TO_NUM:
+        return _WORD_TO_NUM[word]
+    return _WORD_SYNONYMS.get(word, word)
 
 
 def load_scoring_config(path: Path | None = None, force_reload: bool = False) -> dict[str, Any]:
@@ -272,8 +336,8 @@ def values_match(left: Any, right: Any) -> bool:
         return True
     if numbers_conflict(left, right):
         return False
-    words_a = [w for w in _WORD_RE.findall(a) if w not in _FILLER]
-    words_b = [w for w in _WORD_RE.findall(b) if w not in _FILLER]
+    words_a = [_canon_word(w) for w in _WORD_RE.findall(a) if w not in _FILLER]
+    words_b = [_canon_word(w) for w in _WORD_RE.findall(b) if w not in _FILLER]
     if words_a and words_a == words_b:
         return True
     if words_a and words_b and set(words_a) <= set(words_b):
@@ -744,6 +808,17 @@ def apply_section_details(
         used.add(idx)
         if row.get("result") == NA and mapped == MISSING:
             continue
+        if mapped == INCORRECT and row.get("result") != NA:
+            deterministic = classify_pair(
+                row.get("ground_truth"), row.get("generated"), cfg, gt_applicable=None
+            )
+            if deterministic.get("result") == CORRECT:
+                # LLM flagged a paraphrase as a mismatch, but the deterministic
+                # word-overlap match already confirms the same clinical content
+                # (e.g. "Gastritis with acid reflux symptoms" vs "Gastritis and
+                # acid reflux") — trust the deterministic Correct instead of
+                # letting a single LLM diff zero out a Critical-weighted fact.
+                continue
         row["result"] = mapped
         if mapped == INCORRECT:
             row["internal"] = CONTRADICTORY if row.get("internal") == CONTRADICTORY else INCORRECT
@@ -1015,13 +1090,294 @@ def classify_final_result(
     return "complete_no_accuracy"
 
 
+# ---------------------------------------------------------------------------
+# Scoring method switch.
+#   "weighted"          — fact-level MOM scorer above (section-weighted,
+#                          Critical/High/Normal criticality weights).
+#   "simple_key_match"  — fixed-schema key match: +1 per key that matches
+#                          ground truth, 0 otherwise; score = correct/total*100.
+# Flip this constant to change which method score_soap() uses.
+# ---------------------------------------------------------------------------
+SCORING_METHOD = "simple_key_match"
+
+# Simple method's fixed 24-key schema (Subjective 7 / Objective 9 /
+# Assessment 4 / Plan 4, excluding medications) plus 5 keys per medicine
+# (Drug name, Dose, Schedule, Duration, Instructions) added on top.
+# e.g. 1 medicine = 29 keys, 2 medicines = 34 keys. Medicine count is read
+# from ground truth (plan.medications), not generated.
+# "text": True marks long free-text narrative fields where deterministic
+# word-overlap matching (values_match) under-matches genuine paraphrases —
+# these get a semantic LLM verdict when the deterministic check disagrees.
+# See _apply_llm_text_verification().
+SIMPLE_FIXED_KEYS: tuple[dict[str, Any], ...] = (
+    {"field": "Chief complaint", "section": "Subjective", "path": "subjective.chief_complaint", "text": True},
+    {"field": "History of present illness", "section": "Subjective", "path": "subjective.history_of_present_illness", "text": True},
+    {"field": "Past medical history", "section": "Subjective", "path": "subjective.past_medical_history", "text": True},
+    {"field": "Current medications", "section": "Subjective", "path": "subjective.medications", "text": True},
+    {"field": "Allergy", "section": "Subjective", "path": "subjective.allergies"},
+    {"field": "Social history", "section": "Subjective", "path": "subjective.social_history", "text": True},
+    {"field": "Family history", "section": "Subjective", "path": "subjective.family_history", "text": True},
+    {"field": "Blood pressure", "section": "Objective", "path": "objective.vitals.blood_pressure"},
+    {"field": "Heart rate", "section": "Objective", "path": "objective.vitals.heart_rate"},
+    {"field": "Respiratory rate", "section": "Objective", "path": "objective.vitals.respiratory_rate"},
+    {"field": "Temperature", "section": "Objective", "path": "objective.vitals.temperature"},
+    {"field": "SpO2", "section": "Objective", "path": "objective.vitals.spo2"},
+    {"field": "Heart exam", "section": "Objective", "path": "objective.physical_exam.heart"},
+    {"field": "Other findings", "section": "Objective", "path": "objective.physical_exam.other_findings", "text": True},
+    {"field": "Height", "section": "Objective", "path": "objective.vitals.height"},
+    {"field": "Weight", "section": "Objective", "path": "objective.vitals.weight"},
+    {"field": "Diagnosis", "section": "Assessment", "path": "assessment.diagnosis", "text": True},
+    {"field": "Diagnosis type", "section": "Assessment", "path": "assessment.type"},
+    {"field": "Diagnosis status", "section": "Assessment", "path": "assessment.status"},
+    {"field": "Assessment reasoning", "section": "Assessment", "path": "assessment.reasoning", "text": True},
+    {"field": "Activity", "section": "Plan", "path": "plan.activity"},
+    {"field": "Investigations", "section": "Plan", "path": "plan.investigations", "text": True},
+    {"field": "Education", "section": "Plan", "path": "plan.education", "text": True},
+    {"field": "Follow-up", "section": "Plan", "path": "plan.follow_up", "text": True},
+)
+
+SIMPLE_MEDICATION_KEYS: tuple[tuple[str, str, bool], ...] = (
+    ("drug_name", "Drug name", False),
+    ("dose", "Dose", False),
+    ("schedule", "Schedule", False),
+    ("duration", "Duration", False),
+    ("instructions", "Instructions", True),
+)
+
+
+def _simple_first_value(root: Any, path: str) -> Any:
+    values = _path_get(root, path)
+    return values[0] if values else None
+
+
+def _simple_medication_list(root: Any) -> list[dict]:
+    return [m for m in _path_get(root, "plan.medications.*") if isinstance(m, dict)]
+
+
+def _simple_values_match(gt_val: Any, gen_val: Any) -> bool:
+    """values_match(), plus: GT "NA"/"N/A"/etc. matched against a null/empty
+    generated value counts as a match. GT is established but literally marked
+    not-applicable, and the generated SOAP has nothing there either — that's
+    agreement, not a miss. is_na_value() (na_markers in soap_fact_scoring.yaml)
+    already treats a true empty string as NA too, so this also covers GT=""
+    vs generated="" without a separate check.
+    """
+    if is_na_value(gt_val) and is_na_value(gen_val):
+        return True
+    return values_match(gt_val, gen_val)
+
+
+def build_simple_key_facts(
+    soap_ground_truth: Any, soap_generated: Any
+) -> list[dict[str, Any]]:
+    """Fixed-schema fact list for SCORING_METHOD == 'simple_key_match'."""
+    gt = soap_ground_truth if isinstance(soap_ground_truth, dict) else {}
+    gen = soap_generated if isinstance(soap_generated, dict) else {}
+    facts: list[dict[str, Any]] = []
+
+    for spec in SIMPLE_FIXED_KEYS:
+        gt_val = _leaf_text(_simple_first_value(gt, spec["path"]))
+        gen_val = _leaf_text(_simple_first_value(gen, spec["path"]))
+        result = CORRECT if _simple_values_match(gt_val, gen_val) else INCORRECT
+        facts.append(
+            {
+                "section": spec["section"],
+                "field": spec["field"],
+                "base_field": spec["field"],
+                "ground_truth": gt_val,
+                "generated": gen_val,
+                "criticality": "Normal",
+                "weight": 1,
+                "result": result,
+                "internal": result,
+                "index": None,
+                "is_text": bool(spec.get("text")),
+            }
+        )
+
+    gt_meds = _simple_medication_list(gt)
+    gen_meds = _simple_medication_list(gen)
+    for i, gt_med in enumerate(gt_meds):
+        gen_med = gen_meds[i] if i < len(gen_meds) else {}
+        for sub_key, label, is_text in SIMPLE_MEDICATION_KEYS:
+            gt_val = _leaf_text(gt_med.get(sub_key))
+            gen_val = _leaf_text(gen_med.get(sub_key))
+            result = CORRECT if _simple_values_match(gt_val, gen_val) else INCORRECT
+            facts.append(
+                {
+                    "section": "Plan",
+                    "field": f"{label} [{i + 1}]",
+                    "base_field": label,
+                    "ground_truth": gt_val,
+                    "generated": gen_val,
+                    "criticality": "Normal",
+                    "weight": 1,
+                    "result": result,
+                    "internal": result,
+                    "index": i,
+                    "is_text": is_text,
+                }
+            )
+    return facts
+
+
+def _apply_llm_text_verification(
+    facts: list[dict[str, Any]], model: str | None, config: dict | None
+) -> None:
+    """Upgrade INCORRECT text-field facts to CORRECT when the LLM confirms the
+    same clinical meaning. Deterministic word-overlap matching (values_match)
+    under-matches long narrative fields that say the same thing in very
+    different words (e.g. two differently-phrased HPI paragraphs) — this is
+    a semantic second opinion, only invoked where the deterministic check
+    already disagreed, and only for fields flagged "text" in SIMPLE_FIXED_KEYS
+    / SIMPLE_MEDICATION_KEYS. Mutates facts in place.
+    """
+    if not model:
+        return
+    candidates = [
+        f
+        for f in facts
+        if f.get("is_text")
+        and f.get("result") == INCORRECT
+        and _text(f.get("ground_truth"))
+        and _text(f.get("generated"))
+    ]
+    if not candidates:
+        return
+    from medsum_testing.backend.services.ai_comparator import llm_verify_text_matches
+
+    pairs = [
+        {
+            "field": f["field"],
+            "ground_truth": f["ground_truth"],
+            "generated": f["generated"],
+        }
+        for f in candidates
+    ]
+    try:
+        verdicts = llm_verify_text_matches(pairs, model, config)
+    except Exception:
+        log.warning(
+            "SOAP_TEXT_VERIFY: llm_verify_text_matches raised, keeping "
+            "deterministic results for %d text field(s)",
+            len(candidates),
+            exc_info=True,
+        )
+        return
+    upgraded = sum(1 for v in verdicts if v)
+    log.info(
+        "SOAP_TEXT_VERIFY: %d/%d text-field mismatches upgraded to Correct by LLM",
+        upgraded,
+        len(candidates),
+    )
+    for fact, is_match in zip(candidates, verdicts):
+        if is_match:
+            fact["result"] = CORRECT
+            fact["internal"] = CORRECT
+
+
+def score_soap_simple_key_match(
+    soap_ground_truth: Any,
+    soap_generated: Any,
+    model: str | None = None,
+    config: dict | None = None,
+) -> dict[str, Any]:
+    """Key-match scorer: +1 per matching key, 0 otherwise; score = correct/total*100.
+
+    model: when given, free-text fields (is_text=True) that fail the
+    deterministic word-overlap check get a semantic LLM re-check before being
+    scored 0 — see _apply_llm_text_verification(). Pass None to stay fully
+    deterministic (no API calls).
+    """
+    facts = build_simple_key_facts(soap_ground_truth, soap_generated)
+    _apply_llm_text_verification(facts, model, config)
+    total = len(facts)
+    correct = sum(1 for f in facts if f["result"] == CORRECT)
+    incorrect = total - correct
+    score = _percent(correct, total, places=1)
+    section_details = _section_details(facts)
+
+    metrics = {
+        "overall_weighted_clinical_score": score,
+        "applicable_weight": total,
+        "correct_weight": correct,
+        "fill_rate": score,
+        "clinical_fact_recall": score,
+        "clinical_fact_precision": score,
+        "hallucination_rate": None,
+        "critical_fact_accuracy": None,
+        "medication_accuracy": None,
+        "diagnosis_accuracy": None,
+        "temporal_accuracy": None,
+        "numerical_unit_accuracy": None,
+        "critical_error_count": 0,
+        "applicable_count": total,
+        "correct_count": correct,
+        "missing_count": 0,
+        "captured_count": total,
+        "hallucination_count": 0,
+        "incorrect_count": incorrect,
+        "numeric_tolerance": None,
+        "section_weight_breakdown": {},
+        "scoring_method": "simple_key_match",
+        "total_keys": total,
+        "correct_keys": correct,
+    }
+
+    def _doc(side: str) -> dict[str, Any]:
+        return {
+            "facts": [
+                {"section": f["section"], "field": f["field"], "value": f[side], "criticality": "Normal"}
+                for f in facts
+            ]
+        }
+
+    return {
+        "similarity_score": score,
+        "overall_weighted_clinical_score": score,
+        "overall_severity": "none" if incorrect == 0 else "medium",
+        "summary": (
+            f"SOAP simple key-match score {score}% ({correct}/{total} keys correct)"
+            if score is not None
+            else "SOAP not scored"
+        ),
+        "section_details": section_details,
+        "metrics": metrics,
+        "facts": facts,
+        "ground_truth_facts": _doc("ground_truth"),
+        "generated_facts": _doc("generated"),
+        "findings": [
+            "Scoring method: simple_key_match (fixed 24-key schema + 5 keys per GT medicine).",
+            "Every key is worth 1 point: correct/total_keys * 100, no criticality weighting.",
+            "Medicine count is read from ground truth; extra generated medicines are ignored.",
+            "Free-text fields (HPI, histories, reasoning, education, follow-up, "
+            "investigations, other findings, instructions) get an LLM semantic "
+            "re-check when word-overlap matching disagrees, so differently "
+            "worded paraphrases still score correct."
+            if model
+            else "Free-text fields used deterministic word-overlap matching only "
+            "(no model passed to score_soap_simple_key_match) — long paraphrased "
+            "narrative fields may be under-scored.",
+        ],
+        "error": "",
+        "numeric_tolerance": None,
+    }
+
+
 def score_soap(
     soap_ground_truth: Any,
     soap_generated: Any,
     scoring_config: dict | None = None,
     section_details: Any = None,
+    model: str | None = None,
+    app_config: dict | None = None,
 ) -> dict[str, Any]:
-    """SOAP-only fact-level evaluation. Does not read transcription/translation."""
+    """SOAP-only fact-level evaluation. Does not read transcription/translation.
+
+    model / app_config are only used by the simple_key_match method (SCORING_METHOD)
+    to semantically re-check free-text fields via the LLM — see
+    score_soap_simple_key_match(). The weighted method ignores them.
+    """
     cfg = scoring_config or load_scoring_config()
     if not soap_ground_truth and not soap_generated:
         return {
@@ -1036,6 +1392,11 @@ def score_soap(
             "findings": findings_for({}, cfg),
             "error": "Missing ground truth or generated SOAP",
         }
+
+    if SCORING_METHOD == "simple_key_match":
+        return score_soap_simple_key_match(
+            soap_ground_truth, soap_generated, model=model, config=app_config
+        )
 
     gt_facts = coerce_fact_list(soap_ground_truth, cfg)
     gen_facts = coerce_fact_list(soap_generated, cfg)

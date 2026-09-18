@@ -1,0 +1,52 @@
+name: Deploy to GCP Testing Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm this manual deploy'
+        required: true
+
+jobs:
+  deploy:
+    name: Deploy to GCP Testing VM
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Verify confirmation input
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "deploy" ]; then
+            echo "Confirmation text did not match 'deploy'. Aborting."
+            exit 1
+          fi
+
+      - name: Deploy through SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.TEST_SERVER_HOST }}
+          username: ${{ secrets.TEST_SERVER_USER }}
+          key: ${{ secrets.TEST_SERVER_SSH_KEY }}
+          script: |
+
+            set -e
+
+            echo "Starting deployment"
+            cd /home/developers/medsum-load-test
+
+            echo "Fetching latest code"
+            git fetch origin master
+
+            echo "Updating code"
+            git reset --hard origin/master
+
+            echo "Activating virtual environment"
+            source venv/bin/activate
+
+            echo "Installing requirements"
+            pip install -r requirements.txt
+
+            echo "Restarting service"
+            sudo systemctl restart medsum_testing.service
+
+            echo "Deployment completed successfully"

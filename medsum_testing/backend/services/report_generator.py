@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import io
 import json
+import logging
+import os
+import re
+from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from medsum_testing.backend.models.test_result import TestResult
+from medsum_testing.backend.models.test_result import TestResult, display_soap_accuracy
+from medsum_testing.backend.services.batch_identity import display_batch_label
 from medsum_testing.backend.services.batch_report import (
     BATCH_REPORT_SECTIONS,
     build_batch_report,
@@ -23,6 +31,11 @@ from medsum_testing.backend.services.individual_report import (
     extra_report_fields,
     individual_report_fields,
 )
+from medsum_testing.backend.services.soap_detail_table import (
+    SOAP_SECTION_ORDER,
+    detail_table_from_result,
+)
+from medsum_testing.backend.services.test_case_view import format_audio_length
 
 
 # One PDF table row cannot be taller than the page frame (~686pt on A4
@@ -30,7 +43,103 @@ from medsum_testing.backend.services.individual_report import (
 # ~1800 characters stays well under one frame. Longer values are split
 # across continuation rows instead of overflowing (LayoutError 500).
 PDF_CELL_CHAR_LIMIT = 1800
-PDF_TABLE_ROWS_PER_BLOCK = 12
+
+_HEADER_FILL = colors.HexColor("#2563eb")
+_GRID_COLOR = colors.HexColor("#d9dce6")
+
+log = logging.getLogger(__name__)
+
+# reportlab's built-in Helvetica is a core-14 PDF font with only Latin-1
+# glyphs: Hindi/Marathi/etc. text renders as missing-glyph boxes ("nnnn").
+# These are Indic-script TTFs, checked in priority order and referenced
+# from wherever they're already installed rather than bundled in the repo
+# (most are OS-licensed, e.g. Microsoft's Nirmala UI on Windows, and must
+# not be redistributed). Set MEDSUM_PDF_UNICODE_FONT to override.
+_UNICODE_FONT = "MedsumUnicode"
+_UNICODE_FONT_BOLD = "MedsumUnicode-Bold"
+
+
+def _unicode_font_candidates() -> list[str]:
+    paths = []
+    env_path = os.environ.get("MEDSUM_PDF_UNICODE_FONT")
+    if env_path:
+        paths.append(env_path)
+    paths.extend(
+        [
+            r"C:\Windows\Fonts\Nirmala.ttf",  # Windows pan-Indic UI font
+            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+            "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
+            "/usr/share/fonts/noto/NotoSansDevanagari-Regular.ttf",
+            "/Library/Fonts/NotoSansDevanagari-Regular.ttf",
+        ]
+    )
+    return paths
+
+
+def _unicode_font_bold_candidates() -> list[str]:
+    paths = []
+    env_path = os.environ.get("MEDSUM_PDF_UNICODE_FONT_BOLD")
+    if env_path:
+        paths.append(env_path)
+    paths.extend(
+        [
+            r"C:\Windows\Fonts\NirmalaB.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
+        ]
+    )
+    return paths
+
+
+_unicode_font_ready: bool | None = None
+
+
+def _ensure_unicode_font() -> bool:
+    """Register an Indic-capable font once per process. Idempotent; safe to
+    call from every report function. Returns False (Helvetica stays in use)
+    when no suitable font is installed on this machine.
+    """
+    global _unicode_font_ready
+    if _unicode_font_ready is not None:
+        return _unicode_font_ready
+
+    regular_path = next(
+        (p for p in _unicode_font_candidates() if p and Path(p).is_file()), None
+    )
+    if not regular_path:
+        log.warning(
+            "No Unicode PDF font found for Indic scripts (Hindi, etc.); reports will "
+            "show missing glyphs for non-Latin text. Set MEDSUM_PDF_UNICODE_FONT to a "
+            ".ttf path to fix this."
+        )
+        _unicode_font_ready = False
+        return False
+
+    try:
+        pdfmetrics.registerFont(TTFont(_UNICODE_FONT, regular_path))
+    except Exception:
+        log.warning("Could not register PDF unicode font %s", regular_path, exc_info=True)
+        _unicode_font_ready = False
+        return False
+
+    bold_path = next(
+        (p for p in _unicode_font_bold_candidates() if p and Path(p).is_file()),
+        regular_path,
+    )
+    try:
+        pdfmetrics.registerFont(TTFont(_UNICODE_FONT_BOLD, bold_path))
+    except Exception:
+        log.warning("Could not register PDF unicode bold font %s", bold_path, exc_info=True)
+        pdfmetrics.registerFont(TTFont(_UNICODE_FONT_BOLD, regular_path))
+
+    _unicode_font_ready = True
+    return True
+
+
+def _pdf_fonts() -> tuple[str, str]:
+    """(body_font, bold_font) — the Unicode pair when available, else Helvetica."""
+    if _ensure_unicode_font():
+        return _UNICODE_FONT, _UNICODE_FONT_BOLD
+    return "Helvetica", "Helvetica-Bold"
 
 
 def _fmt(value: Any) -> str:
@@ -156,65 +265,322 @@ def _section_rows(result: TestResult) -> list[tuple[str, str]]:
     return rows
 
 
-def generate_pdf(test_result: TestResult) -> bytes:
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=1.5 * cm, leftMargin=1.5 * cm)
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "Title",
-        parent=styles["Heading1"],
-        fontSize=16,
-        spaceAfter=12,
-        textColor=colors.HexColor("#2563eb"),
-    )
-    label_style = ParagraphStyle(
-        "Label",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=9,
-        textColor=colors.HexColor("#374151"),
-    )
-    value_style = ParagraphStyle(
-        "Value",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8,
-        leading=11,
-    )
+def _pct(value: Any) -> str:
+    if value is None or value == "":
+        return "N/A"
+    try:
+        return f"{round(float(value))}%"
+    except (TypeError, ValueError):
+        return "N/A"
 
-    story = [
-        Paragraph("MEDSUM Accuracy Test Report", title_style),
-        Spacer(1, 0.3 * cm),
+
+def _model_name(*candidates: Any) -> str:
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return "N/A"
+
+
+def _wrap(text: Any, style: ParagraphStyle) -> Paragraph:
+    return Paragraph(_escape_pdf(_fmt(text)), style)
+
+
+# Same palette as .diff-missing-gt / .diff-incorrect-gen in medsum_test.css,
+# so a highlighted word means the same thing on the detail page and in the PDF.
+_DIFF_MISSING_GT = ("#92400E", "#FFF3CD")  # GT word absent from Generated
+_DIFF_INCORRECT_GEN = ("#B91C1C", "#FEE2E2")  # Generated word absent from GT
+
+_DIFF_PUNCT_RE = re.compile(r"[.,\-–—;:!?()'\"“”‘’]")
+
+
+def _normalize_diff_word(word: str) -> str:
+    return _DIFF_PUNCT_RE.sub("", word.lower()).strip()
+
+
+def _diff_span(word: str, palette: tuple[str, str] | None) -> str:
+    escaped = _escape_pdf(word)
+    if not palette:
+        return escaped
+    text_color, back_color = palette
+    return f'<font color="{text_color}" backColor="{back_color}">{escaped}</font>'
+
+
+def _word_diff_tokens(gt_text: Any, gen_text: Any) -> tuple[list[str], list[str]]:
+    """Word-level error highlighting for Transcription/Translation cells, as a
+    list of self-contained per-word markup tokens (never pre-joined into one
+    string — see _chunk_tokens for why).
+
+    Mirrors computeWordDiff() in medsum_test.js (case/punctuation-insensitive,
+    order-independent word membership) so the PDF agrees with the detail page:
+    a GT word missing from Generated is amber, a Generated word not in GT is red.
+    """
+    gt_words = _fmt(gt_text).split()
+    gen_words = _fmt(gen_text).split()
+
+    if not gt_words:
+        return ["N/A"], ([_diff_span(w, None) for w in gen_words] or ["N/A"])
+    if not gen_words:
+        return [_diff_span(w, _DIFF_MISSING_GT) for w in gt_words], ["—"]
+
+    gt_norm = {_normalize_diff_word(w) for w in gt_words}
+    gen_norm = {_normalize_diff_word(w) for w in gen_words}
+
+    gt_tokens = [
+        _diff_span(w, _DIFF_MISSING_GT if _normalize_diff_word(w) not in gen_norm else None)
+        for w in gt_words
     ]
+    gen_tokens = [
+        _diff_span(w, _DIFF_INCORRECT_GEN if _normalize_diff_word(w) not in gt_norm else None)
+        for w in gen_words
+    ]
+    return gt_tokens, gen_tokens
 
-    table_data = []
-    for label, value in _section_rows(test_result):
-        chunks = _chunks_for_pdf(value)
-        for i, chunk in enumerate(chunks):
-            table_data.append(
-                [
-                    Paragraph(label if i == 0 else "", label_style),
-                    Paragraph(_escape_pdf(chunk), value_style),
-                ]
-            )
 
-    kv_style = TableStyle(
+def _chunk_tokens(tokens: list[str], limit: int = PDF_CELL_CHAR_LIMIT) -> list[str]:
+    """Pack whole tokens (word spans) into <=limit-char chunks, joined by a
+    space. Unlike _chunks_for_pdf's character-position search, this can never
+    cut inside a <font ...> tag — a `<font color="..." backColor="...">` tag
+    itself contains spaces, so searching raw markup text for the last space
+    can land inside a tag's attribute list, not between two word spans.
+    """
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for token in tokens:
+        add_len = len(token) + (1 if current else 0)
+        if current and current_len + add_len > limit:
+            chunks.append(" ".join(current))
+            current = [token]
+            current_len = len(token)
+        else:
+            current.append(token)
+            current_len += add_len
+    if current:
+        chunks.append(" ".join(current))
+    return chunks or [""]
+
+
+def _two_col_rows_from_tokens(
+    gt_tokens: list[str], gen_tokens: list[str], style: ParagraphStyle
+) -> list[list[Paragraph]]:
+    """GT/Generated token lists (from _word_diff_tokens) are already-escaped
+    reportlab markup — must not be re-escaped."""
+    left_chunks = _chunk_tokens(gt_tokens)
+    right_chunks = _chunk_tokens(gen_tokens)
+    total = max(len(left_chunks), len(right_chunks))
+    rows = []
+    for i in range(total):
+        left = left_chunks[i] if i < len(left_chunks) else ""
+        right = right_chunks[i] if i < len(right_chunks) else ""
+        rows.append([Paragraph(left, style), Paragraph(right, style)])
+    return rows
+
+
+def _header_table_style() -> TableStyle:
+    return TableStyle(
         [
-            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f1f5")),
+            ("BACKGROUND", (0, 0), (-1, 0), _HEADER_FILL),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d9dce6")),
+            ("GRID", (0, 0), (-1, -1), 0.25, _GRID_COLOR),
             ("LEFTPADDING", (0, 0), (-1, -1), 6),
             ("RIGHTPADDING", (0, 0), (-1, -1), 6),
             ("TOPPADDING", (0, 0), (-1, -1), 4),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ]
     )
-    for start in range(0, len(table_data), PDF_TABLE_ROWS_PER_BLOCK):
-        block = table_data[start : start + PDF_TABLE_ROWS_PER_BLOCK]
-        table = Table(block, colWidths=[5.5 * cm, 12 * cm], splitByRow=1)
-        table.setStyle(kv_style)
-        story.append(table)
-        story.append(Spacer(1, 0.05 * cm))
+
+
+def generate_pdf(test_result: TestResult) -> bytes:
+    data = test_result.to_dict()
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=1.5 * cm,
+        leftMargin=1.5 * cm,
+        topMargin=1.5 * cm,
+        bottomMargin=1.5 * cm,
+    )
+    styles = getSampleStyleSheet()
+    body_font, bold_font = _pdf_fonts()
+    title_style = ParagraphStyle(
+        "Title",
+        parent=styles["Heading1"],
+        fontName=bold_font,
+        fontSize=18,
+        alignment=TA_CENTER,
+        spaceAfter=16,
+        textColor=colors.HexColor("#111827"),
+    )
+    heading_style = ParagraphStyle(
+        "Heading",
+        parent=styles["Heading2"],
+        fontName=bold_font,
+        fontSize=13,
+        spaceBefore=14,
+        spaceAfter=6,
+        textColor=colors.HexColor("#111827"),
+    )
+    subheading_style = ParagraphStyle(
+        "SubHeading",
+        parent=styles["Heading3"],
+        fontName=bold_font,
+        fontSize=11,
+        spaceBefore=10,
+        spaceAfter=6,
+        textColor=colors.HexColor("#1f2937"),
+    )
+    section_style = ParagraphStyle(
+        "SoapSection",
+        parent=styles["Normal"],
+        fontName=bold_font,
+        fontSize=10.5,
+        spaceBefore=8,
+        spaceAfter=4,
+        textColor=colors.HexColor("#4b5563"),
+    )
+    value_style = ParagraphStyle(
+        "Value", parent=styles["Normal"], fontName=body_font, fontSize=8, leading=11
+    )
+    header_cell_style = ParagraphStyle(
+        "HeaderCell",
+        parent=styles["Normal"],
+        fontName=bold_font,
+        fontSize=8,
+        textColor=colors.white,
+    )
+
+    story: list = [Paragraph("Medsum Test Report", title_style)]
+
+    # --- Metadata ---
+    story.append(Paragraph("Metadata:", heading_style))
+    tc_ref = data.get("tc_ref") or data.get("test_case_id") or data.get("test_id") or "N/A"
+    batch_label = display_batch_label(data.get("batch_id") or "", data.get("batch_ref") or "")
+    audio_name = data.get("audio_filename") or data.get("uploaded_audio_filename") or "N/A"
+    duration_display = format_audio_length(data.get("audio_duration_seconds"))
+    date_display = data.get("session_datetime") or data.get("timestamp") or "N/A"
+    meta_headers = ["Test Case Number", "Batch ID", "Audio file Name", "Duration", "Date/Time"]
+    meta_values = [tc_ref, batch_label, audio_name, duration_display, date_display]
+    metadata_table = Table(
+        [
+            [Paragraph(h, header_cell_style) for h in meta_headers],
+            [_wrap(v, value_style) for v in meta_values],
+        ],
+        colWidths=[3.2 * cm, 3.2 * cm, 5 * cm, 2.8 * cm, 3.8 * cm],
+    )
+    metadata_table.setStyle(_header_table_style())
+    story.append(metadata_table)
+
+    # --- Accuracy ---
+    story.append(Paragraph("Accuracy:", heading_style))
+    trans_comp = data.get("transcription_comparison") or {}
+    transl_comp = data.get("translation_comparison") or {}
+    soap_shown = display_soap_accuracy(data.get("soap_comparison"))
+    transcription_score = trans_comp.get("similarity_score")
+    translation_score = transl_comp.get("similarity_score")
+    soap_score = soap_shown.get("percent_value")
+
+    acc_rows = [
+        [
+            "Transcription",
+            _model_name(data.get("stt_model"), data.get("ai_model_used"), data.get("ai_model")),
+            _pct(transcription_score),
+        ],
+        [
+            "Translation",
+            _model_name(
+                data.get("translation_model"), data.get("ai_model_used"), data.get("ai_model")
+            ),
+            _pct(translation_score),
+        ],
+        [
+            "SOAP",
+            _model_name(data.get("llm_model"), data.get("ai_model_used"), data.get("ai_model")),
+            _pct(soap_score),
+        ],
+    ]
+    accuracy_table = Table(
+        [[Paragraph(h, header_cell_style) for h in ("Step", "Model Name", "Accuracy")]]
+        + [[_wrap(cell, value_style) for cell in row] for row in acc_rows],
+        colWidths=[5 * cm, 8 * cm, 5 * cm],
+    )
+    accuracy_table.setStyle(_header_table_style())
+    story.append(accuracy_table)
+
+    legend_style = ParagraphStyle(
+        "DiffLegend", parent=styles["Normal"], fontName=body_font, fontSize=7.5,
+        textColor=colors.HexColor("#6b7280"), spaceAfter=4,
+    )
+    diff_legend_markup = (
+        f'<font color="{_DIFF_MISSING_GT[0]}" backColor="{_DIFF_MISSING_GT[1]}">amber</font> '
+        "= missing from generated output &nbsp;&nbsp; "
+        f'<font color="{_DIFF_INCORRECT_GEN[0]}" backColor="{_DIFF_INCORRECT_GEN[1]}">red</font> '
+        "= not present in ground truth"
+    )
+
+    # --- Transcription ---
+    story.append(
+        Paragraph(f"Transcription: (Accuracy: {_pct(transcription_score)})", subheading_style)
+    )
+    story.append(Paragraph(diff_legend_markup, legend_style))
+    trans_gt_tokens, trans_gen_tokens = _word_diff_tokens(
+        data.get("ground_truth_transcription"), data.get("generated_transcription")
+    )
+    transcription_rows = [
+        [Paragraph("Ground truth", header_cell_style), Paragraph("Generated output", header_cell_style)]
+    ] + _two_col_rows_from_tokens(trans_gt_tokens, trans_gen_tokens, value_style)
+    transcription_table = Table(transcription_rows, colWidths=[9 * cm, 9 * cm])
+    transcription_table.setStyle(_header_table_style())
+    story.append(transcription_table)
+
+    # --- Translation ---
+    story.append(
+        Paragraph(f"Translation: (Accuracy: {_pct(translation_score)})", subheading_style)
+    )
+    story.append(Paragraph(diff_legend_markup, legend_style))
+    transl_gt_tokens, transl_gen_tokens = _word_diff_tokens(
+        data.get("translation_ground_truth"),
+        data.get("generated_translation") or data.get("translation") or data.get("text_translation"),
+    )
+    translation_rows = [
+        [Paragraph("Ground truth", header_cell_style), Paragraph("Generated output", header_cell_style)]
+    ] + _two_col_rows_from_tokens(transl_gt_tokens, transl_gen_tokens, value_style)
+    translation_table = Table(translation_rows, colWidths=[9 * cm, 9 * cm])
+    translation_table.setStyle(_header_table_style())
+    story.append(translation_table)
+
+    # --- SOAP Summary ---
+    story.append(Paragraph(f"SOAP Summary: (Accuracy: {_pct(soap_score)})", subheading_style))
+    detail = detail_table_from_result(data, include_na=False)
+    rows_by_section = {section["section"]: section["rows"] for section in detail["sections"]}
+    soap_headers = ["Sub Category", "Ground Truth", "Generated output", "Status"]
+    for section_name in SOAP_SECTION_ORDER:
+        story.append(Paragraph(section_name, section_style))
+        rows = rows_by_section.get(section_name) or []
+        table_rows = [[Paragraph(h, header_cell_style) for h in soap_headers]]
+        style = _header_table_style()
+        if rows:
+            for row in rows:
+                table_rows.append(
+                    [
+                        _wrap(row.get("field_name"), value_style),
+                        _wrap(row.get("ground_truth"), value_style),
+                        _wrap(row.get("generated"), value_style),
+                        _wrap(row.get("result"), value_style),
+                    ]
+                )
+        else:
+            table_rows.append([Paragraph("No comparison data", value_style), "", "", ""])
+            style.add("SPAN", (0, 1), (-1, 1))
+        soap_table = Table(table_rows, colWidths=[4 * cm, 6 * cm, 6 * cm, 2 * cm])
+        soap_table.setStyle(style)
+        story.append(soap_table)
+        story.append(Spacer(1, 0.2 * cm))
+
     doc.build(story)
     return buffer.getvalue()
 
@@ -299,9 +665,11 @@ def generate_batch_pdf(rows: list) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=1.5 * cm, leftMargin=1.5 * cm)
     styles = getSampleStyleSheet()
+    body_font, bold_font = _pdf_fonts()
     title_style = ParagraphStyle(
         "BatchTitle",
         parent=styles["Heading1"],
+        fontName=bold_font,
         fontSize=16,
         spaceAfter=12,
         textColor=colors.HexColor("#2563eb"),
@@ -309,6 +677,7 @@ def generate_batch_pdf(rows: list) -> bytes:
     heading = ParagraphStyle(
         "BatchH",
         parent=styles["Heading2"],
+        fontName=bold_font,
         fontSize=12,
         spaceBefore=10,
         spaceAfter=6,
@@ -316,13 +685,13 @@ def generate_batch_pdf(rows: list) -> bytes:
     label_style = ParagraphStyle(
         "BatchLabel",
         parent=styles["Normal"],
-        fontName="Helvetica-Bold",
+        fontName=bold_font,
         fontSize=8,
     )
     value_style = ParagraphStyle(
         "BatchValue",
         parent=styles["Normal"],
-        fontName="Helvetica",
+        fontName=body_font,
         fontSize=8,
         leading=11,
     )

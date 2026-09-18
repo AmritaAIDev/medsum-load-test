@@ -34,6 +34,13 @@
     language: ['language'],
   };
 
+  // Columns whose header text is a rendered pill/chip, not a plain row field —
+  // sorted numerically via the same score function the cell rendering uses,
+  // so the sort order matches what's shown on screen.
+  const NUMERIC_SORT_FIELDS = {
+    'SOAP accuracy': (row) => (root.soapAccuracyScore ? root.soapAccuracyScore(row) : null),
+  };
+
   const states = {};
 
   function defaultState(overrides) {
@@ -119,6 +126,10 @@
   }
 
   function sortValue(row, sortKey) {
+    if (NUMERIC_SORT_FIELDS[sortKey]) {
+      const n = Number(NUMERIC_SORT_FIELDS[sortKey](row));
+      return Number.isFinite(n) ? n : null;
+    }
     const fields = SORT_FIELDS[sortKey] || [sortKey];
     for (let i = 0; i < fields.length; i++) {
       const val = String((row || {})[fields[i]] || '').trim();
@@ -144,6 +155,11 @@
       items = items.slice().sort((a, b) => {
         const av = sortValue(a, sortKey);
         const bv = sortValue(b, sortKey);
+        const aEmpty = av === null || av === undefined || av === '';
+        const bEmpty = bv === null || bv === undefined || bv === '';
+        if (aEmpty && bEmpty) return 0;
+        if (aEmpty) return 1;
+        if (bEmpty) return -1;
         if (av < bv) return reverse ? 1 : -1;
         if (av > bv) return reverse ? -1 : 1;
         return 0;
