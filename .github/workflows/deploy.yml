@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+
       - name: Verify confirmation input
         run: |
           if [ "${{ github.event.inputs.confirm }}" != "deploy" ]; then
@@ -20,40 +21,54 @@ jobs:
             exit 1
           fi
 
-      - name: Prepare SSH private key
+      - name: Prepare SSH key
         shell: bash
         env:
           SSH_KEY_B64: ${{ secrets.GCP_SSH_PRIVATE_KEY_B64 }}
         run: |
           set -e
 
-          umask 077
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
 
-          printf '%s' "$SSH_KEY_B64" | base64 --decode > "$GITHUB_WORKSPACE/gcp_deploy_key"
+          printf '%s' "$SSH_KEY_B64" | base64 --decode > ~/.ssh/gcp_deploy_key
 
-          chmod 600 "$GITHUB_WORKSPACE/gcp_deploy_key"
+          chmod 600 ~/.ssh/gcp_deploy_key
 
           echo "Validating private key..."
 
           ssh-keygen -y \
-            -f "$GITHUB_WORKSPACE/gcp_deploy_key" \
+            -f ~/.ssh/gcp_deploy_key \
             > /dev/null
 
           echo "SSH private key parsed successfully"
 
+      - name: Add GCP server to known hosts
+        shell: bash
+        env:
+          GCP_HOST: ${{ secrets.GCP_HOST }}
+        run: |
+          set -e
+
+          ssh-keyscan -H "$GCP_HOST" >> ~/.ssh/known_hosts
+
+          chmod 600 ~/.ssh/known_hosts
+
       - name: Test SSH connection
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.GCP_HOST }}
-          username: ${{ secrets.GCP_USERNAME }}
-          key_path: /github/workspace/gcp_deploy_key
-          port: 22
-          command_timeout: 15m
+        shell: bash
+        env:
+          GCP_HOST: ${{ secrets.GCP_HOST }}
+          GCP_USERNAME: ${{ secrets.GCP_USERNAME }}
+        run: |
+          set -e
 
-          script: |
-            set -e
-
-            echo "SSH connection successful"
-            whoami
-            hostname
-            pwd
+          ssh \
+            -i ~/.ssh/gcp_deploy_key \
+            -o IdentitiesOnly=yes \
+            "$GCP_USERNAME@$GCP_HOST" \
+            '
+              echo "SSH connection successful"
+              whoami
+              hostname
+              pwd
+            '
