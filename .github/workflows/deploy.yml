@@ -20,7 +20,7 @@ jobs:
             exit 1
           fi
 
-      - name: Deploy through SSH
+      - name: Test SSH connection
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.GCP_HOST }}
