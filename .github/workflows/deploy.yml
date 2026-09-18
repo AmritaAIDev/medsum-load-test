@@ -13,7 +13,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Verify confirmation input
         run: |
           if [ "${{ github.event.inputs.confirm }}" != "deploy" ]; then
@@ -24,29 +23,56 @@ jobs:
       - name: Deploy through SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.TEST_SERVER_HOST }}
-          username: ${{ secrets.TEST_SERVER_USER }}
-          key: ${{ secrets.TEST_SERVER_SSH_KEY }}
-          script: |
+          host: ${{ secrets.GCP_HOST }}
+          username: ${{ secrets.GCP_USERNAME }}
+          key: ${{ secrets.GCP_SSH_PRIVATE_KEY }}
+          port: 22
+          command_timeout: 15m
 
+          script: |
             set -e
 
+            echo "========================================"
             echo "Starting deployment"
+            echo "========================================"
+
+            echo "Connected user:"
+            whoami
+
+            echo "Server:"
+            hostname
+
+            echo "Moving to deployment directory"
             cd /home/developers/medsum-load-test
 
-            echo "Fetching latest code"
+            echo "Checking repository"
+            git rev-parse --show-toplevel
+            git remote -v
+
+            echo "Fetching latest master"
             git fetch origin master
 
             echo "Updating code"
             git reset --hard origin/master
 
+            echo "Latest deployed commit:"
+            git log -1 --oneline
+
             echo "Activating virtual environment"
-            source venv/bin/activate
+            source /home/developers/medsum-load-test/venv/bin/activate
 
-            echo "Installing requirements"
-            pip install -r requirements.txt
+            echo "Python:"
+            python --version
 
-            echo "Restarting service"
-            sudo systemctl restart medsum_testing.service
+            echo "Installing base requirements"
+            python -m pip install -r requirements.txt
+
+            if [ -f requirements_medsum.txt ]; then
+              echo "Installing MedSum testing requirements"
+              python -m pip install -r requirements_medsum.txt
+            fi
+
+            echo "Checking installed dependencies"
+            python -m pip check
 
             echo "Deployment completed successfully"
