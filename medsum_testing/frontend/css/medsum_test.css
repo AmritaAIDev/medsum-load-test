@@ -2865,10 +2865,36 @@ em.na { color: var(--text-muted); font-style: italic; }
   font-size: 12px;
   border-radius: 6px;
 }
+.acc-setup-input {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.2;
+  color: var(--text-primary);
+  background: #fff;
+  box-sizing: border-box;
+}
 .acc-password-cell {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+.acc-password-cell .acc-setup-input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+.acc-pwd-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  color: var(--text-secondary);
+  padding: 0;
+  line-height: 1;
 }
 /* Hide browser-native reveal (Edge/Chrome) — custom 👁 button is used instead */
 .acc-password-cell input[type="password"]::-ms-reveal,
@@ -2887,9 +2913,34 @@ em.na { color: var(--text-muted); font-style: italic; }
   padding: 2px 8px;
   white-space: nowrap;
 }
-.acc-field-saved {
-  border-color: #6EE7B7 !important;
-  background: #F0FDF4;
+.acc-field-saved,
+.acc-doctor-credentials-saved .acc-setup-input,
+.acc-doctor-credentials-saved .acc-assigned-patient,
+.acc-assigned-patient.acc-field-saved,
+.acc-assigned-patient.acc-patient-just-saved {
+  border-color: #00B894 !important;
+  background-color: #ECFDF5 !important;
+  background-image: none !important;
+  color: #065F46 !important;
+  box-shadow: none !important;
+}
+.acc-doctor-credentials-saved .acc-setup-input:-webkit-autofill,
+.acc-doctor-credentials-saved .acc-setup-input:-webkit-autofill:hover,
+.acc-doctor-credentials-saved .acc-setup-input:-webkit-autofill:focus,
+.acc-field-saved:-webkit-autofill,
+.acc-field-saved:-webkit-autofill:hover,
+.acc-field-saved:-webkit-autofill:focus {
+  -webkit-text-fill-color: #065F46 !important;
+  caret-color: #065F46;
+  border-color: #00B894 !important;
+  box-shadow: 0 0 0 1000px #ECFDF5 inset !important;
+  transition: background-color 99999s ease-out;
+}
+.acc-doctor-credentials-saved .acc-credentials-saved-badge,
+.acc-doctor-credentials-saved .acc-patient-saved-cue {
+  color: #065F46;
+  background: #A7F3D0;
+  border-color: #00B894;
 }
 
 .run-model-sticky {

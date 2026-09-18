@@ -11,3 +11,5 @@ PyYAML
 reportlab
 APScheduler>=3.10.0
 python-docx>=1.1.0
+# Optional: Fix #4 semantic narrative matching (falls back to SequenceMatcher)
+sentence-transformers>=2.2.0

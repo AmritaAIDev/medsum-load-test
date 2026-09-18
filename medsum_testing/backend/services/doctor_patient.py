@@ -77,10 +77,17 @@ def patient_add_validation_error(raw, existing, *, replace: bool = False) -> str
 
 
 def credentials_look_saved(phone, password) -> bool:
-    """Phone + Password are populated enough to show a row-level Saved state."""
+    """Phone + Password are populated enough for doctor credentials."""
     p = str(phone or "").strip()
     w = str(password or "")
     return bool(p) and bool(w) and any(ch.isdigit() for ch in p)
+
+
+def setup_looks_saved(phone, password, patients) -> bool:
+    """Row-level Saved: credentials filled and a patient ID committed."""
+    if not credentials_look_saved(phone, password):
+        return False
+    return len(normalize_patient_ids(patients)) > 0
 
 
 def assign_patient(

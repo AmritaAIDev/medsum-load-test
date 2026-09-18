@@ -44,6 +44,14 @@ test_settings:
   max_retries: 3
   retry_interval_seconds: 5
   run_all_stagger_seconds: 3
+  # Accuracy categories (High accuracy / Needs review / Low accuracy).
+  # Never used for Execution Status (Pending / Running / Done).
+  accuracy_pass_score: 80          # score ≥ this → High accuracy (pass)
+  accuracy_review_score: 65        # Needs review: ≥ this → Minor Deviation, else Moderate
+  accuracy_moderate_score: 50      # below review and ≥ this → Moderate Deviation; below → Major
+
+# SOAP fact-level weights and field catalog live in config/soap_fact_scoring.yaml
+# (tune there; do not hardcode criticality in the scorer).
 
 features:
   save_to_django_db: true

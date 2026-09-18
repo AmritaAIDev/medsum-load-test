@@ -63,6 +63,12 @@
     return /\d/.test(p);
   }
 
+  /** Row-level Saved: phone+password filled and a patient ID committed. */
+  function setupLooksSaved(phone, password, patients) {
+    if (!credentialsLookSaved(phone, password)) return false;
+    return normalizePatientIds(patients).length > 0;
+  }
+
   function assignPatientToDoctor(existing, newId, options) {
     const replace = !!(options && options.replace);
     const ids = normalizePatientIds(existing);
@@ -99,6 +105,7 @@
     patientSavedMessage,
     patientAddValidationError,
     credentialsLookSaved,
+    setupLooksSaved,
     assignPatientToDoctor,
   };
 

@@ -143,10 +143,19 @@
     'has_json_applicable',
   ];
 
+  function normalizeLanguageLabel(raw) {
+    let text = String(raw || '').trim();
+    if (!text) return '';
+    const numbered = text.match(/^\d+_(.+)$/);
+    if (numbered) text = numbered[1].trim();
+    return canonicalLanguageLabel(text)
+      || (text ? text.charAt(0).toUpperCase() + text.slice(1).toLowerCase() : '');
+  }
+
   function fileKey(item) {
-    const language = String((item && (item.language || item.folder_label)) || '')
-      .trim()
-      .toLowerCase();
+    const language = normalizeLanguageLabel(
+      (item && (item.language || item.folder_label)) || ''
+    ).toLowerCase();
     const audio = String(
       (item && (item.audio || item.audio_filename || item.filename)) || ''
     )
@@ -158,9 +167,9 @@
   function catalogId(item) {
     // DOM-safe id: no NUL and no raw quotes, so data-exclude-audio round-trips.
     const source = String((item && item.source) || 'drive');
-    const language = String((item && (item.language || item.folder_label)) || '')
-      .trim()
-      .toLowerCase();
+    const language = normalizeLanguageLabel(
+      (item && (item.language || item.folder_label)) || ''
+    ).toLowerCase();
     const audio = String(
       (item && (item.audio || item.audio_filename || item.filename)) || ''
     )
@@ -340,7 +349,7 @@
     return (selected || [])
       .filter(item => (item.source || 'drive') === 'drive')
       .map(item => ({
-        language: item.language || '',
+        language: normalizeLanguageLabel(item.language || item.folder_label || ''),
         audio: item.audio || item.audio_filename || '',
       }))
       .filter(item => item.audio);
@@ -350,10 +359,9 @@
     return (selected || [])
       .map(item => {
         const source = item.source || 'drive';
-        let language = item.language || item.folder_label || '';
-        if (source === 'upload') {
-          language = canonicalLanguageLabel(language) || language;
-        }
+        const language = normalizeLanguageLabel(
+          item.language || item.folder_label || ''
+        );
         const row = {
           language: language,
           audio: item.audio || item.audio_filename || item.filename || '',

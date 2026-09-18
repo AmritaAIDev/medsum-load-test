@@ -2749,6 +2749,8 @@ function accAddDoctor(phone = '', password = '', patients = []) {
     password,
     patients: ids,
     changing: false,
+    // Row Saved only after Enter on Patient ID (restored rows with a patient count as saved).
+    setupSaved: ids.length > 0,
   });
 
   const tr = document.createElement('tr');
@@ -2757,29 +2759,25 @@ function accAddDoctor(phone = '', password = '', patients = []) {
   tr.setAttribute('data-acc-credentials-saved', 'false');
   tr.innerHTML = `
     <td>
-      <input type="text" data-field="phone" value="${esc(phone)}"
-             placeholder="9876543210"
+      <input type="text" class="acc-setup-input" data-field="phone"
+             value="${esc(phone)}"
+             placeholder="Username / phone number"
+             autocomplete="username"
              oninput="accDoctors[${idx}].phone=this.value; persistDoctorForm()"
-             onblur="accSyncDoctorCredentials(${idx})"
-             style="width:100%;padding:8px;
-                    border:1px solid var(--border);
-                    border-radius:6px;font-size:14px">
+             onblur="accSyncDoctorCredentials(${idx})">
     </td>
     <td>
       <div class="acc-password-cell">
-        <input type="password" data-field="password" value="${esc(password)}"
+        <input type="password" class="acc-setup-input" data-field="password"
+               value="${esc(password)}"
                id="acc-pwd-${idx}"
                placeholder="Password"
+               autocomplete="current-password"
                oninput="accDoctors[${idx}].password=this.value; persistDoctorForm()"
-               onblur="accSyncDoctorCredentials(${idx})"
-               style="flex:1;padding:8px;
-                      border:1px solid var(--border);
-                      border-radius:6px;font-size:14px">
-        <button type="button"
+               onblur="accSyncDoctorCredentials(${idx})">
+        <button type="button" class="acc-pwd-toggle"
                 onclick="accTogglePwd(${idx})"
-                style="background:none;border:none;
-                       cursor:pointer;font-size:16px;
-                       color:var(--text-secondary)">👁</button>
+                aria-label="Show or hide password">👁</button>
         <span class="acc-credentials-saved-badge"
               data-acc-credentials-saved-badge hidden>Saved</span>
       </div>
@@ -2810,7 +2808,11 @@ function accSyncDoctorCredentials(idx) {
   const pwdEl = row.querySelector('[data-field="password"]');
   if (phoneEl) doctor.phone = phoneEl.value.trim();
   if (pwdEl) doctor.password = pwdEl.value;
+  // Blur alone never marks Saved — only Enter after Patient ID does.
   accApplyDoctorSavedState(idx);
+  if ((doctor.patients || []).length > 0 && !doctor.changing) {
+    accRenderPatientCell(idx);
+  }
   accUpdateSummary();
 }
 
@@ -2819,9 +2821,17 @@ function accApplyDoctorSavedState(idx) {
   const row = document.getElementById(`acc-doc-row-${idx}`);
   if (!doctor || !row) return;
   const dp = accDoctorPatientApi();
-  const saved = dp.credentialsLookSaved
-    ? dp.credentialsLookSaved(doctor.phone, doctor.password)
-    : !!(String(doctor.phone || '').trim() && String(doctor.password || ''));
+  const committed = !!doctor.setupSaved;
+  const complete = dp.setupLooksSaved
+    ? dp.setupLooksSaved(doctor.phone, doctor.password, doctor.patients)
+    : !!(
+      String(doctor.phone || '').trim()
+      && String(doctor.password || '')
+      && (doctor.patients || []).length > 0
+    );
+  // Show Saved for doctor + patient only after Enter committed Patient ID
+  // and phone/password are filled.
+  const saved = committed && complete;
   row.classList.toggle('acc-doctor-credentials-saved', saved);
   row.setAttribute('data-acc-credentials-saved', saved ? 'true' : 'false');
   row.querySelectorAll('[data-field="phone"], [data-field="password"]').forEach(el => {
@@ -2876,14 +2886,15 @@ function accReadPatientInput(idx) {
 }
 
 function accPatientKeydown(e, idx) {
-  if (e.key === 'Enter' || e.key === ',') {
+  // Commit (and show Saved for doctor + patient) only on Enter after Patient ID.
+  if (e.key === 'Enter') {
     e.preventDefault();
-    if (accDoctors[idx]?.changing) accCommitChangePatient(idx);
-    else accAddPatient(idx);
+    if (accDoctors[idx]?.changing) accCommitChangePatient(idx, { markSaved: true });
+    else accAddPatient(idx, { markSaved: true });
   }
 }
 
-function accAddPatient(idx) {
+function accAddPatient(idx, options) {
   const doctor = accDoctors[idx];
   if (!doctor) return;
   const val = accReadPatientInput(idx);
@@ -2908,8 +2919,9 @@ function accAddPatient(idx) {
   }
   doctor.patients = result.patients;
   doctor.changing = false;
+  if (options && options.markSaved) doctor.setupSaved = true;
   accRenderPatientCell(idx);
-  accFlashPatientSaved(idx, val);
+  if (options && options.markSaved) accFlashPatientSaved(idx, val);
   accApplyDoctorSavedState(idx);
   accUpdateSummary();
 }
@@ -2933,7 +2945,7 @@ function accCancelChangePatient(idx) {
   accRenderPatientCell(idx);
 }
 
-function accCommitChangePatient(idx) {
+function accCommitChangePatient(idx, options) {
   const doctor = accDoctors[idx];
   if (!doctor) return;
   const val = accReadPatientInput(idx);
@@ -2958,8 +2970,9 @@ function accCommitChangePatient(idx) {
   }
   doctor.patients = result.patients;
   doctor.changing = false;
+  if (options && options.markSaved) doctor.setupSaved = true;
   accRenderPatientCell(idx);
-  accFlashPatientSaved(idx, val);
+  if (options && options.markSaved) accFlashPatientSaved(idx, val);
   accApplyDoctorSavedState(idx);
   accUpdateSummary();
 }
@@ -2969,7 +2982,9 @@ function accRemovePatient(idx, patientId) {
   if (!doctor) return;
   doctor.patients = doctor.patients.filter(p => p !== String(patientId));
   doctor.changing = false;
+  doctor.setupSaved = false;
   accRenderPatientCell(idx);
+  accApplyDoctorSavedState(idx);
   accUpdateSummary();
 }
 
@@ -3007,12 +3022,23 @@ function accRenderPatientCell(idx) {
     html += `</div>`;
   } else if (patients.length === 1 && !changing) {
     const pid = JSON.stringify(String(patients[0]));
+    const complete = dp.setupLooksSaved
+      ? dp.setupLooksSaved(doctor.phone, doctor.password, patients)
+      : !!(
+        String(doctor.phone || '').trim()
+        && String(doctor.password || '')
+        && patients.length > 0
+      );
+    const rowSaved = !!doctor.setupSaved && complete;
     html += `<div id="acc-patients-${idx}" class="acc-patient-chip-row">
-      <span class="acc-assigned-patient acc-field-saved" data-acc-assigned-patient>
+      <span class="acc-assigned-patient${rowSaved ? ' acc-field-saved' : ''}"
+            data-acc-assigned-patient>
         ${esc(String(patients[0]))}
       </span>
-      <span class="acc-credentials-saved-badge acc-patient-saved-cue"
-            data-acc-patient-saved-cue>Saved</span>
+      ${rowSaved
+        ? `<span class="acc-credentials-saved-badge acc-patient-saved-cue"
+                 data-acc-patient-saved-cue>Saved</span>`
+        : ''}
       <button type="button" class="acc-patient-link" data-acc-change-patient
               aria-label="Change Patient"
               onclick="accStartChangePatient(${idx})">Change</button>
@@ -3039,8 +3065,8 @@ function accRenderPatientCell(idx) {
               style="padding:6px 10px;font-size:12px"
               data-acc-add-patient="${isChange ? 'save' : 'add'}"
               onclick="${isChange
-                ? `accCommitChangePatient(${idx})`
-                : `accAddPatient(${idx})`}">
+                ? `accCommitChangePatient(${idx},{markSaved:true})`
+                : `accAddPatient(${idx},{markSaved:true})`}">
         ${isChange ? 'Save Patient' : 'Add Patient'}
       </button>
       ${isChange
@@ -5774,7 +5800,7 @@ function ltAddRow(phone = '', password = '', patientId = '') {
   tr.innerHTML = `
     <td>
       <input type="text" value="${esc(phone)}"
-             placeholder="9876543210"
+             placeholder="Username / phone number"
              onchange="ltRows[${idx}].phone=this.value; persistLtForm()"
              style="width:100%;padding:8px;border:1px solid var(--border);
                     border-radius:6px;font-size:14px">
