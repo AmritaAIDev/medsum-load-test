@@ -75,7 +75,7 @@ Each stage is timed and logged for performance analysis.
 
 3. **Advanced Settings**:
    - Language (e.g., en, hi, ta)
-   - LLM Model (OpenAI, Gemma, Param)
+   - LLM Model (OpenAI, OpenAI, Param)
    - STT Model (Bhasini, Bharatgen)
    - Translate Model (Bhasini, Bharatgen)
    - Template Type (SOAP or Discharge Summary)
@@ -179,14 +179,6 @@ The app exposes the following endpoints:
 3. Make changes and test thoroughly.
 4. Submit a pull request.
 
-## License
-
-This project is licensed under the MIT License. See LICENSE file for details.
-
-## Contact
-
-For issues or questions, contact the development team at [your-email@example.com].
-
 ---
 
 ## MEDSUM Accuracy Testing Framework
@@ -194,7 +186,7 @@ For issues or questions, contact the development team at [your-email@example.com
 A separate module for automated accuracy and regression testing against the MedSum backend. Runs on **port 5051** (load test stays on 5050).
 
 ```bash
-pip install -r requirements_medsum.txt
+pip install -r requirements.txt
 copy config\medsum_config.example.yaml config\medsum_config.yaml
 python run_medsum_test.py
 ```

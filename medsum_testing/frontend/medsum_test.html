@@ -8,60 +8,211 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 </head>
 <body>
-  <div class="app-shell">
-    <aside class="sidebar">
-      <div class="logo">
+  <div class="app-shell" id="app-shell">
+    <aside class="sidebar" id="app-sidebar">
+      <div class="logo" id="sidebar-brand" role="button" tabindex="0"
+           aria-expanded="true" aria-label="Collapse sidebar"
+           title="Collapse sidebar">
         <span class="logo-icon">🏥</span>
         <span class="logo-text">MedSum</span>
       </div>
       <nav>
-        <a href="#dashboard" class="nav-item active" data-nav="dashboard">
-          <span class="nav-icon">📊</span> Dashboard
+        <a href="#dashboard" class="nav-item active" data-nav="dashboard"
+           title="Dashboard">
+          <span class="nav-icon">📊</span>
+          <span class="nav-label">Dashboard</span>
         </a>
-        <a href="#tests" class="nav-item" data-nav="tests">
-          <span class="nav-icon">⚡</span> API Tests
+        <a href="#load-testing" class="nav-item" data-nav="load-testing"
+           title="Load Testing">
+          <span class="nav-icon">⚡</span>
+          <span class="nav-label">Load Testing</span>
         </a>
-        <a href="#runs" class="nav-item" data-nav="runs">
-          <span class="nav-icon">📋</span> Test Runs
-        </a>
-        <a href="#reports" class="nav-item" data-nav="reports">
-          <span class="nav-icon">📄</span> Reports
-        </a>
-        <a href="#analytics" class="nav-item" data-nav="analytics">
-          <span class="nav-icon">📈</span> Analytics
-        </a>
-        <a href="#settings" class="nav-item" data-nav="settings">
-          <span class="nav-icon">⚙️</span> Settings
+        <a href="#runs" class="nav-item" data-nav="runs"
+           title="Test Runs">
+          <span class="nav-icon">📋</span>
+          <span class="nav-label">Test Runs</span>
         </a>
       </nav>
       <div class="sidebar-footer">
-        <button class="logout-btn" type="button">🚪 Logout</button>
+        <button class="logout-btn" type="button" title="Logout">
+          <span class="nav-icon">🚪</span>
+          <span class="nav-label">Logout</span>
+        </button>
       </div>
     </aside>
 
-    <main class="main-content">
+    <div class="app-body">
+      <main class="main-content">
       <!-- Dashboard View -->
-      <div id="dashboard-view">
-        <header class="page-header">
-          <div>
-            <h1>API Testing Dashboard</h1>
-            <p class="subtitle">Monitor and evaluate your backend API performance</p>
-          </div>
+      <div id="dashboard-view" class="page-view is-active" data-page="dashboard">
+        <header class="page-header dashboard-page-header">
+          <h1>API Testing Dashboard</h1>
           <div class="header-actions">
-            <select id="ai-model-select" class="select-input">
-              <option value="deepseek">DeepSeek</option>
-              <option value="gpt-4">GPT-4</option>
-            </select>
-            <button id="run-all-btn" class="btn-primary" type="button">▶ Run All Tests</button>
+            <button type="button" class="btn-outline how-it-works-open"
+                    data-how-it-works-open>
+              How It Works
+            </button>
           </div>
         </header>
 
-        <section class="stat-grid" id="stat-grid"></section>
+        <div id="ai-warning-banner" class="ai-warning-banner" style="display:none">
+          <span id="ai-warning-text"></span>
+        </div>
 
+        <div class="dashboard-filters">
+          <div class="filter-group">
+            <label class="filter-label" id="batch-filter-label">Batch</label>
+            <div class="batch-multi-filter" id="batch-filter">
+              <button type="button" id="batch-filter-toggle"
+                      class="config-input batch-filter-toggle"
+                      aria-labelledby="batch-filter-label"
+                      aria-haspopup="listbox"
+                      aria-expanded="false"
+                      aria-controls="batch-filter-panel">
+                <span id="batch-filter-toggle-text" class="batch-filter-toggle-text">All Batches</span>
+                <span class="batch-filter-caret" aria-hidden="true"></span>
+              </button>
+              <div id="batch-filter-panel" class="batch-filter-panel" hidden
+                   role="listbox" aria-multiselectable="true"
+                   aria-labelledby="batch-filter-label">
+                <label class="multi-audio-label batch-filter-option">
+                  <input type="checkbox" id="batch-filter-all"
+                         class="batch-filter-cb" value="all" checked>
+                  All Batches
+                </label>
+                <div id="batch-filter-options" class="multi-checkbox-list"></div>
+              </div>
+            </div>
+          </div>
+          <div class="filter-group">
+            <label class="filter-label" for="type-filter">Test Type</label>
+            <select id="type-filter" class="config-input" onchange="onDashboardFilterChange()">
+              <option value="all">All</option>
+              <option value="accuracy">Accuracy Test</option>
+              <option value="load">Load Test</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label class="filter-label" for="model-filter">Model</label>
+            <select id="model-filter" class="config-input" onchange="onDashboardFilterChange()">
+              <option value="all">All</option>
+            </select>
+          </div>
+        </div>
+
+        <section id="dashboard-batch-overview" class="batch-overview" hidden>
+          <p class="batch-overview-meta">
+            <span class="batch-overview-item">
+              <span data-overview-field="recordings">0</span>
+              <span data-overview-field="recordings_label">recordings</span>
+            </span>
+            <span class="batch-overview-sep" aria-hidden="true">·</span>
+            <span class="batch-overview-item">
+              <span data-overview-field="audio">—</span> audio
+            </span>
+            <span class="batch-overview-sep" aria-hidden="true">·</span>
+            <span class="batch-overview-item">
+              Evaluation Model <strong data-overview-field="model">—</strong>
+            </span>
+            <span class="batch-overview-asr" data-overview-asr-wrap hidden>
+              <span class="batch-overview-sep" aria-hidden="true">·</span>
+              <span class="batch-overview-item">
+                ASR <strong data-overview-field="asr">—</strong>
+              </span>
+            </span>
+          </p>
+          <div class="batch-overview-kpis" aria-label="Batch results">
+            <article class="batch-kpi is-pass">
+              <div class="batch-kpi-value" data-overview-field="passed">0 / 0</div>
+              <div class="batch-kpi-label">
+                <span class="batch-kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" width="12" height="12">
+                    <path fill="currentColor" d="M6.2 11.2 2.8 7.8l1.1-1.1 2.3 2.3 5.9-5.9 1.1 1.1z"/>
+                  </svg>
+                </span>
+                Passed
+              </div>
+              <p class="batch-kpi-sub">No safety flag and ≤10% of facts missed or wrong</p>
+            </article>
+            <article class="batch-kpi is-fail">
+              <div class="batch-kpi-value" data-overview-field="failed">0 / 0</div>
+              <div class="batch-kpi-label">
+                <span class="batch-kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" width="12" height="12">
+                    <path fill="currentColor" d="M4.2 4.2 8 8l3.8-3.8 1.1 1.1L9.1 9.1l3.8 3.8-1.1 1.1L8 10.2l-3.8 3.8-1.1-1.1 3.8-3.8-3.8-3.8z"/>
+                  </svg>
+                </span>
+                Failed
+              </div>
+              <p class="batch-kpi-sub">Did not meet the pass rule</p>
+            </article>
+            <article class="batch-kpi is-safety">
+              <div class="batch-kpi-value" data-overview-field="safety">0</div>
+              <div class="batch-kpi-label">
+                <span class="batch-kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" width="12" height="12">
+                    <path fill="currentColor" d="M3.2 1.5h1.4v13H3.2zm2.2.6 8.2 2.3v5.3L5.4 7.4z"/>
+                  </svg>
+                </span>
+                Safety flags
+              </div>
+              <p class="batch-kpi-sub" data-overview-field="safety_note">No safety concerns in this batch</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="accuracy-table-section" class="accuracy-table-section"
+                 data-accuracy-table aria-label="Clinical Fact Accuracy"></section>
+
+        <section id="recordings-table-section" class="accuracy-table-section recordings-table-section"
+                 aria-label="Recordings"></section>
+
+        <!-- KPI cards hidden for now
+        <div class="stat-cards-grid" id="stat-grid">
+          <div class="stat-card">
+            <div class="stat-icon">📦</div>
+            <div class="stat-value" id="stat-batches">—</div>
+            <div class="stat-label">Number of Batches</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">📋</div>
+            <div class="stat-value" id="stat-total-cases">—</div>
+            <div class="stat-label">Total Test Cases</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">✅</div>
+            <div class="stat-value" id="stat-passed">—</div>
+            <div class="stat-label">Done</div>
+          </div>
+          <div class="stat-card stat-card-tip" data-accuracy-overall-tip data-tooltip-trigger>
+            <div class="stat-icon">🎯</div>
+            <div class="stat-value" id="stat-accuracy">—</div>
+            <div class="stat-label">Average Accuracy</div>
+            <div class="reason-popup stat-tip-popup" role="tooltip"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">⏱</div>
+            <div class="stat-value" id="stat-latency">—</div>
+            <div class="stat-label">Avg Latency</div>
+            <div class="stat-sub">Per test run</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">📄</div>
+            <div class="stat-value" id="stat-reports">—</div>
+            <div class="stat-label">Reports Generated</div>
+          </div>
+        </div>
+        -->
+
+        <!-- Accuracy Over Time and Accuracy Distribution charts hidden for now
         <section class="charts-row">
           <div class="card chart-card">
-            <h3>Accuracy Over Time</h3>
-            <canvas id="accuracy-chart"></canvas>
+            <h3 id="accuracy-chart-title">Accuracy Over Time</h3>
+            <div id="accuracy-chart-wrap" class="accuracy-chart-wrap">
+              <canvas id="accuracy-chart"></canvas>
+            </div>
+            <p id="accuracy-chart-note" class="chart-note" hidden></p>
+            <div id="accuracy-chart-legend" class="distribution-legend accuracy-chart-legend"></div>
           </div>
           <div class="card chart-card">
             <h3>Accuracy Distribution</h3>
@@ -69,90 +220,972 @@
             <div id="distribution-legend" class="distribution-legend"></div>
           </div>
         </section>
+        -->
 
-        <section class="card table-card">
-          <div class="table-header">
-            <h3>Recent Test Runs</h3>
-            <span id="batch-status" class="batch-status"></span>
-          </div>
-          <div class="table-wrap">
-            <table class="runs-table">
-              <thead>
-                <tr>
-                  <th>Test ID</th>
-                  <th>Audio File</th>
-                  <th>Language</th>
-                  <th>Accuracy</th>
-                  <th>Time</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody id="test-runs-tbody">
-                <tr><td colspan="6" class="empty-row">Loading…</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <!-- Recent Test Runs table, Summary, and Clinical Quality Bands hidden for now
+        <div class="results-stack" data-results-source="dashboard">
+          ...
+        </div>
+        -->
       </div>
 
-      <!-- Detail View -->
-      <div id="detail-view" style="display:none">
-        <button id="back-btn" class="btn-secondary" type="button">← Back to Dashboard</button>
-        <header class="detail-header">
+      <div id="runs-view" class="page-view" data-page="runs">
+
+        <header class="page-header">
           <div>
-            <h1 id="detail-title">Test Run</h1>
-            <p id="detail-meta" class="subtitle"></p>
+            <h1>Test Runs</h1>
+            <p class="subtitle">
+              Configure doctors and patients, then run tests.
+            </p>
           </div>
           <div class="header-actions">
-            <button id="pdf-btn" class="btn-outline" type="button">PDF</button>
-            <button id="excel-btn" class="btn-outline" type="button">Excel</button>
+            <button type="button" class="btn-outline how-it-works-open"
+                    data-how-it-works-open>
+              How It Works
+            </button>
+            <div class="run-model-sticky" data-run-model-banner>
+              Comparison model:
+              <strong data-run-model-label>—</strong>
+            </div>
           </div>
         </header>
 
-        <section class="card">
-          <h3>Transcription</h3>
-          <div class="diff-grid">
+        <div class="card" style="margin-bottom:20px">
+
+          <div style="display:flex;justify-content:space-between;
+                      align-items:center;cursor:pointer;
+                      padding-bottom:0"
+               onclick="accToggleSetup()">
             <div>
-              <h4>Ground Truth</h4>
-              <pre id="ground-truth-text" class="text-panel"></pre>
+              <h3 style="margin-bottom:2px">
+                1. Doctor &amp; Patient Setup
+              </h3>
+              <p class="subtitle">
+                Each doctor is linked to one patient for a test run.
+              </p>
             </div>
-            <div>
-              <h4>Generated</h4>
-              <pre id="generated-text" class="text-panel"></pre>
+            <div style="display:flex;align-items:center;gap:12px">
+              <span id="acc-setup-summary"
+                    style="font-size:13px;
+                           color:var(--text-secondary)">
+                Not configured
+              </span>
+              <span id="acc-setup-arrow"
+                    style="font-size:12px;
+                           color:var(--text-muted)">▼</span>
             </div>
           </div>
-        </section>
 
-        <section class="card">
-          <h3>Medical Differences</h3>
-          <ul id="medical-diffs" class="diff-list"></ul>
-        </section>
+          <div id="acc-setup-body" style="margin-top:20px">
+            <table class="runs-table" id="acc-doctor-table">
+              <thead>
+                <tr>
+                  <th>Username / Phone Number</th>
+                  <th>Password</th>
+                  <th>Patient ID</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="acc-doctor-tbody"></tbody>
+            </table>
 
-        <section class="card" id="med-validation-section">
-          <div id="med-validation"></div>
-        </section>
-
-        <section class="card">
-          <h3>SOAP Summary</h3>
-          <div class="soap-tabs">
-            <button class="soap-tab active" data-tab="subjective" type="button">Subjective</button>
-            <button class="soap-tab" data-tab="objective" type="button">Objective</button>
-            <button class="soap-tab" data-tab="assessment" type="button">Assessment</button>
-            <button class="soap-tab" data-tab="plan" type="button">Plan</button>
-            <button class="soap-tab" data-tab="summary" type="button">Summary</button>
+            <div style="display:flex;gap:10px;
+                        margin-top:14px;flex-wrap:wrap">
+              <button class="btn-outline" type="button"
+                      onclick="accAddDoctor()">
+                + Add Doctor
+              </button>
+              <button class="btn-outline" type="button"
+                      onclick="accExportConfig()">
+                ⬇ Export Config (JSON)
+              </button>
+              <button class="btn-outline" type="button"
+                      onclick="accImportConfig()">
+                ⬆ Import Config (JSON)
+              </button>
+              <input type="file" id="acc-config-input"
+                     accept=".json" style="display:none"
+                     onchange="accHandleConfigImport(this)">
+            </div>
           </div>
-          <pre id="soap-content" class="text-panel"></pre>
-        </section>
+        </div>
+
+        <div class="card upload-gt-card" style="margin-bottom:20px">
+          <div class="upload-gt-header">
+            <div>
+              <h3>2. Upload Multiple Audio Files &amp; Ground Truths</h3>
+              <p class="subtitle">
+                Upload multiple audio files along with their ground truth (JSON / Excel / PDF).
+              </p>
+            </div>
+            <button type="button" class="btn-danger-outline" id="clear-all-selected"
+                    onclick="clearAllSelectedFiles()">
+              <svg class="icon-trash" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M6 2h4l.5 1H14v1H2V3h3.5L6 2zm1 4v6H6V6h1zm3 0v6H9V6h1zM3.5 5h9l-.6 8.2A1 1 0 0 1 11.9 14H4.1a1 1 0 0 1-1-.8L2.5 5z"/>
+              </svg>
+              Clear All
+            </button>
+          </div>
+
+          <div class="upload-gt-tabs-row">
+            <div class="source-tabs" role="tablist" aria-label="Audio source">
+              <button type="button" class="source-tab active" data-source-tab="upload"
+                      onclick="setAudioSourceTab('upload')">
+                <svg class="icon-cloud" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+                </svg>
+                Upload Manually
+              </button>
+              <button type="button" class="source-tab" data-source-tab="drive"
+                      onclick="setAudioSourceTab('drive')">
+                <svg class="icon-drive" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7.71 3.5 1.5 14.27h4.81l6.21-10.77H7.71zM16.29 3.5h-4.2L18.3 14.27h4.2L16.29 3.5zM8.09 15.5l-2.38 4.12A2.5 2.5 0 0 0 7.86 21h8.28a2.5 2.5 0 0 0 2.15-1.38L16.1 15.5H8.09z"/>
+                </svg>
+                Google Drive
+              </button>
+            </div>
+            <span id="files-selected-badge" class="files-selected-badge">0 Files Selected</span>
+          </div>
+
+          <div class="upload-gt-body">
+            <div id="upload-manual-pane" class="upload-source-pane">
+              <div class="gt-drop-zone" id="gt-drop-zone">
+                <svg class="gt-drop-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+                </svg>
+                <p class="gt-drop-primary">Drag &amp; drop audio files and ground truth files here</p>
+                <p class="gt-drop-secondary">or <span class="gt-browse-link">Browse Files</span></p>
+              </div>
+              <p class="gt-drop-caption">Supported: mp3, wav, m4a, json, xls, xlsx, csv, pdf</p>
+              <input type="file" id="acc-local-audio" multiple
+                     accept="audio/*,.wav,.mp3,.m4a,.ogg,.json,.xls,.xlsx,.csv,.pdf,.txt,.doc,.docx"
+                     style="display:none"
+                     onchange="accHandleLocalAudio(this)">
+            </div>
+
+            <div id="upload-drive-pane" class="upload-source-pane" hidden>
+              <div id="multi-audio-row" class="multi-audio-picker">
+                <div class="multi-audio-panel">
+                  <div class="multi-audio-toolbar">
+                    <input type="search" id="multi-audio-filter" class="config-input"
+                           placeholder="Filter by language or file"
+                           aria-label="Filter Drive audio files"
+                           oninput="onMultiAudioFilterInput(this)">
+                    <div class="multi-audio-toolbar-actions">
+                      <button type="button" class="btn-outline" id="multi-audio-select-all"
+                              onclick="selectAllMultiAudio()">Select all</button>
+                      <button type="button" class="btn-outline" id="multi-audio-clear"
+                              onclick="clearMultiAudio()">Clear</button>
+                    </div>
+                  </div>
+                  <div id="multi-audio-checkboxes" class="multi-checkbox-list"
+                       role="group" aria-label="Google Drive audio files"></div>
+                </div>
+              </div>
+              <div id="drive-unmatched-gt" class="drive-orphan-warning" hidden
+                   data-drive-unmatched-gt></div>
+            </div>
+
+            <div class="selected-files-panel">
+              <div class="table-wrap selected-files-scroll">
+                <table class="selected-files-table" id="selected-files-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>AUDIO FILE</th>
+                      <th>DURATION</th>
+                      <th>GROUND TRUTH</th>
+                      <th>STATUS</th>
+                      <th>ACTION</th>
+                    </tr>
+                  </thead>
+                  <tbody id="selected-files-tbody"></tbody>
+                </table>
+              </div>
+              <p id="run-file-empty" class="empty-sub">
+                No audio files selected for this run. Run Batch Test is disabled
+                until at least one file is listed.
+              </p>
+            </div>
+          </div>
+
+          <div class="status-legend" id="gt-status-legend">
+            <div class="status-legend-title">Status Legend</div>
+            <div class="status-legend-items">
+              <span class="legend-item" data-status="complete">
+                <span class="legend-dot legend-complete"></span> Complete (All files)
+              </span>
+              <span class="legend-item" data-status="missing_language">
+                <span class="legend-dot legend-missing-language"></span> Missing Language
+              </span>
+              <span class="legend-item" data-status="missing_soap">
+                <span class="legend-dot legend-missing-soap"></span> Missing GT (SOAP)
+              </span>
+              <span class="legend-item" data-status="missing_translation">
+                <span class="legend-dot legend-missing-translation"></span> Missing Translation
+              </span>
+              <span class="legend-item" data-status="missing_transcript">
+                <span class="legend-dot legend-missing-transcript"></span> Missing Transcript
+              </span>
+              <span class="legend-item" data-status="missing_json">
+                <span class="legend-dot legend-missing-json"></span> Missing JSON
+              </span>
+              <span class="legend-item" data-status="missing_gt_all">
+                <span class="legend-dot legend-missing-all"></span> Missing GT (All)
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card ai-settings-card" style="margin-bottom:20px">
+          <h3>3. AI Model &amp; Settings</h3>
+          <div class="ai-settings-row">
+            <div class="ai-model-field">
+              <label class="config-label" for="ai-model-select">AI Model</label>
+              <select id="ai-model-select" class="config-input model-select">
+                <option value="gpt-4o"
+                        data-desc="OpenAI GPT-4o — Best accuracy, supports complex medical terminology and reasoning. Recommended for production testing.">
+                  GPT-4o
+                </option>
+                <option value="gpt-4o-mini" selected
+                        data-desc="OpenAI GPT-4o Mini — Faster and cheaper than GPT-4o. Good for bulk testing where speed matters more than maximum accuracy.">
+                  GPT-4o Mini
+                </option>
+                <option value="deepseek"
+                        data-desc="DeepSeek Chat — Cost-effective alternative. Strong multilingual support, good for Hindi and regional language comparisons.">
+                  DeepSeek
+                </option>
+              </select>
+              <span id="model-description" class="model-desc-text"></span>
+            </div>
+            <div class="ai-run-field">
+              <button id="run-all-btn" class="btn-primary btn-run-batch" type="button"
+                      onclick="runAllTests()">
+                <svg class="icon-play" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M4 2.5v11l10-5.5L4 2.5z"/>
+                </svg>
+                Run Batch Test
+              </button>
+              <p class="ai-run-hint">
+                This will run all selected files and compare with their ground truth.
+              </p>
+              <span id="batch-status"
+                    style="font-size:13px;color:var(--text-secondary)"></span>
+            </div>
+          </div>
+        </div>
+
+        <div id="acc-live-section">
+          <div class="run-model-sticky run-model-sticky-live" data-run-model-banner>
+            Comparison model:
+            <strong data-run-model-label>—</strong>
+          </div>
+
+          <div style="display:flex;gap:16px;flex-wrap:wrap;
+                      margin-bottom:20px">
+            <div class="card"
+                 style="flex:1;min-width:100px;padding:16px;
+                        margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700"
+                   id="acc-stat-total">0</div>
+              <div style="font-size:12px;
+                          color:var(--text-secondary)">Total</div>
+            </div>
+            <div class="card"
+                 style="flex:1;min-width:100px;padding:16px;
+                        margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700;
+                          color:var(--success)"
+                   id="acc-stat-passed">0</div>
+              <div style="font-size:12px;
+                          color:var(--text-secondary)">Done</div>
+            </div>
+            <div class="card"
+                 style="flex:1;min-width:100px;padding:16px;
+                        margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700"
+                   id="acc-stat-rate">—</div>
+              <div style="font-size:12px;
+                          color:var(--text-secondary)">Done Rate</div>
+            </div>
+            <div class="card stat-card-tip"
+                 style="flex:1;min-width:100px;padding:16px;
+                        margin-bottom:0;text-align:center"
+                 data-accuracy-overall-tip data-tooltip-trigger>
+              <div style="font-size:22px;font-weight:700"
+                   id="acc-stat-accuracy">—</div>
+              <div style="font-size:12px;
+                          color:var(--text-secondary)">
+                Avg Accuracy
+              </div>
+              <div class="reason-popup stat-tip-popup" role="tooltip"></div>
+            </div>
+          </div>
+
+          <div class="results-stack" data-results-source="history">
+            <div class="table-panel" data-results-source="history">
+              <div class="table-toolbar">
+                <h3 class="table-toolbar-title">Recent Test Runs</h3>
+                <div class="table-toolbar-right">
+                  <div class="export-dropdown" data-batch-export>
+                    <button type="button" class="btn-outline" data-batch-export-toggle
+                            aria-haspopup="true" aria-expanded="false">Download Report ▾</button>
+                    <div class="export-menu" hidden>
+                      <button type="button" class="export-menu-item" data-download-total-report="pdf">Run report PDF</button>
+                      <button type="button" class="export-menu-item" data-download-total-report="excel">Run report Excel</button>
+                      <div class="export-menu-divider" role="separator"></div>
+                      <button type="button" class="export-menu-item" data-download-soap-batch="pdf">SOAP batch PDF</button>
+                      <button type="button" class="export-menu-item" data-download-soap-batch="excel">SOAP batch Excel</button>
+                      <button type="button" class="export-menu-item" data-download-soap-batch="csv">SOAP batch CSV</button>
+                      <button type="button" class="export-menu-item" data-download-soap-batch="html">SOAP batch HTML</button>
+                      <button type="button" class="export-menu-item" data-download-soap-batch="json">SOAP batch JSON</button>
+                    </div>
+                  </div>
+                  <span id="acc-detail-batch-status"
+                        style="font-size:13px;color:var(--text-secondary)"></span>
+                  <select id="history-filter" class="config-input"
+                          onchange="onHistoryFilterChange()">
+                    <option value="current">Current Session Only</option>
+                    <option value="today">Today's Results</option>
+                    <option value="last7">Last 7 Days</option>
+                    <option value="all">All Previous Results</option>
+                  </select>
+                </div>
+              </div>
+              <div class="table-tabs" data-table-tabs>
+                <button type="button" class="table-tab active"
+                        data-table-tab="results"
+                        onclick="switchTableTab('results', this)">Results</button>
+                <button type="button" class="table-tab"
+                        data-table-tab="latency"
+                        onclick="switchTableTab('latency', this)">Latency</button>
+                <div class="table-tabs-right">
+                  <input type="search" class="config-input table-row-filter"
+                         data-table-filter
+                         placeholder="Filter by Test Case ID or file"
+                         oninput="onResultsTableFilter(this)">
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="runs-table" data-table="results-runs">
+                  <thead>
+                    <tr>
+                      <th>Test Case ID</th>
+                      <th>Audio File</th>
+                      <th>Language</th>
+                      <th>SOAP accuracy</th>
+                      <th>Clinical Quality</th>
+                      <th>Execution Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="acc-summary-tbody">
+                    <tr>
+                      <td colspan="6" class="empty-row">
+                        No previous test cases yet
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <p class="latency-note" data-latency-note hidden>
+                  SOAP is Flask <code>llm-time</code> (SOAP/summary generation).
+                  Missing timings show as unavailable.
+                </p>
+                <div class="table-pager" data-table-pager></div>
+              </div>
+            </div>
+
+            <section class="card run-summary" data-section="run-summary"
+                     data-results-source="history">
+              <h3>Summary</h3>
+              <div class="run-summary-body">
+                <div class="run-summary-grid">
+                  <div>
+                    <div class="stat-value" data-summary-field="total_test_cases">—</div>
+                    <div class="stat-label">Total test cases</div>
+                  </div>
+                  <div>
+                    <div class="stat-value" data-summary-field="done_tests">—</div>
+                    <div class="stat-label">Done</div>
+                  </div>
+                  <div class="stat-card-tip" data-accuracy-overall-tip data-tooltip-trigger>
+                    <div class="stat-value" data-summary-field="average_accuracy">—</div>
+                    <div class="stat-label">Average accuracy</div>
+                    <div class="reason-popup stat-tip-popup" role="tooltip"></div>
+                  </div>
+                  <div>
+                    <div class="stat-value" data-summary-field="average_latency">—</div>
+                    <div class="stat-label">Average latency</div>
+                  </div>
+                  <div>
+                    <div class="stat-value" data-summary-field="selected_model">—</div>
+                    <div class="stat-label">Selected GPT/LLM model</div>
+                  </div>
+                </div>
+                <aside class="quality-bands" data-quality-bands>
+                  <div class="quality-bands-title">Clinical Quality Bands</div>
+                  <ul class="quality-bands-list">
+                    <li>
+                      <span class="quality-band-dot quality-acceptable" aria-hidden="true"></span>
+                      <span class="quality-band-copy">
+                        <span class="quality-band-name">Clinically Acceptable</span>
+                        <span class="quality-band-range">90–100%</span>
+                      </span>
+                    </li>
+                    <li>
+                      <span class="quality-band-dot quality-minor" aria-hidden="true"></span>
+                      <span class="quality-band-copy">
+                        <span class="quality-band-name">Minor Deviation</span>
+                        <span class="quality-band-range">80–89%</span>
+                      </span>
+                    </li>
+                    <li>
+                      <span class="quality-band-dot quality-moderate" aria-hidden="true"></span>
+                      <span class="quality-band-copy">
+                        <span class="quality-band-name">Moderate Deviation</span>
+                        <span class="quality-band-range">70–79%</span>
+                      </span>
+                    </li>
+                    <li>
+                      <span class="quality-band-dot quality-major" aria-hidden="true"></span>
+                      <span class="quality-band-copy">
+                        <span class="quality-band-name">Major Deviation</span>
+                        <span class="quality-band-range">0–69%</span>
+                      </span>
+                    </li>
+                  </ul>
+                </aside>
+              </div>
+              <p class="run-summary-meta" data-summary-field="meta"></p>
+            </section>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Detail View (Case details) -->
+      <div id="detail-view" class="page-view" data-page="detail" data-open-test-id="">
+        <div class="case-top-bar">
+          <button id="back-btn" class="case-back-btn" type="button"
+                  onclick="backToDashboardFromDetail()">← Back to Recordings</button>
+          <span class="case-top-tc" id="case-top-tc"></span>
+          <span class="case-top-lang" id="case-top-lang"></span>
+          <span class="case-top-pill case-top-deid" id="case-top-deid" hidden>De-identified</span>
+          <span class="case-top-status" id="case-top-status" hidden></span>
+        </div>
+
+        <div class="case-detail-card" id="case-detail-card">
+          <div class="case-detail-header" id="case-detail-header" aria-label="Case summary"></div>
+
+          <div class="case-detail-tabs" id="case-detail-tabs" role="tablist"
+               aria-label="Case detail sections">
+            <button type="button" class="case-tab is-active" role="tab"
+                    data-case-tab="clinical" aria-selected="true">Clinical Facts</button>
+            <button type="button" class="case-tab" role="tab"
+                    data-case-tab="soap" aria-selected="false">SOAP</button>
+            <button type="button" class="case-tab" role="tab"
+                    data-case-tab="translation" aria-selected="false">Translation</button>
+            <button type="button" class="case-tab" role="tab"
+                    data-case-tab="transcription" aria-selected="false">Transcription</button>
+            <button type="button" class="case-tab" role="tab"
+                    data-case-tab="audio" aria-selected="false">Audio / Transcript</button>
+          </div>
+
+          <div class="case-tab-panel" data-case-panel="clinical" id="case-panel-clinical"
+               role="tabpanel">
+            <div id="recording-clinical-detail" data-recording-clinical-detail hidden></div>
+          </div>
+          <div class="case-tab-panel" data-case-panel="soap" id="case-panel-soap"
+               role="tabpanel" hidden>
+            <div id="gt-comparison-host"></div>
+          </div>
+          <div class="case-tab-panel" data-case-panel="translation" id="case-panel-translation"
+               role="tabpanel" hidden>
+            <div id="case-translation-host"></div>
+          </div>
+          <div class="case-tab-panel" data-case-panel="transcription" id="case-panel-transcription"
+               role="tabpanel" hidden>
+            <div id="case-transcription-host"></div>
+          </div>
+          <div class="case-tab-panel" data-case-panel="audio" id="case-panel-audio"
+               role="tabpanel" hidden>
+            <div id="detail-case-materials"></div>
+          </div>
+        </div>
+
+        <!-- Legacy hosts kept for existing export / comparison helpers -->
+        <div id="detail-stat-block" hidden>
+          <div id="accuracy-summary"></div>
+        </div>
+        <div id="latency-section" class="latency-strip" hidden></div>
+        <div id="detail-info-pairs" hidden></div>
+        <div id="flask-error-banner"
+             style="display:none; background:#FFF3CD; color:#856404;
+                    padding:0.75rem 1rem; border-radius:8px; margin:1rem 0;
+                    font-size:13px; border:1px solid #FFECB5;">
+        </div>
+        <div id="detail-comparison-tabs" class="table-panel" data-detail-cmp-panel hidden>
+          <div class="table-tabs" data-detail-cmp-tabs>
+            <button type="button" class="table-tab active"
+                    data-detail-cmp-tab="summary"
+                    onclick="switchDetailComparisonTab('summary', this)">Summary</button>
+            <button type="button" class="table-tab"
+                    data-detail-cmp-tab="detail"
+                    onclick="switchDetailComparisonTab('detail', this)">Detail</button>
+            <button type="button" class="table-tab"
+                    data-detail-cmp-tab="soap-gt-report"
+                    onclick="switchDetailComparisonTab('soap-gt-report', this)">Comparison Report</button>
+          </div>
+          <div id="detail-cmp-summary" class="table-tab-content"
+               data-detail-cmp-panel-id="summary">
+          </div>
+          <div id="detail-cmp-detail" class="table-tab-content"
+               data-detail-cmp-panel-id="detail" hidden>
+            <div id="detail-sections"></div>
+          </div>
+          <div id="detail-cmp-soap-gt-report" class="table-tab-content"
+               data-detail-cmp-panel-id="soap-gt-report" hidden>
+            <div id="soap-gt-report-host"></div>
+          </div>
+        </div>
 
         <section class="card" id="errors-section" style="display:none">
           <h3>Errors</h3>
           <pre id="errors-box" class="errors-box"></pre>
         </section>
       </div>
+
+      <div id="load-testing-view" class="page-view" data-page="load-testing">
+
+        <!-- Page Header -->
+        <header class="page-header">
+          <div>
+            <h1>Load Testing</h1>
+            <p class="subtitle">
+              Test system performance under load with multiple doctor–patient sessions.
+            </p>
+          </div>
+          <div class="header-actions">
+            <button class="btn-primary" type="button" id="lt-start-btn"
+                    onclick="ltStartTest()">
+              ▶ Start Load Test
+            </button>
+          </div>
+        </header>
+
+        <!-- Section 1: Doctor & Patient Setup -->
+        <div class="card" style="margin-bottom:20px">
+          <div style="display:flex;justify-content:space-between;
+                      align-items:center;margin-bottom:16px">
+            <div>
+              <h3 style="margin-bottom:4px">1. Doctor &amp; Patient Setup
+                <span style="font-size:13px;font-weight:400;color:var(--text-secondary);
+                             margin-left:8px">ⓘ</span>
+              </h3>
+              <p class="subtitle">Each row represents one doctor–patient pair (1 to 1).</p>
+            </div>
+            <div style="display:flex;gap:10px">
+              <button class="btn-outline" type="button"
+                      onclick="ltAddRow()">+ Add Row</button>
+              <button class="btn-outline" type="button"
+                      onclick="ltImportExcel()">⬆ Import from Excel</button>
+              <input type="file" id="lt-excel-input" accept=".xlsx"
+                     style="display:none" onchange="ltHandleExcel(this)">
+            </div>
+          </div>
+
+          <table class="runs-table" id="lt-doctor-table">
+            <thead>
+              <tr>
+                <th>Username / Phone Number</th>
+                <th>Password</th>
+                <th>Patient ID</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="lt-doctor-tbody">
+              <!-- rows injected by JS -->
+            </tbody>
+          </table>
+          <p style="margin-top:12px;font-size:13px;color:var(--text-secondary)"
+             id="lt-row-count">Total Rows: 0</p>
+        </div>
+
+        <!-- Section 2: Audio & Ground Truth -->
+        <div class="card" style="margin-bottom:20px">
+
+          <div style="display:flex;justify-content:space-between;
+                      align-items:center;margin-bottom:16px">
+            <div>
+              <h3 style="margin-bottom:4px">
+                2. Audio &amp; Ground Truth
+              </h3>
+              <p class="subtitle">
+                Provide audio and ground truth files per patient.
+              </p>
+            </div>
+
+            <div style="display:flex;gap:0;border:1px solid var(--border);
+                        border-radius:8px;overflow:hidden">
+              <button type="button" id="lt-mode-drive"
+                      onclick="ltSetMode('drive')"
+                      style="padding:8px 16px;font-size:13px;font-weight:600;
+                             border:none;cursor:pointer;
+                             background:var(--primary);color:white">
+                ☁ Google Drive
+              </button>
+              <button type="button" id="lt-mode-manual"
+                      onclick="ltSetMode('manual')"
+                      style="padding:8px 16px;font-size:13px;font-weight:600;
+                             border:none;cursor:pointer;
+                             background:white;color:var(--text-secondary)">
+                ⬆ Manual Upload
+              </button>
+            </div>
+          </div>
+
+          <div id="lt-drive-mode">
+
+            <div style="display:flex;align-items:center;gap:10px;
+                        padding:10px 14px;background:var(--primary-light);
+                        border-radius:8px;margin-bottom:14px;
+                        border:1px solid #D0C9F5">
+              <span style="font-size:16px">🔑</span>
+              <div style="flex:1">
+                <div style="font-size:11px;font-weight:600;
+                            text-transform:uppercase;letter-spacing:0.04em;
+                            color:var(--text-secondary);margin-bottom:2px">
+                  Share your Drive folder with this service account
+                </div>
+                <div style="font-size:13px;font-family:var(--font-mono);
+                            color:var(--primary)" id="lt-service-email">
+                  Loading...
+                </div>
+              </div>
+              <button type="button" onclick="ltCopyServiceEmail()"
+                      class="btn-outline"
+                      style="font-size:12px;padding:6px 12px;white-space:nowrap">
+                📋 Copy Email
+              </button>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:10px;
+                        border:1px solid var(--border);border-radius:8px;
+                        padding:10px 14px;background:white;margin-bottom:10px">
+              <span style="font-size:18px">🔷</span>
+              <input type="text" id="lt-drive-link"
+                     placeholder="https://drive.google.com/drive/folders/xxxxx"
+                     style="flex:1;border:none;outline:none;font-size:14px;
+                            color:var(--text-primary);background:transparent">
+              <button type="button" onclick="ltVerifyDriveFolder()"
+                      class="btn-outline"
+                      style="font-size:12px;padding:6px 12px;white-space:nowrap">
+                Verify
+              </button>
+            </div>
+
+            <div id="lt-drive-status" style="display:none;font-size:13px;
+                 padding:8px 12px;border-radius:6px;margin-bottom:10px"></div>
+
+            <div style="padding:10px 14px;background:var(--bg);
+                        border-radius:8px;font-size:13px;
+                        color:var(--text-secondary);
+                        display:flex;gap:8px;align-items:flex-start;
+                        border:1px solid var(--border)">
+              <span>ℹ</span>
+              <span>
+                Files in the folder should be named by patient ID.<br>
+                <code style="font-family:var(--font-mono)">
+                  e.g. 101_audio.wav / 101_ground_truth.txt
+                </code><br>
+                If a patient ID has no matching file, a silent WAV
+                fallback will be used for audio and ground truth
+                will be skipped.
+              </span>
+            </div>
+
+          </div>
+
+          <div id="lt-manual-mode" style="display:none">
+
+            <p class="subtitle" style="margin-bottom:14px">
+              Upload audio and ground truth files per patient row.
+              Files are matched to rows by position.
+            </p>
+
+            <div id="lt-per-row-uploads">
+            </div>
+
+            <div style="margin-top:20px;padding:16px;background:var(--bg);
+                        border:1px dashed var(--border);border-radius:10px">
+              <div style="font-size:13px;font-weight:600;
+                          margin-bottom:10px;color:var(--text-primary)">
+                Bulk Upload (optional)
+              </div>
+              <p class="subtitle" style="margin-bottom:12px">
+                Upload multiple audio or ground truth files at once.
+                Files named <code style="font-family:var(--font-mono)">
+                {patient_id}_audio.*</code> and
+                <code style="font-family:var(--font-mono)">
+                {patient_id}_ground_truth.*</code> will be
+                auto-matched to rows by patient ID.
+              </p>
+              <div style="display:flex;gap:10px;flex-wrap:wrap">
+                <label style="display:flex;align-items:center;gap:8px;
+                              padding:8px 16px;border:1px solid var(--border);
+                              border-radius:8px;cursor:pointer;
+                              background:white;font-size:13px">
+                  <input type="file" id="lt-bulk-audio"
+                         accept="audio/*,.wav,.mp3,.m4a" multiple
+                         style="display:none"
+                         onchange="ltHandleBulkUpload(this,'audio')">
+                  🎙 Upload Audio Files
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;
+                              padding:8px 16px;border:1px solid var(--border);
+                              border-radius:8px;cursor:pointer;
+                              background:white;font-size:13px">
+                  <input type="file" id="lt-bulk-gt"
+                         accept=".txt,.doc,.docx" multiple
+                         style="display:none"
+                         onchange="ltHandleBulkUpload(this,'gt')">
+                  📋 Upload Ground Truth Files
+                </label>
+              </div>
+              <div id="lt-bulk-status"
+                   style="margin-top:10px;font-size:13px;
+                          color:var(--text-secondary)"></div>
+            </div>
+
+          </div>
+
+        </div>
+
+        <!-- Section 3: Config -->
+        <div class="card" style="margin-bottom:20px">
+          <h3 style="margin-bottom:12px">3. Config (Optional)</h3>
+          <p class="subtitle" style="margin-bottom:14px">
+            Import or export your test configuration.
+          </p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn-outline" type="button"
+                    onclick="ltImportExcel()">⬆ Import from Excel</button>
+            <button class="btn-outline" type="button"
+                    onclick="ltExportConfig()">⬇ Export Config (JSON)</button>
+            <button class="btn-outline" type="button"
+                    onclick="ltImportConfig()">⬆ Import Config (JSON)</button>
+            <input type="file" id="lt-config-input" accept=".json"
+                   style="display:none" onchange="ltHandleConfigImport(this)">
+          </div>
+        </div>
+
+        <!-- Live Results (hidden until run starts) -->
+        <div id="lt-results-section" style="display:none">
+
+          <!-- Stats bar -->
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:20px">
+            <div class="card" style="flex:1;min-width:120px;padding:16px;
+                                      margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700" id="lt-stat-total">0</div>
+              <div style="font-size:12px;color:var(--text-secondary)">Total Sessions</div>
+            </div>
+            <div class="card" style="flex:1;min-width:120px;padding:16px;
+                                      margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700;color:var(--success)"
+                   id="lt-stat-passed">0</div>
+              <div style="font-size:12px;color:var(--text-secondary)">Passed</div>
+            </div>
+            <div class="card" style="flex:1;min-width:120px;padding:16px;
+                                      margin-bottom:0;text-align:center">
+              <div style="font-size:22px;font-weight:700" id="lt-stat-passrate">—</div>
+              <div style="font-size:12px;color:var(--text-secondary)">Pass Rate</div>
+            </div>
+          </div>
+
+          <!-- Live table -->
+          <div class="card" style="margin-bottom:20px">
+            <div style="display:flex;justify-content:space-between;
+                        align-items:center;margin-bottom:16px">
+              <h3 id="lt-run-id-label" style="font-size:14px;
+                                               color:var(--text-secondary);
+                                               font-weight:400">
+                Run ID: —
+              </h3>
+              <button class="btn-outline" type="button"
+                      id="lt-export-btn" style="display:none"
+                      onclick="ltExportResults()">
+                ⬇ Download Results (Excel)
+              </button>
+            </div>
+            <div class="table-wrap">
+              <table class="runs-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Phone</th>
+                    <th>Patient ID</th>
+                    <th>Stage</th>
+                    <th>Latency</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="lt-live-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Timing summary (shown after all done) -->
+          <div class="card" id="lt-timing-summary" style="display:none">
+            <h3 style="margin-bottom:16px">Results Summary</h3>
+            <table class="runs-table" id="lt-timing-table">
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Avg (s)</th>
+                </tr>
+              </thead>
+              <tbody id="lt-timing-tbody"></tbody>
+            </table>
+          </div>
+
+        </div><!-- end lt-results-section -->
+
+      </div><!-- end load-testing-view -->
     </main>
+    </div>
+  </div>
+
+  <div id="how-it-works-modal" class="hiw-backdrop" data-how-it-works-panel hidden>
+    <div class="hiw-dialog" role="dialog" aria-modal="true"
+         aria-labelledby="how-it-works-title">
+      <div class="hiw-dialog-header">
+        <h2 id="how-it-works-title">How It Works</h2>
+        <button type="button" class="btn-outline" data-how-it-works-close>
+          Close
+        </button>
+      </div>
+      <ol class="hiw-steps" data-how-it-works-steps>
+        <li data-hiw-step="1">
+          <strong>Add/select audio files</strong>
+          <p>Select which Drive audio files to include. Local uploads can appear in the file list, but Run All executes only remaining Drive files (matched against Drive discovery). Exclude drops a file from this run only — Drive and catalog sources are not deleted. An empty Drive selection runs nothing.</p>
+        </li>
+        <li data-hiw-step="2">
+          <strong>Provide/upload Ground Truth</strong>
+          <p>Ground truth is the matching Drive sidecar: a transcript, plus optional translation or SOAP files. A case with no transcription ground truth still runs, but accuracy is NOT_SCORED, not 0%.</p>
+        </li>
+        <li data-hiw-step="3">
+          <strong>Select GPT/LLM model</strong>
+          <p>Pick the comparison model used to score generated text against ground truth. That is separate from MedSum’s own STT, translation, and SOAP models.</p>
+        </li>
+        <li data-hiw-step="4">
+          <strong>Start the test</strong>
+          <p>Click Run All Tests. Each doctor may have one patient. Only the selected Drive files are executed. Execution Status is Completed, Error, or Not evaluated — or NOT_SCORED when accuracy was not generated. SOAP accuracy shows the SOAP percentage as N% accuracy. Low SOAP accuracy is not an execution error.</p>
+        </li>
+        <li data-hiw-step="5">
+          <strong>Transcribe the audio</strong>
+          <p>The harness sends audio to Flask /transcribe and reads back the generated transcript plus the API’s transcription-time.</p>
+        </li>
+        <li data-hiw-step="6">
+          <strong>Generate translation</strong>
+          <p>The same /transcribe response includes a translation when the pipeline ran one. English often reports translation-time as 0 because no translation step ran.</p>
+        </li>
+        <li data-hiw-step="7">
+          <strong>Generate SOAP output</strong>
+          <p>SOAP/summary is the Flask LLM step. The API returns one llm-time figure for that work — there is no separate SOAP timer.</p>
+        </li>
+        <li data-hiw-step="8">
+          <strong>Compare generated output with Ground Truth</strong>
+          <p>An LLM judges medical-meaning similarity (not exact string match) of generated vs ground-truth transcription, and translation/SOAP when those ground truths exist. SOAP accuracy is the Prompt 1 weighted clinical score when SOAP ground truth exists, shown as N% accuracy. Clinical Quality maps that into Clinically Acceptable / Minor Deviation / Moderate Deviation / Major Deviation.</p>
+        </li>
+        <li data-hiw-step="9">
+          <strong>Calculate accuracy and latency</strong>
+          <p>Average accuracy is the mean of scored transcription similarities; NOT_SCORED cases are omitted, not counted as 0%. The Done KPI counts finished executions, not accuracy bands. Latency is Flask transcription-time, translation-time, llm-time (SOAP), and total-time. Missing timings show as unavailable.</p>
+        </li>
+        <li data-hiw-step="10">
+          <strong>Review individual test cases or download the complete report</strong>
+          <p>Click a row for per-field scores and case materials. Download one row or Download Total Report for the run (overall counts, accuracy, latency, per-case detail).</p>
+        </li>
+      </ol>
+    </div>
+  </div>
+
+  <div id="gt-edit-modal" class="hiw-backdrop" hidden>
+    <div class="hiw-dialog gt-edit-dialog" role="dialog" aria-modal="true"
+         aria-labelledby="gt-edit-title">
+      <div class="hiw-dialog-header">
+        <h2 id="gt-edit-title">Edit Ground Truth</h2>
+        <button type="button" class="btn-outline" data-gt-edit-cancel>Cancel</button>
+      </div>
+      <p class="gt-edit-filename" id="gt-edit-filename"></p>
+      <p class="gt-edit-hint">
+        Each field is optional. Save stores whatever is filled; clearing a field
+        removes that ground truth.
+      </p>
+      <form id="gt-edit-form">
+        <label class="gt-edit-label" for="gt-edit-transcription">Transcription</label>
+        <textarea id="gt-edit-transcription" class="gt-edit-textarea" rows="6"
+                  placeholder="Reference transcript (original language)"></textarea>
+        <label class="gt-edit-label" for="gt-edit-translation">Translation</label>
+        <textarea id="gt-edit-translation" class="gt-edit-textarea" rows="6"
+                  placeholder="Reference English translation"></textarea>
+        <fieldset class="gt-edit-soap">
+          <legend>SOAP</legend>
+          <div class="gt-edit-soap-toolbar">
+            <div class="gt-edit-soap-toggle" role="group" aria-label="SOAP input mode">
+              <button type="button" id="gt-soap-mode-form" data-soap-gt-mode="form"
+                      class="is-active" aria-pressed="true">Form</button>
+              <button type="button" id="gt-soap-mode-json" data-soap-gt-mode="json"
+                      aria-pressed="false">JSON</button>
+            </div>
+          </div>
+          <div id="gt-edit-soap-form-pane">
+            <div id="gt-edit-soap-fields"></div>
+          </div>
+          <div id="gt-edit-soap-json-pane" hidden>
+            <label class="gt-edit-label" for="gt-edit-soap-json">SOAP JSON</label>
+            <textarea id="gt-edit-soap-json" class="gt-edit-json" rows="14"
+                      spellcheck="false"
+                      placeholder='{"subjective": {"chief_complaint": "..."}, "objective": {}, "assessment": {}, "plan": {}}'></textarea>
+            <p class="gt-edit-json-hint">
+              Paste a nested consult
+              <code>{"subjective": {...}, "objective": {...}, "assessment": {...}, "plan": {...}}</code>
+              or a fact list
+              <code>{"facts": [{"section": "Subjective", "field": "Chief complaint", "value": "..."}]}</code>.
+            </p>
+          </div>
+          <div id="gt-edit-soap-messages" class="gt-edit-soap-messages" hidden></div>
+        </fieldset>
+        <div class="gt-edit-actions">
+          <button type="button" class="btn-outline" data-gt-edit-cancel>Cancel</button>
+          <button type="submit" class="btn-primary" id="gt-edit-save">Save</button>
+        </div>
+      </form>
+    </div>
   </div>
 
   <div id="toast" class="toast" style="display:none"></div>
+  <div id="medsum-tooltip-layer" class="medsum-tooltip-layer" hidden>
+    <div id="medsum-tooltip-popup" class="reason-popup medsum-tooltip-popup" role="tooltip"></div>
+  </div>
+  <script src="/js/how_it_works.js"></script>
+  <script src="/js/session_persist.js"></script>
+  <script src="/js/page_nav.js"></script>
+  <script src="/js/doctor_patient.js"></script>
+  <script src="/js/audio_selection.js"></script>
+  <script src="/js/test_case_view.js"></script>
+  <script src="/js/gt_comparison_table.js"></script>
+  <script src="/js/soap_summary_nav.js"></script>
+  <script src="/js/soap_comparison_tab.js"></script>
+  <script src="/js/soap_gt_comparison_report.js"></script>
+  <script src="/js/accuracy_tooltip.js"></script>
+  <script src="/js/tooltip_position.js"></script>
+  <script src="/js/latency_analysis.js"></script>
+  <script src="/js/run_summary.js"></script>
+  <script src="/js/accuracy_table.js"></script>
+  <script src="/js/recording_detail.js"></script>
+  <script src="/js/accuracy_chart.js"></script>
+  <script src="/js/results_actions.js"></script>
+  <script src="/js/results_table.js"></script>
   <script src="/js/medsum_test.js"></script>
 </body>
 </html>

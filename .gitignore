@@ -2,9 +2,26 @@ config/medsum_config.yaml
 credentials/*.json
 results/
 medsum_test.log
+*.log
 
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+build/
+dist/
 .env
 .venv/
 venv/
+
+# Tooling / editor
+.kilo/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

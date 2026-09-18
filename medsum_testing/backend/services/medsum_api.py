@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from medsum_testing.backend.services.config_loader import clear_runtime, get_runtime
+from medsum_testing.backend.services.user_errors import user_facing_error
 
 log = logging.getLogger("medsum")
 
@@ -76,6 +77,24 @@ SOAP_CONSULT_TEMPLATE: dict[str, Any] = {
 }
 
 
+def supported_language_labels() -> tuple[str, ...]:
+    """Drive folder labels after extract_language (capitalize). Same API set."""
+    return tuple(name.capitalize() for name in LANGUAGE_CODE_MAP)
+
+
+def canonical_language_label(raw: str | None) -> str:
+    """Map a folder name or API code onto a supported Drive label, else ''."""
+    key = str(raw or "").strip().lower()
+    if not key:
+        return ""
+    if key in LANGUAGE_CODE_MAP:
+        return key.capitalize()
+    for name, code in LANGUAGE_CODE_MAP.items():
+        if key == code:
+            return name.capitalize()
+    return ""
+
+
 def normalize_language(language: str) -> str:
     """Convert 'Malayalam' → 'ml', 'Hindi' → 'hi', etc."""
     key = language.lower().strip()
@@ -102,10 +121,8 @@ def _flask_transcribe_url(config: dict) -> str:
 
 
 def _auth_headers(token: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
+    """JWT Bearer only — do not set Content-Type (GET has no body; POST json= sets it)."""
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _extract_summary(body: dict) -> str:
@@ -128,30 +145,51 @@ def _extract_summary(body: dict) -> str:
     return text
 
 
-def authenticate_doctor(config: dict) -> tuple[str, str]:
+def authenticate_doctor(
+    config: dict,
+    *,
+    force: bool = False,
+    phone: str | None = None,
+    password: str | None = None,
+) -> tuple[str, str]:
     """
     POST /api/login/
     Request:  { "phone_number": "...", "password": "..." }
     Response: { "access": "...", "refresh": "...", "user": {...} }
     Returns:  (access_token, doctor_id)
+
+    If phone/password are provided they override YAML doctor credentials
+    and the cached token is not reused.
     """
-    clear_runtime()
     runtime = get_runtime()
+    override = phone is not None or password is not None
+    if not force and not override and runtime.get("access_token"):
+        doctor_id = runtime.get("doctor_id") or str((config.get("doctor") or {}).get("id", ""))
+        log.info("AUTH ✓ using cached token — doctor_id: %s", doctor_id)
+        return runtime["access_token"], str(doctor_id)
+
+    if force:
+        clear_runtime()
+        runtime = get_runtime()
 
     base_url = config["backends"]["django_base_url"].rstrip("/")
     login_path = config["backends"].get("login_path", "/api/login/")
     url = f"{base_url}{login_path}"
 
-    doctor = config["doctor"]
-    phone_number = doctor.get("phone_number") or doctor.get("username", "")
-    password = doctor["password"]
+    doctor = config.get("doctor") or {}
+    phone_number = phone if phone is not None else (
+        doctor.get("phone_number") or doctor.get("username", "")
+    )
+    login_password = password if password is not None else doctor.get("password", "")
+    if not phone_number or not login_password:
+        raise AuthError("AUTH_FAILED: phone_number and password are required")
 
     log.info("AUTH → POST %s", url)
     log.info("AUTH   phone_number: %s", phone_number)
 
     payload = {
         "phone_number": phone_number,
-        "password": password,
+        "password": login_password,
     }
 
     try:
@@ -262,10 +300,29 @@ def fetch_doctor_profile(doctor_id: str, token: str, config: dict) -> dict[str, 
         return fallback
 
 
+def _format_patient_age(age) -> str:
+    """API returns age as a float (e.g. 30.0); pass a clean string downstream."""
+    if age is None or age == "":
+        return ""
+    try:
+        n = float(age)
+        return str(int(n)) if n.is_integer() else str(n)
+    except (TypeError, ValueError):
+        return str(age)
+
+
 def verify_patient(patient_id: str, token: str, config: dict) -> dict:
-    base_url = config["backends"]["django_base_url"].rstrip("/")
-    patient_path = config["backends"].get("patient_path", "/api/patient-data/")
-    url = f"{base_url}{patient_path}{patient_id}/"
+    """
+    GET /api/patient-data/<patient_id>/
+    Auth: JWT Bearer (doctor). No request body — path param only.
+    """
+    pid = str(patient_id or "").strip().strip("/")
+    if not pid:
+        raise PatientNotFoundError("PATIENT_ERROR: patient_id is required")
+
+    patient_path = (config.get("backends") or {}).get("patient_path") or "/api/patient-data/"
+    path = "/" + str(patient_path).strip("/") + "/"
+    url = f"{_django_base(config)}{path}{pid}/"
 
     log.info("PATIENT → GET %s", url)
 
@@ -276,15 +333,22 @@ def verify_patient(patient_id: str, token: str, config: dict) -> dict:
 
     if resp.status_code == 404:
         raise PatientNotFoundError(
-            f"PATIENT_NOT_FOUND: Patient ID '{patient_id}' not found.\n"
+            f"PATIENT_NOT_FOUND: Patient ID '{pid}' not found.\n"
             f"URL tried: {url}\n"
-            f"Check patient.id in medsum_config.yaml"
+            f"Check the Patient ID entered in the UI "
+            f"(or patient.id in medsum_config.yaml)"
         )
     if resp.status_code == 401:
-        raise PatientNotFoundError(
-            f"PATIENT_UNAUTHORIZED: Token rejected for patient lookup.\n"
+        raise AuthError(
+            f"PATIENT_UNAUTHORIZED: Doctor JWT rejected for patient lookup.\n"
             f"URL: {url}\n"
             f"Check that Bearer token is being sent correctly."
+        )
+    if resp.status_code == 403:
+        raise PatientNotFoundError(
+            f"PATIENT_FORBIDDEN: Doctor is not allowed to access patient '{pid}'.\n"
+            f"URL: {url}\n"
+            f"Response: {resp.text[:200]}"
         )
     if resp.status_code != 200:
         raise PatientNotFoundError(
@@ -292,14 +356,53 @@ def verify_patient(patient_id: str, token: str, config: dict) -> dict:
             f"Response: {resp.text[:200]}"
         )
 
-    data = resp.json()
+    data = resp.json() if resp.content else {}
+    if not isinstance(data, dict):
+        raise PatientNotFoundError(
+            f"PATIENT_ERROR: expected JSON object from {url}, got {type(data).__name__}"
+        )
+
+    canonical_id = data.get("patient_id")
+    if canonical_id is None or str(canonical_id).strip() == "":
+        raise PatientNotFoundError(
+            f"PATIENT_ERROR: response missing patient_id from {url}\n"
+            f"Keys: {list(data.keys())}"
+        )
+
     log.info(
-        "PATIENT ✓ found — patient_id=%s, name=%s, hospital_id=%s",
-        data.get("patient_id"),
+        "PATIENT ✓ found — patient_id=%s, name=%s, hospital_id=%s, age=%s, gender=%s",
+        canonical_id,
         data.get("patient_name"),
         data.get("hospital_id"),
+        data.get("age"),
+        data.get("gender"),
     )
     return data
+
+
+AUDIO_CONTENT_TYPES = {
+    ".mp3": "audio/mpeg",
+    ".mpeg": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".wave": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".mp4": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".webm": "audio/webm",
+    ".aac": "audio/aac",
+}
+
+
+def _audio_upload_meta(audio_filename: str) -> tuple[str, str]:
+    """Keep the original extension and MIME type; do not force .mp3 / audio/mpeg."""
+    name = audio_filename or "audio.mp3"
+    dot = name.rfind(".")
+    ext = name[dot:].lower() if dot >= 0 else ""
+    if ext in AUDIO_CONTENT_TYPES:
+        return name, AUDIO_CONTENT_TYPES[ext]
+    if ext:
+        return name, "application/octet-stream"
+    return f"{name}.mp3", "audio/mpeg"
 
 
 def upload_audio(
@@ -320,6 +423,11 @@ def upload_audio(
     """
     url = f"{_django_base(config)}/api/audio-data/"
     lang = normalize_language(language)
+    if not str(lang or "").strip():
+        raise RuntimeError(
+            "Language is required. Choose a language for this audio file, "
+            "then run the test again."
+        )
 
     log.info("AUDIO_UPLOAD → POST %s", url)
     log.info(
@@ -331,9 +439,9 @@ def upload_audio(
         len(audio_bytes),
     )
 
-    upload_name = audio_filename if audio_filename.endswith(".mp3") else f"{audio_filename}.mp3"
+    upload_name, content_type = _audio_upload_meta(audio_filename)
     files = {
-        "audio": (upload_name, audio_bytes, "audio/mpeg"),
+        "audio": (upload_name, audio_bytes, content_type),
     }
     data: dict[str, str] = {
         "patient_id": str(patient_id),
@@ -355,7 +463,9 @@ def upload_audio(
 
     if resp.status_code not in (200, 201):
         raise RuntimeError(
-            f"AUDIO_UPLOAD failed {resp.status_code}: {resp.text[:300]}"
+            user_facing_error(
+                f"AUDIO_UPLOAD failed {resp.status_code}: {resp.text[:300]}"
+            )
         )
 
     data_resp = resp.json()
@@ -392,15 +502,15 @@ def transcribe_audio(
         "doctor_department": doctor_data.get("department", ""),
         "hospital_name": doctor_data.get("hospital_name", ""),
         "patient_id": str(patient_data.get("patient_id", "")),
-        "patient_name": patient_data.get("patient_name", ""),
-        "age": str(patient_data.get("age", "")),
-        "gender": patient_data.get("gender", ""),
+        "patient_name": patient_data.get("patient_name") or "",
+        "age": _format_patient_age(patient_data.get("age")),
+        "gender": patient_data.get("gender") or "",
         "template": copy.deepcopy(SOAP_CONSULT_TEMPLATE),
         "template_id": int(llm_settings.get("template_id", 4)),
         "audio_base64": audio_b64,
         "isaudio": True,
         "language": lang,
-        "llm": llm_settings.get("llm_model", "Gemma"),
+        "llm": llm_settings.get("llm_model", "OpenAI"),
         "stt_model": llm_settings.get("stt_model", "Bhasini"),
         "translate_model": llm_settings.get("translation_type", "Bhasini"),
     }
@@ -543,3 +653,151 @@ def fetch_audio_data(session_id: str, token: str, config: dict) -> dict:
 
     log.info("FETCH_AUDIO_DATA ✓ response keys=%s", list(data.keys()) if isinstance(data, dict) else type(data))
     return data if isinstance(data, dict) else {}
+
+
+def get_runtime_state() -> dict:
+    """Return the current auth runtime state."""
+    return get_runtime()
+
+
+# Caller-supplied ids (often UUIDs) → Django batch_id strings like BATCH-20260818-001
+_BATCH_ID_MAP: dict[str, str] = {}
+
+_NON_TERMINAL_STATUSES = frozenset({"running", "pending"})
+_TERMINAL_STATUSES = frozenset({"finished", "failed", "skipped"})
+
+
+def _django_batch_id(value: Any) -> str | None:
+    """Resolve a caller batch_id to the Django BATCH-YYYYMMDD-001 string."""
+    if value is None:
+        return None
+    key = str(value).strip()
+    if not key:
+        return None
+    mapped = _BATCH_ID_MAP.get(key)
+    if mapped:
+        return mapped
+    if key.upper().startswith("BATCH-"):
+        return key
+    return None
+
+
+def create_batch(
+    batch_id: str,
+    ai_model: str,
+    config: dict,
+    token: str,
+    total_files: int = 0,
+) -> str:
+    """
+    POST /api/accuracy-testing/batches/create/
+    Django generates batch_id (BATCH-YYYYMMDD-001). That string is returned
+    and used for later run payloads / GET URLs.
+    """
+    base_url = config["backends"]["django_base_url"].rstrip("/")
+    path = config["backends"].get(
+        "at_batch_create", "/api/accuracy-testing/batches/create/"
+    )
+    url = f"{base_url}{path}"
+
+    payload = {
+        "ai_model": ai_model,
+        "total_files": total_files,
+    }
+
+    log.info("CREATE_BATCH → POST %s", url)
+    try:
+        resp = requests.post(
+            url,
+            json=payload,
+            headers=_auth_headers(token),
+            timeout=30,
+        )
+        log.info("CREATE_BATCH ← %s", resp.status_code)
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            django_batch_id = str(data.get("batch_id") or "").strip()
+            if not django_batch_id:
+                django_batch_id = str(data.get("batch_ref") or "").strip()
+            if batch_id and django_batch_id:
+                _BATCH_ID_MAP[str(batch_id)] = django_batch_id
+            log.info("CREATE_BATCH ✓ batch_id=%s", django_batch_id)
+            return django_batch_id
+        log.warning(
+            "CREATE_BATCH failed %s: %s",
+            resp.status_code,
+            resp.text[:200],
+        )
+    except Exception as exc:
+        log.warning("CREATE_BATCH error: %s", exc)
+    return ""
+
+
+def save_test_run(payload: dict, token: str, config: dict) -> dict:
+    """
+    POST /api/accuracy-testing/runs/create/
+    Rows are created only at a terminal status: finished, failed, or skipped.
+    Non-fatal — logs warning on failure, never raises.
+    """
+    if not config.get("features", {}).get("save_to_django_db", True):
+        log.info("SAVE_TEST_RUN: skipped (save_to_django_db=false in config)")
+        return payload
+
+    outgoing = dict(payload)
+    raw_status = outgoing.get("status")
+    status = str(raw_status or "").strip().lower()
+
+    if status in _NON_TERMINAL_STATUSES:
+        log.info(
+            "SAVE_TEST_RUN: skipped (status=%s — Django rows are created only at terminal state)",
+            status,
+        )
+        return payload
+
+    if status == "complete":
+        outgoing["status"] = "finished"
+        status = "finished"
+    elif status and status not in _TERMINAL_STATUSES:
+        outgoing["status"] = "skipped"
+        status = "skipped"
+
+    resolved_batch = _django_batch_id(outgoing.get("batch_id"))
+    if resolved_batch:
+        outgoing["batch_id"] = resolved_batch
+    elif "batch_id" in outgoing:
+        outgoing["batch_id"] = None
+
+    base_url = config["backends"]["django_base_url"].rstrip("/")
+    run_path = config["backends"].get(
+        "at_run_create", "/api/accuracy-testing/runs/create/"
+    )
+    url = f"{base_url}{run_path}"
+
+    log.info(
+        "SAVE_TEST_RUN → POST %s status=%s test_id=%s batch_id=%s",
+        url,
+        outgoing.get("status"),
+        outgoing.get("test_id"),
+        outgoing.get("batch_id"),
+    )
+
+    try:
+        resp = requests.post(
+            url,
+            json=outgoing,
+            headers=_auth_headers(token),
+            timeout=30,
+        )
+        log.info("SAVE_TEST_RUN ← %s", resp.status_code)
+        if resp.status_code in (200, 201):
+            log.info("SAVE_TEST_RUN ✓ saved to Django DB")
+            return resp.json()
+        log.warning(
+            "SAVE_TEST_RUN failed %s: %s",
+            resp.status_code,
+            resp.text[:200],
+        )
+    except Exception as exc:
+        log.warning("SAVE_TEST_RUN error (non-fatal): %s", exc)
+
+    return outgoing
