@@ -32,47 +32,6 @@ jobs:
           script: |
             set -e
 
-            echo "========================================"
-            echo "Starting deployment"
-            echo "========================================"
-
-            echo "Connected user:"
+            echo "SSH connection successful"
             whoami
-
-            echo "Server:"
             hostname
-
-            echo "Moving to deployment directory"
-            cd /home/developers/medsum-load-test
-
-            echo "Checking repository"
-            git rev-parse --show-toplevel
-            git remote -v
-
-            echo "Fetching latest master"
-            git fetch origin master
-
-            echo "Updating code"
-            git reset --hard origin/master
-
-            echo "Latest deployed commit:"
-            git log -1 --oneline
-
-            echo "Activating virtual environment"
-            source /home/developers/medsum-load-test/venv/bin/activate
-
-            echo "Python:"
-            python --version
-
-            echo "Installing base requirements"
-            python -m pip install -r requirements.txt
-
-            if [ -f requirements_medsum.txt ]; then
-              echo "Installing MedSum testing requirements"
-              python -m pip install -r requirements_medsum.txt
-            fi
-
-            echo "Checking installed dependencies"
-            python -m pip check
-
-            echo "Deployment completed successfully"
