@@ -20,12 +20,33 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare SSH private key
+        shell: bash
+        env:
+          SSH_KEY_B64: ${{ secrets.GCP_SSH_PRIVATE_KEY_B64 }}
+        run: |
+          set -e
+
+          umask 077
+
+          printf '%s' "$SSH_KEY_B64" | base64 --decode > "$GITHUB_WORKSPACE/gcp_deploy_key"
+
+          chmod 600 "$GITHUB_WORKSPACE/gcp_deploy_key"
+
+          echo "Validating private key..."
+
+          ssh-keygen -y \
+            -f "$GITHUB_WORKSPACE/gcp_deploy_key" \
+            > /dev/null
+
+          echo "SSH private key parsed successfully"
+
       - name: Test SSH connection
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.GCP_HOST }}
           username: ${{ secrets.GCP_USERNAME }}
-          key: ${{ secrets.GCP_SSH_PRIVATE_KEY }}
+          key_path: /github/workspace/gcp_deploy_key
           port: 22
           command_timeout: 15m
 
@@ -35,3 +56,4 @@ jobs:
             echo "SSH connection successful"
             whoami
             hostname
+            pwd
