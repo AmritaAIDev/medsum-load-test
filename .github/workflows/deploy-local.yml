@@ -50,7 +50,7 @@ jobs:
 
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      github.ref == 'refs/heads/main' &&
+      github.ref == 'refs/heads/master' &&
       inputs.confirmation == 'deploy'
 
     runs-on:
