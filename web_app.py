@@ -29,8 +29,11 @@ app = Flask(__name__)
 test_results = []
 
 # ── Change these two lines to point to a different environment ────────────────
-DJANGO_BASE_URL = "https://medsum.amritaai.org"
-FLASK_BASE_URL  = "https://test-medsum.amritaai.org/transcribe"
+# DJANGO_BASE_URL = "https://medsum.amritaai.org"
+# FLASK_BASE_URL  = "https://test-medsum.amritaai.org/transcribe"
+
+DJANGO_BASE_URL = "http://10.125.50.23"
+FLASK_BASE_URL  = "http://10.125.50.23/transcribe"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,118 @@
+
+name: MedSum QA and Load Testing - Local Deployment
+
+on:
+  push:
+    branches: [main]
+
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type deploy to deploy testing tools"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: medsum-testing-local-deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Run Testing Project Checks
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install gunicorn pytest
+
+      - name: Check Python syntax
+        run: |
+          python -m compileall -q medsum_testing web_app.py
+
+
+  deploy:
+    name: Deploy Testing Apps to 10.125.50.23
+    needs: test
+
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.confirmation == 'deploy'
+
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - medsum-testing-local
+
+    steps:
+      - name: Checkout approved commit
+        uses: actions/checkout@v4
+
+      - name: Deploy QA and Load Testing
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_DIR="/home/medsum-load-test"
+          VENV="$APP_DIR/.venv"
+
+          echo "Copying approved code"
+
+          # Exclude the runtime virtual environment and
+          # local configuration from synchronization.
+          rsync -a --delete \
+            --exclude='.venv/' \
+            --exclude='.env' \
+            --exclude='credentials/' \
+            --exclude='results/' \
+            --exclude='config/' \
+            --exclude='*.sqlite3' \
+            --exclude='__pycache__/' \
+            ./ "$APP_DIR/"
+
+          echo "Preparing virtual environment"
+
+          if [ ! -x "$VENV/bin/python" ]; then
+            python3 -m venv "$VENV"
+          fi
+
+          "$VENV/bin/python" -m pip install --upgrade pip
+          "$VENV/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
+          "$VENV/bin/python" -m pip install gunicorn
+
+          echo "Restarting QA Testing"
+          sudo -n /usr/bin/systemctl restart medsum_testing.service
+
+          echo "Restarting Load Testing"
+          sudo -n /usr/bin/systemctl restart medsum_loadtest.service
+
+          echo "Verifying services"
+          systemctl is-active --quiet medsum_testing.service
+          systemctl is-active --quiet medsum_loadtest.service
+
+          echo "Verifying QA route"
+          curl --fail --silent --show-error \
+            --retry 5 --retry-delay 2 \
+            http://127.0.0.1:5052/ > /dev/null
+
+          echo "Verifying Load Testing route"
+          curl --fail --silent --show-error \
+            --retry 5 --retry-delay 2 \
+            http://127.0.0.1:8006/ > /dev/null
+
+          echo "Deployment completed successfully"
